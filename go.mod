@@ -1,6 +1,6 @@
 module github.com/rakunlabs/ada
 
-go 1.24.0
+go 1.24
 
 require (
 	github.com/rakunlabs/logi v0.4.0
