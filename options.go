@@ -2,12 +2,13 @@ package ada
 
 import (
 	"log/slog"
-
-	"github.com/rakunlabs/logi/logadapter"
+	"time"
 )
 
 type option struct {
-	Logger logadapter.Adapter
+	Logger Logger
+
+	ShutdownTimeout time.Duration
 }
 
 type Option func(*option)
@@ -24,8 +25,15 @@ func getOption(opt option, opts ...Option) option {
 	return opt
 }
 
-func WithLogger(logger logadapter.Adapter) Option {
+func WithLogger(logger Logger) Option {
 	return func(opt *option) {
 		opt.Logger = logger
+	}
+}
+
+// WithShutdownTimeout sets the shutdown timeout, default is 10 seconds.
+func WithShutdownTimeout(timeout time.Duration) Option {
+	return func(opt *option) {
+		opt.ShutdownTimeout = timeout
 	}
 }

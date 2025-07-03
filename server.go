@@ -8,25 +8,31 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rakunlabs/logi/logadapter"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
 
-var ShutdownTimeout = 10 * time.Second
+var (
+	DefaultShutdownTimeout = 10 * time.Second
+	ErrAlreadyStarted      = errors.New("server started already")
+)
 
 type Server struct {
-	Mux    *http.ServeMux
-	server *http.Server
-	logger logadapter.Adapter
+	Mux             *Mux
+	server          *http.Server
+	logger          Logger
+	started         bool
+	shutdownTimeout time.Duration
 
 	m sync.Mutex
 }
 
-func New(ctx context.Context, fn func(ctx context.Context, mux *http.ServeMux) error, opts ...Option) (*Server, error) {
-	opt := getOption(option{}, opts...)
+func New(ctx context.Context, fn func(ctx context.Context, mux *Mux) error, opts ...Option) (*Server, error) {
+	opt := getOption(option{
+		ShutdownTimeout: DefaultShutdownTimeout,
+	}, opts...)
 
-	mux := http.NewServeMux()
+	mux := NewMux()
 
 	if err := fn(ctx, mux); err != nil {
 		return nil, fmt.Errorf("failed to create server: %w", err)
@@ -38,13 +44,42 @@ func New(ctx context.Context, fn func(ctx context.Context, mux *http.ServeMux) e
 	}, nil
 }
 
-func (s *Server) Start(addr string) error {
-	s.server = &http.Server{ //nolint:gosec // skip check in service
+func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
+	opt := getOption(option{
+		ShutdownTimeout: DefaultShutdownTimeout,
+	}, opts...)
+
+	return &Server{
+		Mux:    NewMux(),
+		logger: opt.Logger,
+	}, nil
+}
+
+func (s *Server) Start(ctx context.Context, addr string) error {
+	s.m.Lock()
+	if s.started {
+		return ErrAlreadyStarted
+	}
+
+	s.started = true
+	s.m.Unlock()
+
+	defer func() {
+		s.m.Lock()
+		s.started = false
+		s.m.Unlock()
+	}()
+
+	s.server = &http.Server{
 		Addr:    addr,
 		Handler: h2c.NewHandler(s.Mux, &http2.Server{}),
 	}
 
 	s.logger.Info("starting server", "addr", s.server.Addr)
+
+	context.AfterFunc(ctx, func() {
+		_ = s.Stop()
+	})
 
 	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("failed to start server: %w", err)
@@ -57,17 +92,13 @@ func (s *Server) Stop() error {
 	s.m.Lock()
 	defer s.m.Unlock()
 
-	if s.server == nil {
+	if !s.started {
 		return nil
 	}
 
 	s.logger.Warn("stopping server", "addr", s.server.Addr)
 
-	defer func() {
-		s.server = nil
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
 
 	if err := s.server.Shutdown(ctx); err != nil {
