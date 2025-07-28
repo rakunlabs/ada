@@ -3,8 +3,9 @@ import { defineConfig } from 'vitepress'
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
   title: "ada",
-  description: "Go Web Framework",
+  description: "Go Web Library",
   head: [['link', { rel: 'icon', href: '/assets/icon.png' }]],
+  base: "/ada/",
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
     nav: [

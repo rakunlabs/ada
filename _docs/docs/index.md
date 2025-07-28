@@ -4,7 +4,7 @@ layout: home
 
 hero:
   name: "ada"
-  text: "Go Web Framework"
+  text: "Go Web Library"
   # tagline: documentation
   image:
     src: /assets/ada.png
