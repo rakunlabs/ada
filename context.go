@@ -9,7 +9,7 @@ import (
 type contextKey string
 
 const (
-	AdaKey contextKey = "ada"
+	CtxKey contextKey = "ada"
 )
 
 type Context struct {
@@ -19,15 +19,15 @@ type Context struct {
 }
 
 func NewContext(r *http.Request) (*Context, *http.Request) {
-	// set ada value
-	ada := &Context{
+	// set adaCtx value
+	adaCtx := &Context{
 		V: make(map[string]any),
 	}
 
-	ctx := context.WithValue(r.Context(), AdaKey, ada)
+	ctx := context.WithValue(r.Context(), CtxKey, adaCtx)
 	r = r.WithContext(ctx)
 
-	return ada, r
+	return adaCtx, r
 }
 
 func (t *Context) Set(key string, value any) {
@@ -47,27 +47,7 @@ func (t *Context) Get(key string) (any, bool) {
 }
 
 func GetContext(r *http.Request) (*Context, bool) {
-	ada, ok := r.Context().Value(AdaKey).(*Context)
+	ada, ok := r.Context().Value(CtxKey).(*Context)
 
 	return ada, ok
-}
-
-func Set(r *http.Request, key string, value any) {
-	ada, ok := GetContext(r)
-	if !ok {
-		return
-	}
-
-	ada.Set(key, value)
-}
-
-func Get(r *http.Request, key string) any {
-	ada, ok := GetContext(r)
-	if !ok {
-		return nil
-	}
-
-	v, _ := ada.Get(key)
-
-	return v
 }

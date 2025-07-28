@@ -304,6 +304,22 @@ func (m *Mux) DELETE(path string, handler http.HandlerFunc, middlewares ...func(
 	m.MethodHandler(http.MethodDelete, path, handler, append(m.middlewares, middlewares...)...)
 }
 
+func (m *Mux) HEAD(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
+	m.MethodHandler(http.MethodHead, path, handler, append(m.middlewares, middlewares...)...)
+}
+
+func (m *Mux) OPTIONS(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
+	m.MethodHandler(http.MethodOptions, path, handler, append(m.middlewares, middlewares...)...)
+}
+
+func (m *Mux) TRACE(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
+	m.MethodHandler(http.MethodTrace, path, handler, append(m.middlewares, middlewares...)...)
+}
+
+func (m *Mux) CONNECT(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
+	m.MethodHandler(http.MethodConnect, path, handler, append(m.middlewares, middlewares...)...)
+}
+
 func (m *Mux) HandleFunc(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
 	m.MethodHandler("", path, handler, append(m.middlewares, middlewares...)...)
 }
@@ -327,8 +343,9 @@ func (m Mux) Group(path string, middlewares ...func(next http.Handler) http.Hand
 	return &m
 }
 
-// Notfound sets the handler for 404 Not Found responses.
-func (m *Mux) Notfound(handler http.HandlerFunc) {
+// NotFound sets the handler for 404 Not Found responses.
+//   - If not set, it defaults to http.NotFound.
+func (m *Mux) NotFound(handler http.HandlerFunc) {
 	m.notFound = handler
 }
 
