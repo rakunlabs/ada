@@ -25,9 +25,9 @@ jobs:
           fetch-depth: 0
       - name: build docs
         run: |
-          cd _documents && pnpm install --prefer-offline && pnpm run docs:build
+          cd _docs && pnpm install --prefer-offline && pnpm run docs:build
       # publish page
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./_documents/docs/.vitepress/dist
+          publish_dir: ./_docs/docs/.vitepress/dist
