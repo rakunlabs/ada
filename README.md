@@ -5,8 +5,9 @@
 [![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/rakunlabs/ada/test.yml?branch=main&logo=github&style=flat-square&label=ci)](https://github.com/rakunlabs/ada/actions)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rakunlabs/ada?style=flat-square)](https://goreportcard.com/report/github.com/rakunlabs/ada)
 [![Go PKG](https://raw.githubusercontent.com/rakunlabs/.github/main/assets/badges/gopkg.svg)](https://pkg.go.dev/github.com/rakunlabs/ada)
+[![Web](https://img.shields.io/badge/web-document-blueviolet?style=flat-square)](https://rakunlabs.github.io/ada/)
 
-Simple HTTP server.
+Simple, flexible go web framework.
 
 ```sh
 go get github.com/rakunlabs/ada
