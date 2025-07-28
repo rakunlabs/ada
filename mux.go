@@ -91,11 +91,9 @@ func (n *node) FindNode(path string, r *http.Request) *node {
 	return nil
 }
 
-func (n *node) SetHandler(method string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	handlerWithMiddlewares := Chain(middlewares...)(handler)
-
+func (n *node) SetHandler(method string, handler http.HandlerFunc) {
 	if method == "" {
-		n.Handler = handlerWithMiddlewares.ServeHTTP
+		n.Handler = handler.ServeHTTP
 
 		return
 	}
@@ -104,7 +102,7 @@ func (n *node) SetHandler(method string, handler http.HandlerFunc, middlewares .
 		n.MethodHandler = make(map[string]http.HandlerFunc)
 	}
 
-	n.MethodHandler[method] = handlerWithMiddlewares.ServeHTTP
+	n.MethodHandler[method] = handler.ServeHTTP
 }
 
 func (n *node) Insert(method, path string, handler http.HandlerFunc) {
@@ -271,6 +269,7 @@ type Mux struct {
 
 	notFound    http.HandlerFunc
 	middlewares []func(next http.Handler) http.Handler
+	prefix      string
 }
 
 func NewMux() *Mux {
@@ -279,37 +278,38 @@ func NewMux() *Mux {
 	}
 }
 
-func (m *Mux) addHandler(method, path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	handlerFunc := Chain(middlewares...)(handler)
+func (m *Mux) MethodHandler(method, path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
+	handlerFunc := Chain(append(m.middlewares, middlewares...)...)(handler)
+	path = m.prefix + "/" + strings.TrimPrefix(path, "/")
 	m.root.Insert(method, path, handlerFunc.ServeHTTP)
 }
 
 func (m *Mux) GET(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.addHandler(http.MethodGet, path, handler, append(m.middlewares, middlewares...)...)
+	m.MethodHandler(http.MethodGet, path, handler, append(m.middlewares, middlewares...)...)
 }
 
 func (m *Mux) POST(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.addHandler(http.MethodPost, path, handler, append(m.middlewares, middlewares...)...)
+	m.MethodHandler(http.MethodPost, path, handler, append(m.middlewares, middlewares...)...)
 }
 
 func (m *Mux) PUT(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.addHandler(http.MethodPut, path, handler, append(m.middlewares, middlewares...)...)
+	m.MethodHandler(http.MethodPut, path, handler, append(m.middlewares, middlewares...)...)
 }
 
 func (m *Mux) PATCH(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.addHandler(http.MethodPatch, path, handler, append(m.middlewares, middlewares...)...)
+	m.MethodHandler(http.MethodPatch, path, handler, append(m.middlewares, middlewares...)...)
 }
 
 func (m *Mux) DELETE(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.addHandler(http.MethodDelete, path, handler, append(m.middlewares, middlewares...)...)
+	m.MethodHandler(http.MethodDelete, path, handler, append(m.middlewares, middlewares...)...)
 }
 
 func (m *Mux) HandleFunc(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.addHandler("", path, handler, append(m.middlewares, middlewares...)...)
+	m.MethodHandler("", path, handler, append(m.middlewares, middlewares...)...)
 }
 
 func (m *Mux) Handle(path string, handler http.Handler, middlewares ...func(next http.Handler) http.Handler) {
-	m.addHandler("", path, handler.ServeHTTP, append(m.middlewares, middlewares...)...)
+	m.MethodHandler("", path, handler.ServeHTTP, append(m.middlewares, middlewares...)...)
 }
 
 func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
@@ -320,9 +320,12 @@ func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
 	m.middlewares = append(m.middlewares, middlewares...)
 }
 
-// func (m Mux) Group(path string, middlewares ...func(next http.Handler) http.Handler) *Mux {
+func (m Mux) Group(path string, middlewares ...func(next http.Handler) http.Handler) *Mux {
+	m.prefix = m.prefix + "/" + strings.TrimPrefix(path, "/")
+	m.middlewares = append(m.middlewares, middlewares...)
 
-// }
+	return &m
+}
 
 // Notfound sets the handler for 404 Not Found responses.
 func (m *Mux) Notfound(handler http.HandlerFunc) {
