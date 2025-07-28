@@ -324,10 +324,12 @@ func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
 
 // }
 
+// Notfound sets the handler for 404 Not Found responses.
 func (m *Mux) Notfound(handler http.HandlerFunc) {
 	m.notFound = handler
 }
 
+// ServeHTTP implements the http.Handler interface for Mux.
 func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	notFound := m.notFound
 	if notFound == nil {
@@ -375,6 +377,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // ////////////////////////////////////////////
 
+// Chain is a utility function to chain multiple middleware functions together.
 func Chain(middlewares ...func(next http.Handler) http.Handler) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		for i := len(middlewares) - 1; i >= 0; i-- {

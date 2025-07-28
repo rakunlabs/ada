@@ -9,7 +9,7 @@ import (
 )
 
 func Run(ctx context.Context) error {
-	server, err := ada.New(ctx, func(ctx context.Context, mux *ada.Mux) error {
+	server, err := ada.NewWithFunc(ctx, func(ctx context.Context, mux *ada.Mux) error {
 		helloHandler := &Hello{}
 		mux.POST("/hello", helloHandler.SayHello)
 		mux.GET("/", helloHandler.Info)

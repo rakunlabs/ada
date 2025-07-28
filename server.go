@@ -18,7 +18,7 @@ var (
 )
 
 type Server struct {
-	Mux             *Mux
+	*Mux
 	server          *http.Server
 	logger          Logger
 	started         bool
@@ -27,7 +27,7 @@ type Server struct {
 	m sync.Mutex
 }
 
-func New(ctx context.Context, fn func(ctx context.Context, mux *Mux) error, opts ...Option) (*Server, error) {
+func NewWithFunc(ctx context.Context, fn func(ctx context.Context, mux *Mux) error, opts ...Option) (*Server, error) {
 	opt := getOption(option{
 		ShutdownTimeout: DefaultShutdownTimeout,
 	}, opts...)
@@ -44,7 +44,7 @@ func New(ctx context.Context, fn func(ctx context.Context, mux *Mux) error, opts
 	}, nil
 }
 
-func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
+func New(opts ...Option) *Server {
 	opt := getOption(option{
 		ShutdownTimeout: DefaultShutdownTimeout,
 	}, opts...)
@@ -52,7 +52,7 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	return &Server{
 		Mux:    NewMux(),
 		logger: opt.Logger,
-	}, nil
+	}
 }
 
 func (s *Server) Start(ctx context.Context, addr string) error {

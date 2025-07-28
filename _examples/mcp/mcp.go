@@ -8,7 +8,7 @@ import (
 )
 
 func Run(ctx context.Context) error {
-	server, err := ada.New(ctx, func(ctx context.Context, mux *ada.Mux) error {
+	server, err := ada.NewWithFunc(ctx, func(ctx context.Context, mux *ada.Mux) error {
 		mcpHandler := mcp.New()
 		mux.Handle("/", mcpHandler)
 

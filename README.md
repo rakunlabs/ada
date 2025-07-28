@@ -7,13 +7,15 @@
 [![Go PKG](https://raw.githubusercontent.com/rakunlabs/.github/main/assets/badges/gopkg.svg)](https://pkg.go.dev/github.com/rakunlabs/ada)
 [![Web](https://img.shields.io/badge/web-document-blueviolet?style=flat-square)](https://rakunlabs.github.io/ada/)
 
-Simple, flexible go web framework.
+Simple, flexible go web library.
 
 ```sh
 go get github.com/rakunlabs/ada
 ```
 
 ## Usage
+
+> Check out the [examples](https://rakunlabs.github.io/ada/) for more details.
 
 ```go
 import (
@@ -28,11 +30,10 @@ func SayHello(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Hello, " + string(v)))
 }
 
-server, err := ada.New(ctx, func(ctx context.Context, mux *ada.Mux) error {
-    mux.POST("/hello", SayHello)
+// /////////////////////
 
-    return nil
-})
-// ...
-return server.Start(ctx, ":8080")
+server := ada.New()
+server.POST("/hello", SayHello)
+
+server.Start(ctx, ":8080")
 ```
