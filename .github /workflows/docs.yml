@@ -1,0 +1,33 @@
+name: docs
+on:
+  push:
+    tags:
+      - docs
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Frontend
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v2
+        name: Install pnpm
+        id: pnpm-install
+        with:
+          version: 10
+          run_install: false
+      - uses: actions/checkout@v4
+        with:
+          # Disabling shallow clone is recommended for improving relevancy of reporting
+          fetch-depth: 0
+      - name: build docs
+        run: |
+          cd _documents && pnpm install --prefer-offline && pnpm run docs:build
+      # publish page
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_documents/docs/.vitepress/dist

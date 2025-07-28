@@ -1,5 +1,9 @@
 .DEFAULT_GOAL := help
 
+.PHONY: docs
+docs: ## Serve documentation
+	@cd _docs && pnpm run docs:dev
+
 .PHONY: lint
 lint: ## Lint Go files
 	@GOPATH="$(shell dirname $(PWD))" golangci-lint run ./...

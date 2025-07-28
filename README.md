@@ -1,4 +1,4 @@
-# ada
+<img src="./_docs/docs/public/assets/ada.png" alt="ada" width="240">
 
 [![License](https://img.shields.io/github/license/rakunlabs/ada?color=red&style=flat-square)](https://raw.githubusercontent.com/rakunlabs/ada/main/LICENSE)
 [![Coverage](https://img.shields.io/sonar/coverage/rakunlabs_ada?logo=sonarcloud&server=https%3A%2F%2Fsonarcloud.io&style=flat-square)](https://sonarcloud.io/summary/overall?id=rakunlabs_ada)
