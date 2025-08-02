@@ -58,8 +58,8 @@ func JSONP(w http.ResponseWriter, code int, data any, indent string) error {
 	return encoder.Encode(data)
 }
 
-func NoContent(w http.ResponseWriter, code int) error {
-	w.WriteHeader(code)
+func NoContent(w http.ResponseWriter) error {
+	w.WriteHeader(http.StatusNoContent)
 
 	return nil
 }

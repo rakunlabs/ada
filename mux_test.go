@@ -35,6 +35,43 @@ func TestMux(t *testing.T) {
 		{
 			handlerGroup: []testHandlerGroup{
 				{
+					group: "/",
+					handler: []testHandler{
+						{
+							name:   "GET /",
+							path:   "/",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Root!"))
+							},
+						},
+						{
+							name:   "GET /",
+							path:   "/",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Root Override!"))
+							},
+						},
+						{
+							name:   "GET /どうしたの",
+							path:   "/どうしたの",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("ありがとう"))
+							},
+						},
+						{
+							name:   "GET /どういたしまして",
+							path:   "/どういたしまして",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("まあまあです"))
+							},
+						},
+					},
+				},
+				{
 					group: "/api/v1",
 					middlewares: []func(next http.Handler) http.Handler{
 						func(next http.Handler) http.Handler {
@@ -67,8 +104,8 @@ func TestMux(t *testing.T) {
 							path:   "/hell",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Welcome!"))
 								w.WriteHeader(http.StatusOK)
+								w.Write([]byte("Welcome!"))
 							},
 						},
 						{
@@ -76,8 +113,8 @@ func TestMux(t *testing.T) {
 							path:   "/how/1",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("how how!"))
 								w.WriteHeader(http.StatusOK)
+								w.Write([]byte("how how!"))
 							},
 						},
 						{
@@ -85,8 +122,8 @@ func TestMux(t *testing.T) {
 							path:   "/how/1/2/3/4",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("how how 4!"))
 								w.WriteHeader(http.StatusOK)
+								w.Write([]byte("how how 4!"))
 							},
 						},
 						{
@@ -94,8 +131,8 @@ func TestMux(t *testing.T) {
 							path:   "/ho/*",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("ho ho ho *!"))
 								w.WriteHeader(http.StatusOK)
+								w.Write([]byte("ho ho ho *!"))
 							},
 						},
 						{
@@ -104,8 +141,17 @@ func TestMux(t *testing.T) {
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								id := r.PathValue("id")
-								w.Write([]byte("how how " + id + "!"))
 								w.WriteHeader(http.StatusOK)
+								w.Write([]byte("how how " + id + "!"))
+							},
+						},
+						{
+							name: "/path/{user}",
+							path: "/path/{user}",
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								user := r.PathValue("user")
+								w.WriteHeader(http.StatusCreated)
+								w.Write([]byte("path user is " + user + "!"))
 							},
 						},
 					},
@@ -175,6 +221,46 @@ func TestMux(t *testing.T) {
 					status: http.StatusOK,
 					body:   "how how 999!",
 				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Root Override!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/どういたしまして", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "まあまあです",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/どうしたの", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "ありがとう",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/api/v1/path/ada", nil)
+						return req
+					},
+					status: http.StatusCreated,
+					body:   "path user is ada!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodPost, "/api/v1/path/ada", nil)
+						return req
+					},
+					status: http.StatusCreated,
+					body:   "path user is ada!",
+				},
 			},
 		},
 	}
@@ -208,6 +294,48 @@ func TestMux(t *testing.T) {
 				if !slices.Equal(recordHeader[key], value) {
 					t.Errorf("expected header %s to be %v, got %v for request %s", key, value, recordHeader[key], req.URL.Path)
 				}
+			}
+		}
+	}
+}
+
+func TestInsertStatic(t *testing.T) {
+	mux := NewMux()
+	mux.root.insertNodeTypeStatic("static")
+	mux.root.insertNodeTypeStatic("stat")
+	mux.root.insertNodeTypeStatic("alpha")
+
+	if mux.root.TypeStatic.Key != "" {
+		t.Errorf("expected root.TypeStatic.Key to be '', got '%s'", mux.root.TypeStatic.Key)
+	}
+
+	for r, node := range mux.root.TypeStatic.Children {
+		switch r {
+		case 's':
+			if node.TypeStatic.Key != "stat" {
+				t.Errorf("expected node.TypeStatic.Key to be 'stat', got '%s'", node.TypeStatic.Key)
+			}
+			if node.TypeStatic.Children == nil {
+				t.Errorf("expected node.TypeStatic.Children to be non-nil")
+			}
+			for r, child := range node.TypeStatic.Children {
+				switch r {
+				case 't':
+					if child.TypeStatic.Key != "ic" {
+						t.Errorf("expected child.TypeStatic.Key to be 'ic', got '%s'", child.TypeStatic.Key)
+					}
+				case 'a':
+					if child.TypeStatic.Key != "alpha" {
+						t.Errorf("expected child.TypeStatic.Key to be 'alpha', got '%s'", child.TypeStatic.Key)
+					}
+				}
+			}
+		case 'a':
+			if node.TypeStatic.Key != "alpha" {
+				t.Errorf("expected node.TypeStatic.Key to be 'alpha', got '%s'", node.TypeStatic.Key)
+			}
+			if len(node.TypeStatic.Children) != 0 {
+				t.Errorf("expected node.TypeStatic.Children to be zero length")
 			}
 		}
 	}

@@ -169,7 +169,7 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 					return
 				}
 
-				ada.NoContent(w, http.StatusNoContent)
+				ada.NoContent(w)
 
 				return
 			}
@@ -217,7 +217,7 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 					return
 				}
 
-				ada.NoContent(w, http.StatusNoContent)
+				ada.NoContent(w)
 
 				return
 			}
@@ -255,7 +255,7 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 				w.Header().Set(ada.HeaderAccessControlMaxAge, maxAge)
 			}
 
-			ada.NoContent(w, http.StatusNoContent)
+			ada.NoContent(w)
 		})
 	}
 }

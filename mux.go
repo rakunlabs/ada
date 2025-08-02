@@ -3,7 +3,6 @@ package ada
 import (
 	"net/http"
 	"strings"
-	"unicode/utf8"
 )
 
 type typeNode int
@@ -27,12 +26,12 @@ type node struct {
 
 type nodeStatic struct {
 	Key      string
-	Children map[rune]*node
+	Children map[byte]*node
 }
 
-func (n *nodeStatic) SetChild(char rune, child *node) {
+func (n *nodeStatic) SetChild(char byte, child *node) {
 	if n.Children == nil {
-		n.Children = make(map[rune]*node)
+		n.Children = make(map[byte]*node)
 	}
 
 	n.Children[char] = child
@@ -51,9 +50,8 @@ func (n *node) FindNode(path string, r *http.Request) *node {
 	if n.TypeStatic != nil {
 		current := n
 		isFound := true
-		// for i, char := range path {
 		for i := 0; i < len(path); {
-			char, size := utf8.DecodeRuneInString(path[i:])
+			char := path[i]
 			child, ok := current.TypeStatic.Children[char]
 			if !ok {
 				isFound = false
@@ -68,7 +66,7 @@ func (n *node) FindNode(path string, r *http.Request) *node {
 				break
 			}
 
-			i += len(child.TypeStatic.Key) + size - 1
+			i += len(child.TypeStatic.Key)
 			current = child
 		}
 
@@ -142,7 +140,7 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 	current := n
 	// place every segment in a node or sub-node
 	for byteIndex := 0; byteIndex < len(path); {
-		char, charSize := utf8.DecodeRuneInString(path[byteIndex:])
+		char := path[byteIndex]
 		// find the type of the node
 		if current.TypeStatic == nil {
 			current.TypeStatic = &nodeStatic{}
@@ -153,10 +151,8 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 			// find remaining on path
 			remaining := path[byteIndex:]
 			for commonLen < len(child.TypeStatic.Key) && commonLen < len(remaining) {
-				charCommon, size := utf8.DecodeRuneInString(child.TypeStatic.Key[commonLen:])
-				charRemaining, _ := utf8.DecodeRuneInString(remaining[commonLen:])
-				if charCommon == charRemaining {
-					commonLen += size
+				if child.TypeStatic.Key[commonLen] == remaining[commonLen] {
+					commonLen += 1
 				} else {
 					break
 				}
@@ -166,20 +162,19 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 			if commonLen == len(child.TypeStatic.Key) {
 				// continue to look inside the child node
 				current = child
-				byteIndex += commonLen + charSize - 1
+				byteIndex += commonLen
 			} else {
 				// Need to split the node
 				splitNode := &node{
 					TypeStatic: &nodeStatic{
 						Key:      child.TypeStatic.Key[:commonLen],
-						Children: make(map[rune]*node),
+						Children: make(map[byte]*node),
 					},
 				}
 
 				// Update existing child
 				child.TypeStatic.Key = child.TypeStatic.Key[commonLen:]
-				childChar, _ := utf8.DecodeRuneInString(child.TypeStatic.Key[0:])
-				splitNode.TypeStatic.SetChild(childChar, child)
+				splitNode.TypeStatic.SetChild(child.TypeStatic.Key[0], child)
 
 				// Add new path if needed
 				if commonLen < len(remaining) {
@@ -187,12 +182,11 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 					newNode := &node{
 						TypeStatic: &nodeStatic{
 							Key:      newSuffix,
-							Children: make(map[rune]*node),
+							Children: make(map[byte]*node),
 						},
 					}
 
-					childChar, _ := utf8.DecodeRuneInString(newSuffix[0:])
-					splitNode.TypeStatic.SetChild(childChar, newNode)
+					splitNode.TypeStatic.SetChild(newSuffix[0], newNode)
 					current.TypeStatic.SetChild(char, splitNode)
 
 					return newNode
@@ -206,7 +200,7 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 			newNode := &node{
 				TypeStatic: &nodeStatic{
 					Key:      path[byteIndex:],
-					Children: make(map[rune]*node),
+					Children: make(map[byte]*node),
 				},
 			}
 			current.TypeStatic.SetChild(char, newNode)
