@@ -15,25 +15,27 @@ go get github.com/rakunlabs/ada
 
 ## Usage
 
-> Check out the [examples](https://rakunlabs.github.io/ada/) for more details.
+> Check out the [guide](https://rakunlabs.github.io/ada/guide) for more details.
 
 ```go
+package main
+
 import (
+	"net/http"
+
 	"github.com/rakunlabs/ada"
 )
 
-func SayHello(w http.ResponseWriter, r *http.Request) {
-	v, _ := io.ReadAll(r.Body)
+func main() {
+	server := ada.New()
+	server.GET("/hello/{user}", SayHello)
 
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Hello, " + string(v)))
+	server.Start(":8080")
 }
 
 // /////////////////////
 
-server := ada.New()
-server.POST("/hello", SayHello)
-
-server.Start(ctx, ":8080")
+func SayHello(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Hello, " + r.PathValue("user")))
+}
 ```

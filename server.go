@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -23,25 +24,19 @@ type Server struct {
 	logger          Logger
 	started         bool
 	shutdownTimeout time.Duration
+	network         string
 
 	m sync.Mutex
 }
 
 func NewWithFunc(ctx context.Context, fn func(ctx context.Context, mux *Mux) error, opts ...Option) (*Server, error) {
-	opt := getOption(option{
-		ShutdownTimeout: DefaultShutdownTimeout,
-	}, opts...)
+	s := New(opts...)
 
-	mux := NewMux()
-
-	if err := fn(ctx, mux); err != nil {
-		return nil, fmt.Errorf("failed to create server: %w", err)
+	if err := fn(ctx, s.Mux); err != nil {
+		return nil, fmt.Errorf("mux handler: %w", err)
 	}
 
-	return &Server{
-		Mux:    mux,
-		logger: opt.Logger,
-	}, nil
+	return s, nil
 }
 
 func New(opts ...Option) *Server {
@@ -50,12 +45,32 @@ func New(opts ...Option) *Server {
 	}, opts...)
 
 	return &Server{
-		Mux:    NewMux(),
-		logger: opt.Logger,
+		Mux:     NewMux(),
+		logger:  opt.Logger,
+		network: opt.Network,
 	}
 }
 
-func (s *Server) Start(ctx context.Context, addr string) error {
+// Start starts the server with the given address.
+//   - If the server fails to start, an error will be returned.
+func (s *Server) Start(addr string) error {
+	return s.start(addr, nil)
+}
+
+// StartWithContext starts the server with the given context and address.
+//   - If the context is canceled, the server will be stopped.
+//   - If the server fails to start, an error will be returned.
+func (s *Server) StartWithContext(ctx context.Context, addr string) error {
+	return s.start(addr, func() {
+		if ctx != nil {
+			context.AfterFunc(ctx, func() {
+				_ = s.Stop()
+			})
+		}
+	})
+}
+
+func (s *Server) start(addr string, fn func()) error {
 	s.m.Lock()
 	if s.started {
 		return ErrAlreadyStarted
@@ -75,14 +90,19 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 		Handler: h2c.NewHandler(s.Mux, &http2.Server{}),
 	}
 
-	s.logger.Info("starting server", "addr", s.server.Addr)
+	listener, err := net.Listen(s.network, s.server.Addr)
+	if err != nil {
+		return fmt.Errorf("address cannot listen %s: %w", s.server.Addr, err)
+	}
 
-	context.AfterFunc(ctx, func() {
-		_ = s.Stop()
-	})
+	if fn != nil {
+		fn()
+	}
 
-	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("failed to start server: %w", err)
+	s.logger.Info("server started", "addr", s.server.Addr)
+
+	if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", err)
 	}
 
 	return nil
@@ -102,7 +122,7 @@ func (s *Server) Stop() error {
 	defer cancel()
 
 	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown server: %w", err)
+		return fmt.Errorf("shutdown: %w", err)
 	}
 
 	return nil

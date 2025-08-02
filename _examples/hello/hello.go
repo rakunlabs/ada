@@ -20,7 +20,7 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	return server.Start(ctx, ":8080")
+	return server.StartWithContext(ctx, ":8080")
 }
 
 type Hello struct{}

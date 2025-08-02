@@ -3,27 +3,25 @@
 layout: home
 
 hero:
-  name: "ada"
+  # name: "ada"
   text: "Go Web Library"
   # tagline: documentation
   image:
     src: /assets/ada.png
-    width: 420
     alt: ada
   actions:
     - theme: brand
       text: Getting Started
       link: /getting-started.md
     - theme: alt
-      text: Examples
-      link: /examples.md
+      text: Guide
+      link: /guide.md
 
-# features:
-#   - title: Feature A
-#     details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
-#   - title: Feature B
-#     details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
-#   - title: Feature C
-#     details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
+features:
+  - title: Simple Mux
+    details: Path parameter and wildcard support without method
+  - title: Std Library
+    details: Compatible with net/http handlers and middlewares
+  - title: Helpful functions
+    details: All you need utility functions
 ---
-

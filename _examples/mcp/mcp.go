@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/rakunlabs/ada"
-	"github.com/rakunlabs/ada/middlewares/mcp"
+	"github.com/rakunlabs/ada/middleware/mcp"
 )
 
 func Run(ctx context.Context) error {
@@ -18,5 +18,5 @@ func Run(ctx context.Context) error {
 		return err
 	}
 
-	return server.Start(ctx, ":8080")
+	return server.StartWithContext(ctx, ":8080")
 }

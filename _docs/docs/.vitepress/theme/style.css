@@ -7,7 +7,7 @@
  * Colors
  * -------------------------------------------------------------------------- */
 
- :root {
+:root {
   --vp-c-brand: #00b4d8;
   --vp-c-brand-light: #48cae4;
   --vp-c-brand-lighter: #90e0ef;
@@ -83,26 +83,10 @@
 
 .VPHero .image-src {
   max-width: 400px;
+  min-width: 400px;
   height: auto;
-}
-
-@media (min-width: 1200px) {
-  .VPHero .image-src {
-    max-width: 640px;
-  }
-}
-
-@media (max-width: 500px) {
-  .VPHero .image-src {
-    max-width: 320px;
-  }
 }
 
 .vp-doc ul {
   list-style-type: square;
-}
-
-.vp-doc :not(pre) > code {
-  color: #1e1e1e;
-  background-color: #ffd500;
 }

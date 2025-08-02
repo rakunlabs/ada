@@ -14,20 +14,21 @@ go get github.com/rakunlabs/ada
 package main
 
 import (
-    "context"
-    "io"
-    "net/http"
+	"net/http"
 
-    "github.com/rakunlabs/ada"
+	"github.com/rakunlabs/ada"
 )
 
 func main() {
-    server := ada.New()
-	server.GET("/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hello, World!"))
-	})
+	server := ada.New()
+	server.GET("/hello/{user}", SayHello)
 
-	server.Start(ctx, ":8080")
+	server.Start(":8080")
+}
+
+// /////////////////////
+
+func SayHello(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Hello, " + r.PathValue("user")))
 }
 ```
