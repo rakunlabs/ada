@@ -65,6 +65,8 @@
   --vp-custom-block-tip-border: var(--vp-c-brand);
   --vp-custom-block-tip-text: var(--vp-c-brand-darker);
   --vp-custom-block-tip-bg: var(--vp-c-brand-dimm);
+
+  --vp-code-block-bg: #272822;
 }
 
 .dark {

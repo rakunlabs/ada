@@ -18,7 +18,7 @@ func main() {
 	into.Init(
 		run,
 		into.WithMsgf("ADA Examples"),
-		into.WithLogger(logi.InitializeLog()),
+		into.WithLogger(logi.InitializeLog(logi.WithLevel("DEBUG"))),
 	)
 }
 

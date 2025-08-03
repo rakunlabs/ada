@@ -6,11 +6,18 @@ import (
 	"net/http"
 
 	"github.com/rakunlabs/ada"
+	"github.com/rakunlabs/ada/middleware"
 )
 
 func Run(ctx context.Context) error {
 	server, err := ada.NewWithFunc(ctx, func(ctx context.Context, mux *ada.Mux) error {
 		helloHandler := &Hello{}
+
+		mux.Use(
+			middleware.Recover(),
+			middleware.RequestID(),
+			middleware.Log(),
+		)
 		mux.POST("/hello", helloHandler.SayHello)
 		mux.GET("/", helloHandler.Info)
 

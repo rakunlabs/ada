@@ -13,12 +13,12 @@ const guides = [
     description: 'Learn how to handle HTTP requests and create powerful routing patterns',
     href: './routing'
   },
-  // {
-  //   icon: '⚡',
-  //   title: 'Middleware',
-  //   description: 'Add powerful middleware functions to enhance your application',
-  //   href: './middleware'
-  // },
+  {
+    icon: '⚡',
+    title: 'Middleware',
+    description: 'Add powerful middleware functions to enhance your application',
+    href: './middleware'
+  },
   // {
   //   icon: '⚙️',
   //   title: 'Configuration',

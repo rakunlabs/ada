@@ -273,7 +273,7 @@ func TestMux(t *testing.T) {
 				group = mux.Group(handler.group, handler.middlewares...)
 			}
 			for _, h := range handler.handler {
-				group.MethodHandler(h.method, h.path, h.handler, h.middlewares...)
+				group.HandleWithMethod(h.method, h.path, h.handler, h.middlewares...)
 			}
 		}
 

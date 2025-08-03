@@ -6,7 +6,20 @@ export default defineConfig({
   description: "Go Web Library",
   head: [["link", { rel: "icon", href: "/assets/icon.png" }]],
   base: "/ada/",
+  
+  // Configure syntax highlighting with Monokai theme
+  markdown: {
+    theme: {
+      light: 'monokai',
+      dark: 'monokai'
+    },
+    // lineNumbers: true
+  },
   themeConfig: {
+    search: {
+      provider: 'local'
+    },
+    
     // https://vitepress.dev/reference/default-theme-config
     nav: [
       { text: "Home", link: "/" },
@@ -25,6 +38,10 @@ export default defineConfig({
           {
             text: "Routing",
             link: "/guide/routing.md",
+          },
+          {
+            text: "Middleware",
+            link: "/guide/middleware.md",
           },
         ],
       },

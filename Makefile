@@ -19,7 +19,7 @@ coverage: ## Run unit tests with coverage
 
 .PHONY: example
 example: ## Run example code
-	cd examples && go run main.go
+	cd _examples && go run main.go
 
 .PHONY: help
 help: ## Display this help screen

@@ -32,11 +32,8 @@ type Logger struct {
 	LogReferer bool
 	// LogUserAgent instructs logger to extract request user agent values.
 	LogUserAgent bool
-	// LogStatus instructs logger to extract response status code. If handler chain returns an echo.HTTPError,
-	// the status code is extracted from the echo.HTTPError returned
+	// LogStatus instructs logger to extract response status code.
 	LogStatus bool
-	// LogError instructs logger to extract error returned from executed handler chain.
-	LogError bool
 	// LogContentLength instructs logger to extract content length header value. Note: this value could be different from
 	// actual request body size as it could be spoofed etc.
 	LogContentLength bool
@@ -83,8 +80,6 @@ type RequestLoggerValues struct {
 	UserAgent string
 	// Status is response status code. Then handler returns an echo.HTTPError then code from there.
 	Status int
-	// Error is error returned from executed handler chain.
-	Error error
 	// ContentLength is content length header value. Note: this value could be different from actual request body size
 	// as it could be spoofed etc.
 	ContentLength string
@@ -106,11 +101,151 @@ type RequestLoggerValues struct {
 func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r)
+			// Skip logging if skipper function is provided and returns true
+			if l.Skipper != nil && l.Skipper(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
 
-			// TODO: implement logging logic here
+			// Create a custom response writer to capture response details
+			responseWriter := &responseWriter{ResponseWriter: w}
+
+			// Record start time
+			start := time.Now()
+
+			// Execute the next handler
+			next.ServeHTTP(responseWriter, r)
+
+			// Calculate latency
+			latency := time.Since(start)
+
+			// Extract request values based on configuration
+			values := &RequestLoggerValues{
+				StartTime: start,
+				Latency:   latency,
+			}
+
+			// Extract protocol if enabled
+			if l.LogProtocol {
+				values.Protocol = r.Proto
+			}
+
+			// Extract remote IP if enabled
+			if l.LogRemoteIP {
+				values.RemoteIP = r.RemoteAddr
+			}
+
+			// Extract host if enabled
+			if l.LogHost {
+				values.Host = r.Host
+			}
+
+			// Extract method if enabled
+			if l.LogMethod {
+				values.Method = r.Method
+			}
+
+			// Extract URI if enabled
+			if l.LogURI {
+				values.URI = r.RequestURI
+			}
+
+			// Extract URI path if enabled
+			if l.LogURIPath {
+				values.URIPath = r.URL.Path
+			}
+
+			// Extract request ID if enabled
+			if l.LogRequestID {
+				values.RequestID = r.Header.Get("X-Request-ID")
+			}
+
+			// Extract referer if enabled
+			if l.LogReferer {
+				values.Referer = r.Header.Get("Referer")
+			}
+
+			// Extract user agent if enabled
+			if l.LogUserAgent {
+				values.UserAgent = r.Header.Get("User-Agent")
+			}
+
+			// Extract status if enabled
+			if l.LogStatus {
+				values.Status = responseWriter.status
+			}
+
+			// Extract content length if enabled
+			if l.LogContentLength {
+				values.ContentLength = r.Header.Get("Content-Length")
+			}
+
+			// Extract response size if enabled
+			if l.LogResponseSize {
+				values.ResponseSize = responseWriter.size
+			}
+
+			// Extract headers if enabled
+			if len(l.LogHeaders) > 0 {
+				values.Headers = make(map[string][]string)
+				for _, headerName := range l.LogHeaders {
+					canonicalName := http.CanonicalHeaderKey(headerName)
+					if headerValues, exists := r.Header[canonicalName]; exists {
+						values.Headers[canonicalName] = headerValues
+					}
+				}
+			}
+
+			// Extract query parameters if enabled
+			if len(l.LogQueryParams) > 0 {
+				values.QueryParams = make(map[string][]string)
+				for _, paramName := range l.LogQueryParams {
+					if paramValues, exists := r.URL.Query()[paramName]; exists {
+						values.QueryParams[paramName] = paramValues
+					}
+				}
+			}
+
+			// Extract form values if enabled
+			if len(l.LogFormValues) > 0 {
+				values.FormValues = make(map[string][]string)
+				// Parse form if not already parsed
+				if err := r.ParseForm(); err == nil {
+					for _, formName := range l.LogFormValues {
+						if formValues, exists := r.Form[formName]; exists {
+							values.FormValues[formName] = formValues
+						}
+					}
+				}
+			}
+
+			// Call the custom logging function if provided
+			if l.LogValuesFunc != nil {
+				l.LogValuesFunc(r, values)
+			}
 		})
 	}
+}
+
+// responseWriter wraps http.ResponseWriter to capture response details
+type responseWriter struct {
+	http.ResponseWriter
+	status int
+	size   int64
+}
+
+func (rw *responseWriter) WriteHeader(statusCode int) {
+	rw.status = statusCode
+	rw.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if rw.status == 0 {
+		rw.status = http.StatusOK
+	}
+	size, err := rw.ResponseWriter.Write(b)
+	rw.size += int64(size)
+	return size, err
 }
 
 func New(opts ...Option) *Logger {
@@ -126,7 +261,6 @@ func New(opts ...Option) *Logger {
 					slog.String("uri", v.URI),
 					slog.String("user_agent", v.UserAgent),
 					slog.Int("status", v.Status),
-					slog.String("error", v.Error.Error()),
 					slog.Int64("latency", v.Latency.Nanoseconds()),
 					slog.String("latency_human", v.Latency.String()),
 					slog.String("bytes_in", v.ContentLength),
@@ -142,7 +276,6 @@ func New(opts ...Option) *Logger {
 			LogReferer:       true,
 			LogUserAgent:     true,
 			LogStatus:        true,
-			LogError:         true,
 			LogContentLength: true,
 			LogResponseSize:  true,
 		},

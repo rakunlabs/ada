@@ -108,6 +108,12 @@ server.TRACE("/trace", traceHandler)
 server.CONNECT("/connect", connectHandler)
 ```
 
+Other not standard HTTP methods can be added with `HandleWithMethod`
+
+```go
+server.HandleWithMethod("FOO", "/foo", fooHandler)
+```
+
 ### Method-Agnostic Routing
 
 You can also register handlers that respond to any HTTP method:
