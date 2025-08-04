@@ -64,6 +64,10 @@ export default defineConfig({
               },
             ],
           },
+          {
+            text: "Microservice",
+            link: "/guide/microservice.md",
+          },
         ],
       },
     ],

@@ -19,6 +19,12 @@ const guides = [
     description: 'Add powerful middleware functions to enhance your application',
     href: './middleware'
   },
+  {
+    icon: '🔌',
+    title: 'Microservice',
+    description: 'Build microservices with essential middleware and best practices',
+    href: './microservice'
+  },
   // {
   //   icon: '⚙️',
   //   title: 'Configuration',
