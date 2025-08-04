@@ -35,6 +35,124 @@ func TestMux(t *testing.T) {
 		{
 			handlerGroup: []testHandlerGroup{
 				{
+					handler: []testHandler{
+						{
+							name:   "GET /",
+							path:   "/",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Base!"))
+							},
+						},
+						{
+							name:   "GET /{test}",
+							path:   "/{test}",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Test!"))
+							},
+						},
+					},
+				},
+			},
+			tests: []testWant{
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Base!",
+				},
+			},
+		},
+		{
+			handlerGroup: []testHandlerGroup{
+				{
+					handler: []testHandler{
+						{
+							name:   "GET /*",
+							path:   "/*",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Wildcard!"))
+							},
+						},
+						{
+							name:   "GET /test",
+							path:   "/test",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Test!"))
+							},
+						},
+					},
+				},
+			},
+			tests: []testWant{
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/wildcard/1/2/3/4", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Wildcard!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Wildcard!",
+				},
+			},
+		},
+		{
+			handlerGroup: []testHandlerGroup{
+				{
+					handler: []testHandler{
+						{
+							name:   "GET /*",
+							path:   "/*",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Wildcard!"))
+							},
+						},
+						{
+							name:   "GET /{test}",
+							path:   "/{test}",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Test Param!"))
+							},
+						},
+					},
+				},
+			},
+			tests: []testWant{
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/wildcard/1/2/3/4", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Wildcard!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Wildcard!",
+				},
+			},
+		},
+		{
+			handlerGroup: []testHandlerGroup{
+				{
 					group: "/",
 					handler: []testHandler{
 						{

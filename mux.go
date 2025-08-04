@@ -87,7 +87,7 @@ func (n *node) FindNode(path string, r *http.Request) *node {
 	}
 
 	// Check for parameter nodes - they match any segment and capture the value
-	if n.TypeParam != nil {
+	if n.TypeParam != nil && path != "" {
 		r.SetPathValue(n.TypeParam.Name, path)
 		return n.TypeParam.Children
 	}
@@ -368,8 +368,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 	current := m.root
-
-	var possible *node
+	possible := current
 
 	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for i, segment := range segments {
