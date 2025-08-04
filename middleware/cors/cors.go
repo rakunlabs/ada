@@ -5,15 +5,26 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/rakunlabs/ada"
 )
 
-// defaultCORSConfig is the default CORS middleware config.
-var defaultCORSConfig = Cors{
-	AllowOrigins: []string{"*"},
-	AllowMethods: []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodDelete},
-}
+var (
+	allowOrigins = []string{"*"}
+	allowMethods = []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodDelete}
+)
+
+const (
+	headerVary   = "Vary"
+	headerOrigin = "Origin"
+
+	headerAccessControlAllowOrigin      = "Access-Control-Allow-Origin"
+	headerAccessControlAllowCredentials = "Access-Control-Allow-Credentials"
+	headerAccessControlExposeHeaders    = "Access-Control-Expose-Headers"
+	headerAccessControlRequestMethod    = "Access-Control-Request-Method"
+	headerAccessControlRequestHeaders   = "Access-Control-Request-Headers"
+	headerAccessControlAllowMethods     = "Access-Control-Allow-Methods"
+	headerAccessControlAllowHeaders     = "Access-Control-Allow-Headers"
+	headerAccessControlMaxAge           = "Access-Control-Max-Age"
+)
 
 // Cors defines the config for CORS middleware.
 //
@@ -113,10 +124,10 @@ func Middleware(opts ...Option) func(http.Handler) http.Handler {
 func (m *Cors) Middleware() func(http.Handler) http.Handler {
 	// Defaults
 	if len(m.AllowOrigins) == 0 {
-		m.AllowOrigins = defaultCORSConfig.AllowOrigins
+		m.AllowOrigins = allowOrigins
 	}
 	if len(m.AllowMethods) == 0 {
-		m.AllowMethods = defaultCORSConfig.AllowMethods
+		m.AllowMethods = allowMethods
 	}
 
 	allowOriginPatterns := make([]*regexp.Regexp, 0, len(m.AllowOrigins))
@@ -151,10 +162,10 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			origin := r.Header.Get(ada.HeaderOrigin)
+			origin := r.Header.Get(headerOrigin)
 			allowOrigin := ""
 
-			w.Header().Add(ada.HeaderVary, ada.HeaderOrigin)
+			w.Header().Add(headerVary, headerOrigin)
 
 			// Preflight request is an OPTIONS request, using three HTTP request headers: Access-Control-Request-Method,
 			// Access-Control-Request-Headers, and the Origin header. See: https://developer.mozilla.org/en-US/docs/Glossary/Preflight_request
@@ -169,7 +180,7 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 					return
 				}
 
-				ada.NoContent(w)
+				w.WriteHeader(http.StatusNoContent)
 
 				return
 			}
@@ -217,20 +228,20 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 					return
 				}
 
-				ada.NoContent(w)
+				w.WriteHeader(http.StatusNoContent)
 
 				return
 			}
 
-			w.Header().Set(ada.HeaderAccessControlAllowOrigin, allowOrigin)
+			w.Header().Set(headerAccessControlAllowOrigin, allowOrigin)
 			if m.AllowCredentials {
-				w.Header().Set(ada.HeaderAccessControlAllowCredentials, "true")
+				w.Header().Set(headerAccessControlAllowCredentials, "true")
 			}
 
 			// Simple request
 			if !preflight {
 				if exposeHeaders != "" {
-					w.Header().Set(ada.HeaderAccessControlExposeHeaders, exposeHeaders)
+					w.Header().Set(headerAccessControlExposeHeaders, exposeHeaders)
 				}
 
 				next.ServeHTTP(w, r)
@@ -239,23 +250,23 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 			}
 
 			// Preflight request
-			w.Header().Add(ada.HeaderVary, ada.HeaderAccessControlRequestMethod)
-			w.Header().Add(ada.HeaderVary, ada.HeaderAccessControlRequestHeaders)
-			w.Header().Set(ada.HeaderAccessControlAllowMethods, allowMethods)
+			w.Header().Add(headerVary, headerAccessControlRequestMethod)
+			w.Header().Add(headerVary, headerAccessControlRequestHeaders)
+			w.Header().Set(headerAccessControlAllowMethods, allowMethods)
 
 			if allowHeaders != "" {
-				w.Header().Set(ada.HeaderAccessControlAllowHeaders, allowHeaders)
+				w.Header().Set(headerAccessControlAllowHeaders, allowHeaders)
 			} else {
-				h := r.Header.Get(ada.HeaderAccessControlRequestHeaders)
+				h := r.Header.Get(headerAccessControlRequestHeaders)
 				if h != "" {
-					w.Header().Set(ada.HeaderAccessControlAllowHeaders, h)
+					w.Header().Set(headerAccessControlAllowHeaders, h)
 				}
 			}
 			if m.MaxAge != 0 {
-				w.Header().Set(ada.HeaderAccessControlMaxAge, maxAge)
+				w.Header().Set(headerAccessControlMaxAge, maxAge)
 			}
 
-			ada.NoContent(w)
+			w.WriteHeader(http.StatusNoContent)
 		})
 	}
 }

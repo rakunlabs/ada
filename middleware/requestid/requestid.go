@@ -4,8 +4,10 @@ import (
 	"net/http"
 
 	"github.com/oklog/ulid/v2"
+)
 
-	"github.com/rakunlabs/ada"
+const (
+	HeaderXRequestID = "X-Request-Id"
 )
 
 type RequestID struct {
@@ -35,14 +37,14 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 func (re *RequestID) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Generate a new request ID or retrieve it from the context
-		requestID := r.Header.Get(ada.HeaderXRequestID)
+		requestID := r.Header.Get(HeaderXRequestID)
 		if requestID == "" {
 			requestID = re.Generate()
-			r.Header.Set(ada.HeaderXRequestID, requestID)
+			r.Header.Set(HeaderXRequestID, requestID)
 		}
 
 		// Set the request ID in the response header
-		w.Header().Set(ada.HeaderXRequestID, requestID)
+		w.Header().Set(HeaderXRequestID, requestID)
 
 		next.ServeHTTP(w, r)
 	})

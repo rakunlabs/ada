@@ -5,12 +5,10 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
-
-	"github.com/rakunlabs/ada"
 )
 
 type Recover struct {
-	Logger     ada.Logger
+	Logger     Logger
 	PrintStack bool
 }
 
@@ -67,13 +65,13 @@ func (re *Recover) Middleware(next http.Handler) http.Handler {
 // //////////////////////////////////////////////////////////////
 
 type option struct {
-	Logger     ada.Logger
+	Logger     Logger
 	PrintStack bool
 }
 
 type Option func(*option)
 
-func WithLogger(logger ada.Logger) Option {
+func WithLogger(logger Logger) Option {
 	return func(o *option) {
 		o.Logger = logger
 	}
@@ -83,4 +81,13 @@ func WithPrintStack(printStack bool) Option {
 	return func(o *option) {
 		o.PrintStack = printStack
 	}
+}
+
+// //////////////////////////////////////////////////////////////
+
+type Logger interface {
+	Error(msg string, keysAndValues ...any)
+	Info(msg string, keysAndValues ...any)
+	Debug(msg string, keysAndValues ...any)
+	Warn(msg string, keysAndValues ...any)
 }

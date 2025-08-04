@@ -42,6 +42,28 @@ export default defineConfig({
           {
             text: "Middleware",
             link: "/guide/middleware.md",
+            items: [
+              {
+                text: "Recover",
+                link: "/guide/middleware/recover.md",
+              },
+              {
+                text: "Request ID",
+                link: "/guide/middleware/request-id.md",
+              },
+              {
+                text: "Log",
+                link: "/guide/middleware/log.md",
+              },
+              {
+                text: "Cors",
+                link: "/guide/middleware/cors.md",
+              },
+              {
+                text: "Folder",
+                link: "/guide/middleware/folder.md",
+              },
+            ],
           },
         ],
       },

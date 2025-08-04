@@ -2,6 +2,7 @@ package ada
 
 import (
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -330,8 +331,8 @@ func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
 	m.middlewares = append(m.middlewares, middlewares...)
 }
 
-func (m Mux) Group(path string, middlewares ...func(next http.Handler) http.Handler) *Mux {
-	m.prefix = m.prefix + "/" + strings.TrimPrefix(path, "/")
+func (m Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http.Handler) *Mux {
+	m.prefix = path.Join("/", m.prefix, pathGroup)
 	m.middlewares = append(m.middlewares, middlewares...)
 
 	return &m
