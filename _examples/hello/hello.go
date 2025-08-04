@@ -6,7 +6,10 @@ import (
 	"net/http"
 
 	"github.com/rakunlabs/ada"
-	"github.com/rakunlabs/ada/middleware"
+
+	mlog "github.com/rakunlabs/ada/middleware/log"
+	mrecover "github.com/rakunlabs/ada/middleware/recover"
+	mrequestid "github.com/rakunlabs/ada/middleware/requestid"
 )
 
 func Run(ctx context.Context) error {
@@ -14,9 +17,9 @@ func Run(ctx context.Context) error {
 		helloHandler := &Hello{}
 
 		mux.Use(
-			middleware.Recover(),
-			middleware.RequestID(),
-			middleware.Log(),
+			mrecover.Middleware(),
+			mrequestid.Middleware(),
+			mlog.Middleware(),
 		)
 		mux.POST("/hello", helloHandler.SayHello)
 		mux.GET("/", helloHandler.Info)
