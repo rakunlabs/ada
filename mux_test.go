@@ -104,6 +104,19 @@ func TestMux(t *testing.T) {
 					},
 				},
 				{
+					group: "/base",
+					handler: []testHandler{
+						{
+							name:   "GET /*",
+							path:   "/*",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Base!"))
+							},
+						},
+					},
+				},
+				{
 					group: "/api/v1",
 					middlewares: []func(next http.Handler) http.Handler{
 						func(next http.Handler) http.Handler {
@@ -324,6 +337,14 @@ func TestMux(t *testing.T) {
 					},
 					status: http.StatusOK,
 					body:   "Wildcard Under 1-2-3!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/base/", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Base!",
 				},
 			},
 		},

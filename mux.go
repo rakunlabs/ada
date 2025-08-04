@@ -48,10 +48,19 @@ type nodeWildcard struct {
 	Children *node // Children nodes for wildcard
 }
 
+func (n *node) IsHandlerExists() bool {
+	if n.Handler != nil || len(n.MethodHandler) > 0 {
+		return true
+	}
+
+	return false
+}
+
 func (n *node) FindNode(path string, r *http.Request) *node {
 	if n.TypeStatic != nil {
 		current := n
 		isFound := true
+
 		for i := 0; i < len(path); {
 			char := path[i]
 			child, ok := current.TypeStatic.Children[char]
@@ -367,7 +376,6 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if current.TypeWildcard != nil && current.TypeWildcard.Children.Possible {
 			possible = current.TypeWildcard.Children
 		}
-
 		// find the type of the node
 		node := current.FindNode(segment, r)
 		if node == nil {
@@ -385,8 +393,14 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			current = node.Segment
-		} else {
+
+			continue
+		}
+
+		if node.IsHandlerExists() {
 			current = node
+		} else {
+			current = possible
 		}
 	}
 
