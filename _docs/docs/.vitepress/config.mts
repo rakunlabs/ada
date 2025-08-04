@@ -4,9 +4,8 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
   title: "> ada",
   description: "Go Web Library",
-  head: [["link", { rel: "icon", href: "/assets/icon.png" }]],
+  head: [["link", { rel: "icon", href: "/ada/assets/favicon.ico" }]],
   base: "/ada/",
-  
   // Configure syntax highlighting with Monokai theme
   markdown: {
     theme: {
