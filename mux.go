@@ -15,7 +15,8 @@ const (
 )
 
 type node struct {
-	Segment *node
+	Segment  *node
+	Possible bool
 
 	TypeStatic   *nodeStatic
 	TypeWildcard *nodeWildcard
@@ -82,7 +83,7 @@ func (n *node) FindNode(path string, r *http.Request) *node {
 		return n.TypeParam.Children
 	}
 
-	// Check for wildcard nodes - they match any segment
+	// Check for wildcard nodes - they match any remaining path
 	if n.TypeWildcard != nil {
 		return n.TypeWildcard.Children
 	}
@@ -107,13 +108,15 @@ func (n *node) SetHandler(method string, handler http.HandlerFunc) {
 func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 	pathSegments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 
+	var typeNodeSegment typeNode
 	current := n
 	for i, segment := range pathSegments {
 		if segment == "" {
 			continue // skip empty segments
 		}
 
-		switch findTypeNode(segment) {
+		typeNodeSegment = findTypeNode(segment)
+		switch typeNodeSegment {
 		case typeNodeStatic:
 			current = current.insertNodeTypeStatic(segment)
 		case typeNodeWildcard:
@@ -135,6 +138,9 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 	}
 
 	current.SetHandler(method, handler)
+	if typeNodeSegment == typeNodeWildcard {
+		current.Possible = true
+	}
 }
 
 func (n *node) insertNodeTypeStatic(path string) *node {
@@ -354,26 +360,39 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	current := m.root
 
+	var possible *node
+
 	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for i, segment := range segments {
+		if current.TypeWildcard != nil && current.TypeWildcard.Children.Possible {
+			possible = current.TypeWildcard.Children
+		}
+
 		// find the type of the node
 		node := current.FindNode(segment, r)
 		if node == nil {
-			notFound(w, r)
-
-			return
+			current = possible
+			break
 		}
 
 		if i != len(segments)-1 {
-			if node.Segment == nil {
-				notFound(w, r)
+			if node.Possible {
+				possible = node
+			}
 
-				return
+			if node.Segment == nil {
+				current = possible
+				break
 			}
 			current = node.Segment
 		} else {
 			current = node
 		}
+	}
+
+	if current == nil {
+		notFound(w, r)
+		return
 	}
 
 	handler := current.MethodHandler[strings.ToUpper(r.Method)]
@@ -383,7 +402,6 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if handler == nil {
 		notFound(w, r)
-
 		return
 	}
 

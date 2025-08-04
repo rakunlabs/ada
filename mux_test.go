@@ -69,6 +69,38 @@ func TestMux(t *testing.T) {
 								w.Write([]byte("まあまあです"))
 							},
 						},
+						{
+							name:   "GET /*",
+							path:   "/*",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Wildcard!"))
+							},
+						},
+						{
+							name:   "GET /*/under/1/2/3/4",
+							path:   "/*/under/1/2/3/4",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Wildcard Under!"))
+							},
+						},
+						{
+							name:   "GET /*/under/1/2/3",
+							path:   "/*/under/1/2/3",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Wildcard Under 1-2-3!"))
+							},
+						},
+						{
+							name:   "GET /*/under/*",
+							path:   "/*/under/*",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Wildcard Under Wildcard!"))
+							},
+						},
 					},
 				},
 				{
@@ -260,6 +292,38 @@ func TestMux(t *testing.T) {
 					},
 					status: http.StatusCreated,
 					body:   "path user is ada!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/wildcard/1/2/3/4", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Wildcard!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/wildcard/under/1/2/3/4/5", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Wildcard Under Wildcard!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/wildcard/under/1/2/3/4", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Wildcard Under!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/wildcard-x/under/1/2/3", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Wildcard Under 1-2-3!",
 				},
 			},
 		},
