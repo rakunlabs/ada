@@ -295,47 +295,47 @@ func (m *Mux) HandleWithMethod(method, path string, handler http.HandlerFunc, mi
 }
 
 func (m *Mux) GET(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodGet, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodGet, path, handler, middlewares...)
 }
 
 func (m *Mux) POST(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodPost, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodPost, path, handler, middlewares...)
 }
 
 func (m *Mux) PUT(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodPut, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodPut, path, handler, middlewares...)
 }
 
 func (m *Mux) PATCH(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodPatch, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodPatch, path, handler, middlewares...)
 }
 
 func (m *Mux) DELETE(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodDelete, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodDelete, path, handler, middlewares...)
 }
 
 func (m *Mux) HEAD(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodHead, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodHead, path, handler, middlewares...)
 }
 
 func (m *Mux) OPTIONS(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodOptions, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodOptions, path, handler, middlewares...)
 }
 
 func (m *Mux) TRACE(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodTrace, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodTrace, path, handler, middlewares...)
 }
 
 func (m *Mux) CONNECT(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodConnect, path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod(http.MethodConnect, path, handler, middlewares...)
 }
 
 func (m *Mux) HandleFunc(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod("", path, handler, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod("", path, handler, middlewares...)
 }
 
 func (m *Mux) Handle(path string, handler http.Handler, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod("", path, handler.ServeHTTP, append(m.middlewares, middlewares...)...)
+	m.HandleWithMethod("", path, handler.ServeHTTP, middlewares...)
 }
 
 func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
