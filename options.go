@@ -1,7 +1,9 @@
 package ada
 
 import (
+	"context"
 	"log/slog"
+	"net/http"
 	"time"
 )
 
@@ -38,7 +40,10 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 }
 
 type optionStart struct {
-	Network string
+	Network        string
+	Context        context.Context
+	BaseContext    context.Context
+	HTTPServerFunc func(*http.Server) *http.Server
 }
 
 type OptionStart func(*optionStart)
@@ -52,6 +57,12 @@ func getOptionStart(opt optionStart, opts ...OptionStart) optionStart {
 		opt.Network = "tcp"
 	}
 
+	if opt.HTTPServerFunc == nil {
+		opt.HTTPServerFunc = func(s *http.Server) *http.Server {
+			return s
+		}
+	}
+
 	return opt
 }
 
@@ -59,5 +70,29 @@ func getOptionStart(opt optionStart, opts ...OptionStart) optionStart {
 func WithNetwork(network string) OptionStart {
 	return func(opt *optionStart) {
 		opt.Network = network
+	}
+}
+
+// WithBaseContext sets the base context, default is context.Background().
+//   - This context also uses as base context.
+//   - Default is ctx of argument or context.Background().
+func WithBaseContext(ctx context.Context) OptionStart {
+	return func(opt *optionStart) {
+		opt.BaseContext = ctx
+	}
+}
+
+// WithContext sets the context, usable for stopping the server.
+//   - This context also uses as base context if not provided.
+//   - Same as StartWithContext's ctx
+func WithContext(ctx context.Context) OptionStart {
+	return func(opt *optionStart) {
+		opt.Context = ctx
+	}
+}
+
+func WithHTTPServerFunc(fn func(server *http.Server) *http.Server) OptionStart {
+	return func(opt *optionStart) {
+		opt.HTTPServerFunc = fn
 	}
 }

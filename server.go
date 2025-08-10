@@ -54,23 +54,17 @@ func New(opts ...Option) *Server {
 // Start starts the server with the given address.
 //   - If the server fails to start, an error will be returned.
 func (s *Server) Start(addr string, opts ...OptionStart) error {
-	return s.start(addr, nil, opts...)
+	return s.start(addr, opts...)
 }
 
 // StartWithContext starts the server with the given context and address.
 //   - If the context is canceled, the server will be stopped.
 //   - If the server fails to start, an error will be returned.
 func (s *Server) StartWithContext(ctx context.Context, addr string, opts ...OptionStart) error {
-	return s.start(addr, func() {
-		if ctx != nil {
-			context.AfterFunc(ctx, func() {
-				_ = s.Stop()
-			})
-		}
-	}, opts...)
+	return s.start(addr, append(opts, WithContext(ctx))...)
 }
 
-func (s *Server) start(addr string, fn func(), opts ...OptionStart) error {
+func (s *Server) start(addr string, opts ...OptionStart) error {
 	s.m.Lock()
 	if s.started {
 		return ErrAlreadyStarted
@@ -87,9 +81,22 @@ func (s *Server) start(addr string, fn func(), opts ...OptionStart) error {
 
 	opt := getOptionStart(optionStart{}, opts...)
 
-	s.server = &http.Server{
-		Handler: h2c.NewHandler(s.Mux, &http2.Server{}),
+	baseContext := opt.BaseContext
+	if baseContext == nil {
+		baseContext = opt.Context
 	}
+	if baseContext == nil {
+		baseContext = context.Background()
+	}
+
+	s.server = opt.HTTPServerFunc(
+		&http.Server{
+			Handler: h2c.NewHandler(s.Mux, &http2.Server{}),
+			BaseContext: func(_ net.Listener) context.Context {
+				return baseContext
+			},
+		},
+	)
 
 	var err error
 	s.listener, err = net.Listen(opt.Network, addr)
@@ -97,8 +104,13 @@ func (s *Server) start(addr string, fn func(), opts ...OptionStart) error {
 		return fmt.Errorf("address cannot listen %s: %w, %w", s.server.Addr, ErrListen, err)
 	}
 
-	if fn != nil {
-		fn()
+	if opt.Context != nil {
+		context.AfterFunc(opt.Context, func() {
+			err := s.Stop()
+			if err != nil {
+				s.logger.Error("error stopping server", "error", err)
+			}
+		})
 	}
 
 	s.logger.Info("server started", "addr", s.listener.Addr().String())
@@ -119,8 +131,6 @@ func (s *Server) Stop() error {
 	}
 
 	s.logger.Warn("stopping server", "addr", s.listener.Addr().String())
-
-	defer s.listener.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
