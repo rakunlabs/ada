@@ -8,6 +8,12 @@ Learn how to use Ada with our comprehensive documentation.
 <script setup>
 const guides = [
   {
+    icon: '🎬',
+    title: 'Start',
+    description: 'How to start server and shutdown',
+    href: './start'
+  },
+  {
     icon: '📄',
     title: 'Routing',
     description: 'Learn how to handle HTTP requests and create powerful routing patterns',
