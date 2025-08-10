@@ -7,7 +7,6 @@ import (
 
 type option struct {
 	Logger          Logger
-	Network         string
 	ShutdownTimeout time.Duration
 }
 
@@ -20,9 +19,6 @@ func getOption(opt option, opts ...Option) option {
 
 	if opt.Logger == nil {
 		opt.Logger = slog.Default()
-	}
-	if opt.Network == "" {
-		opt.Network = "tcp"
 	}
 
 	return opt
@@ -41,9 +37,27 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 	}
 }
 
+type optionStart struct {
+	Network string
+}
+
+type OptionStart func(*optionStart)
+
+func getOptionStart(opt optionStart, opts ...OptionStart) optionStart {
+	for _, o := range opts {
+		o(&opt)
+	}
+
+	if opt.Network == "" {
+		opt.Network = "tcp"
+	}
+
+	return opt
+}
+
 // WithNetwork sets the network, default is "tcp".
-func WithNetwork(network string) Option {
-	return func(opt *option) {
+func WithNetwork(network string) OptionStart {
+	return func(opt *optionStart) {
 		opt.Network = network
 	}
 }

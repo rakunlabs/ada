@@ -9,16 +9,16 @@ export default defineConfig({
   // Configure syntax highlighting with Monokai theme
   markdown: {
     theme: {
-      light: 'monokai',
-      dark: 'monokai'
+      light: "monokai",
+      dark: "monokai",
     },
     // lineNumbers: true
   },
   themeConfig: {
     search: {
-      provider: 'local'
+      provider: "local",
     },
-    
+
     // https://vitepress.dev/reference/default-theme-config
     nav: [
       { text: "Home", link: "/" },
@@ -34,6 +34,10 @@ export default defineConfig({
         text: "Guide",
         link: "/guide.md",
         items: [
+          {
+            text: "Start Server",
+            link: "/guide/start.md",
+          },
           {
             text: "Routing",
             link: "/guide/routing.md",

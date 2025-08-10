@@ -16,6 +16,7 @@ import (
 var (
 	DefaultShutdownTimeout = 10 * time.Second
 	ErrAlreadyStarted      = errors.New("server started already")
+	ErrListen              = errors.New("listen")
 )
 
 type Server struct {
@@ -24,7 +25,7 @@ type Server struct {
 	logger          Logger
 	started         bool
 	shutdownTimeout time.Duration
-	network         string
+	listener        net.Listener
 
 	m sync.Mutex
 }
@@ -45,32 +46,31 @@ func New(opts ...Option) *Server {
 	}, opts...)
 
 	return &Server{
-		Mux:     NewMux(),
-		logger:  opt.Logger,
-		network: opt.Network,
+		Mux:    NewMux(),
+		logger: opt.Logger,
 	}
 }
 
 // Start starts the server with the given address.
 //   - If the server fails to start, an error will be returned.
-func (s *Server) Start(addr string) error {
-	return s.start(addr, nil)
+func (s *Server) Start(addr string, opts ...OptionStart) error {
+	return s.start(addr, nil, opts...)
 }
 
 // StartWithContext starts the server with the given context and address.
 //   - If the context is canceled, the server will be stopped.
 //   - If the server fails to start, an error will be returned.
-func (s *Server) StartWithContext(ctx context.Context, addr string) error {
+func (s *Server) StartWithContext(ctx context.Context, addr string, opts ...OptionStart) error {
 	return s.start(addr, func() {
 		if ctx != nil {
 			context.AfterFunc(ctx, func() {
 				_ = s.Stop()
 			})
 		}
-	})
+	}, opts...)
 }
 
-func (s *Server) start(addr string, fn func()) error {
+func (s *Server) start(addr string, fn func(), opts ...OptionStart) error {
 	s.m.Lock()
 	if s.started {
 		return ErrAlreadyStarted
@@ -85,23 +85,25 @@ func (s *Server) start(addr string, fn func()) error {
 		s.m.Unlock()
 	}()
 
+	opt := getOptionStart(optionStart{}, opts...)
+
 	s.server = &http.Server{
-		Addr:    addr,
 		Handler: h2c.NewHandler(s.Mux, &http2.Server{}),
 	}
 
-	listener, err := net.Listen(s.network, s.server.Addr)
+	var err error
+	s.listener, err = net.Listen(opt.Network, addr)
 	if err != nil {
-		return fmt.Errorf("address cannot listen %s: %w", s.server.Addr, err)
+		return fmt.Errorf("address cannot listen %s: %w, %w", s.server.Addr, ErrListen, err)
 	}
 
 	if fn != nil {
 		fn()
 	}
 
-	s.logger.Info("server started", "addr", s.server.Addr)
+	s.logger.Info("server started", "addr", s.listener.Addr().String())
 
-	if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := s.server.Serve(s.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", err)
 	}
 
@@ -116,7 +118,9 @@ func (s *Server) Stop() error {
 		return nil
 	}
 
-	s.logger.Warn("stopping server", "addr", s.server.Addr)
+	s.logger.Warn("stopping server", "addr", s.listener.Addr().String())
+
+	defer s.listener.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
