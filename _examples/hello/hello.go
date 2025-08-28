@@ -10,6 +10,7 @@ import (
 	mlog "github.com/rakunlabs/ada/middleware/log"
 	mrecover "github.com/rakunlabs/ada/middleware/recover"
 	mrequestid "github.com/rakunlabs/ada/middleware/requestid"
+	mtelemetry "github.com/rakunlabs/ada/middleware/telemetry"
 )
 
 func Run(ctx context.Context) error {
@@ -20,9 +21,11 @@ func Run(ctx context.Context) error {
 			mrecover.Middleware(),
 			mrequestid.Middleware(),
 			mlog.Middleware(),
+			mtelemetry.Middleware(),
 		)
 		mux.POST("/hello", helloHandler.SayHello)
-		mux.GET("/", helloHandler.Info)
+		mux.GET("/", helloHandler.Main)
+		mux.GET("/hello/info", mux.Wrap(helloHandler.Info))
 
 		return nil
 	})
@@ -35,6 +38,17 @@ func Run(ctx context.Context) error {
 
 type Hello struct{}
 
+func (h *Hello) Info(c *ada.Context) error {
+	return c.
+		SetStatus(http.StatusOK).
+		SetHeader("X-Custom-Header", "value").
+		SendJSON(
+			map[string]string{
+				"message": "Info!",
+			},
+		)
+}
+
 func (h *Hello) SayHello(w http.ResponseWriter, r *http.Request) {
 	v, _ := io.ReadAll(r.Body)
 
@@ -43,8 +57,8 @@ func (h *Hello) SayHello(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("Hello, " + string(v)))
 }
 
-func (h *Hello) Info(w http.ResponseWriter, r *http.Request) {
+func (h *Hello) Main(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("Hello, Info!"))
+	_, _ = w.Write([]byte("Main!"))
 }

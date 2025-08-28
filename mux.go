@@ -24,6 +24,9 @@ type node struct {
 
 	MethodHandler map[string]http.HandlerFunc
 	Handler       http.HandlerFunc
+
+	// Path of the node, used for telemetry.
+	Path string
 }
 
 type nodeStatic struct {
@@ -100,9 +103,14 @@ func (n *node) FindNode(path string, r *http.Request) *node {
 	return nil
 }
 
-func (n *node) SetHandler(method string, handler http.HandlerFunc) {
+func (n *node) SetHandler(method, path string, handler http.HandlerFunc) {
+	handlerAssign := func(w http.ResponseWriter, r *http.Request) {
+		r.Pattern = path // Set the pattern
+		handler(w, r)
+	}
+
 	if method == "" {
-		n.Handler = handler.ServeHTTP
+		n.Handler = handlerAssign
 
 		return
 	}
@@ -111,7 +119,7 @@ func (n *node) SetHandler(method string, handler http.HandlerFunc) {
 		n.MethodHandler = make(map[string]http.HandlerFunc)
 	}
 
-	n.MethodHandler[method] = handler.ServeHTTP
+	n.MethodHandler[method] = handlerAssign
 }
 
 func (n *node) Insert(method, path string, handler http.HandlerFunc) {
@@ -146,7 +154,7 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 		}
 	}
 
-	current.SetHandler(method, handler)
+	current.SetHandler(method, path, handler)
 	if typeNodeSegment == typeNodeWildcard {
 		current.Possible = true
 	}
@@ -277,6 +285,7 @@ func findTypeNode(part string) typeNode {
 type Mux struct {
 	root *node
 
+	errHandler  func(err error, c *Context)
 	notFound    http.HandlerFunc
 	middlewares []func(next http.Handler) http.Handler
 	prefix      string
@@ -357,6 +366,13 @@ func (m Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http
 //   - If not set, it defaults to http.NotFound.
 func (m *Mux) NotFound(handler http.HandlerFunc) {
 	m.notFound = handler
+}
+
+// ErrorHandler sets the handler for 500 Internal Server Error responses.
+//   - If not set, it defaults to a generic error handler.
+//   - Only usable for ada.HandlerFunc handlers.
+func (m *Mux) ErrorHandler(handler func(err error, c *Context)) {
+	m.errHandler = handler
 }
 
 // ServeHTTP implements the http.Handler interface for Mux.

@@ -1,10 +1,5 @@
 package ada
 
-import (
-	"encoding/json"
-	"net/http"
-)
-
 const (
 	charsetUTF8 = "charset=UTF-8"
 )
@@ -30,9 +25,11 @@ const (
 )
 
 const (
-	HeaderXRequestID = "X-Request-Id"
-	HeaderVary       = "Vary"
-	HeaderOrigin     = "Origin"
+	HeaderContentType = "Content-Type"
+	HeaderXRequestID  = "X-Request-Id"
+	HeaderVary        = "Vary"
+	HeaderOrigin      = "Origin"
+	HeaderLocation    = "Location"
 
 	HeaderAccessControlAllowOrigin      = "Access-Control-Allow-Origin"
 	HeaderAccessControlAllowCredentials = "Access-Control-Allow-Credentials"
@@ -43,23 +40,3 @@ const (
 	HeaderAccessControlAllowHeaders     = "Access-Control-Allow-Headers"
 	HeaderAccessControlMaxAge           = "Access-Control-Max-Age"
 )
-
-func JSON(w http.ResponseWriter, code int, data any) error {
-	return JSONP(w, code, data, "")
-}
-
-func JSONP(w http.ResponseWriter, code int, data any, indent string) error {
-	w.Header().Set("Content-Type", MIMEApplicationJSONCharsetUTF8)
-	w.WriteHeader(code)
-
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", indent)
-
-	return encoder.Encode(data)
-}
-
-func NoContent(w http.ResponseWriter) error {
-	w.WriteHeader(http.StatusNoContent)
-
-	return nil
-}

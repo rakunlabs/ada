@@ -17,6 +17,8 @@ var (
 	DefaultShutdownTimeout = 10 * time.Second
 	ErrAlreadyStarted      = errors.New("server started already")
 	ErrListen              = errors.New("listen")
+
+	ListenerAddrContextKey = "listener_addr"
 )
 
 type Server struct {
@@ -89,20 +91,20 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 		baseContext = context.Background()
 	}
 
+	var err error
+	s.listener, err = net.Listen(opt.Network, addr)
+	if err != nil {
+		return fmt.Errorf("address cannot listen %s: %w, %w", addr, ErrListen, err)
+	}
+
 	s.server = opt.HTTPServerFunc(
 		&http.Server{
 			Handler: h2c.NewHandler(s.Mux, &http2.Server{}),
 			BaseContext: func(_ net.Listener) context.Context {
-				return baseContext
+				return context.WithValue(baseContext, ListenerAddrContextKey, s.listener.Addr())
 			},
 		},
 	)
-
-	var err error
-	s.listener, err = net.Listen(opt.Network, addr)
-	if err != nil {
-		return fmt.Errorf("address cannot listen %s: %w, %w", s.server.Addr, ErrListen, err)
-	}
 
 	if opt.Context != nil {
 		context.AfterFunc(opt.Context, func() {

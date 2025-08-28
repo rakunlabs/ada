@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/rakunlabs/into"
 	"github.com/rakunlabs/logi"
+	"github.com/rakunlabs/tell"
 
 	"github.com/rakunlabs/ada/examples/hello"
 	"github.com/rakunlabs/ada/examples/mcp"
@@ -27,18 +30,13 @@ var Examples = map[string]func(ctx context.Context) error{
 	"hello": hello.Run,
 }
 
-func listExamples() string {
-	var sb strings.Builder
-	sb.WriteString("[")
-	for k := range Examples {
-		sb.WriteString(fmt.Sprintf(" %s", k))
-	}
-	sb.WriteString(" ]")
-
-	return sb.String()
-}
-
 func run(ctx context.Context) error {
+	collector, err := tell.New(ctx, tell.Config{})
+	if err != nil {
+		return fmt.Errorf("failed to init telemetry; %w", err)
+	}
+	defer collector.Shutdown()
+
 	example := strings.ToLower(os.Getenv("EXAMPLE"))
 
 	if v := Examples[example]; v != nil {
@@ -46,5 +44,5 @@ func run(ctx context.Context) error {
 		return v(ctx)
 	}
 
-	return fmt.Errorf("unknown EXAMPLE env: [%s] on %s", example, listExamples())
+	return fmt.Errorf("unknown EXAMPLE env: [%s] on [ %s ]", example, strings.Join(slices.Collect(maps.Keys(Examples)), ", "))
 }
