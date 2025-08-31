@@ -7,6 +7,7 @@ import (
 
 	"github.com/rakunlabs/ada"
 
+	mcors "github.com/rakunlabs/ada/middleware/cors"
 	mlog "github.com/rakunlabs/ada/middleware/log"
 	mrecover "github.com/rakunlabs/ada/middleware/recover"
 	mrequestid "github.com/rakunlabs/ada/middleware/requestid"
@@ -21,6 +22,7 @@ func Run(ctx context.Context) error {
 			mrecover.Middleware(),
 			mrequestid.Middleware(),
 			mlog.Middleware(),
+			mcors.Middleware(),
 			mtelemetry.Middleware(),
 		)
 		mux.POST("/hello", helloHandler.SayHello)

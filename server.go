@@ -85,9 +85,6 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 
 	baseContext := opt.BaseContext
 	if baseContext == nil {
-		baseContext = opt.Context
-	}
-	if baseContext == nil {
 		baseContext = context.Background()
 	}
 

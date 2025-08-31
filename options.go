@@ -74,8 +74,7 @@ func WithNetwork(network string) OptionStart {
 }
 
 // WithBaseContext sets the base context, default is context.Background().
-//   - This context also uses as base context.
-//   - Default is ctx of argument or context.Background().
+//   - Default is context.Background().
 func WithBaseContext(ctx context.Context) OptionStart {
 	return func(opt *optionStart) {
 		opt.BaseContext = ctx
@@ -83,7 +82,6 @@ func WithBaseContext(ctx context.Context) OptionStart {
 }
 
 // WithContext sets the context, usable for stopping the server.
-//   - This context also uses as base context if not provided.
 //   - Same as StartWithContext's ctx
 func WithContext(ctx context.Context) OptionStart {
 	return func(opt *optionStart) {

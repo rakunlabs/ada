@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package test.v1;
+
+message GetRecordRequest {
+    int64 id = 1;
+}
+
+message GetRecordResponse {
+    int64 id = 1;
+    bytes record_details = 2;
+    optional string date_reg = 3;
+}
+
+service MyService {
+    rpc GetRecord (GetRecordRequest) returns (GetRecordResponse);
+}

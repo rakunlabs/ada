@@ -10,22 +10,17 @@ import (
 func RequestTraceAttrs(req *http.Request) []attribute.KeyValue {
 	count := 3 // ServerAddress, Method, Scheme
 
-	server := req.Header.Get("Server")
-
 	var host string
 	var p int
-	if server == "" {
-		host, p = splitHostPort(req.Host)
-	} else {
-		// Prioritize the primary server name.
-		host, p = splitHostPort(server)
-		if p < 0 {
-			_, p = splitHostPort(req.Host)
-		}
-	}
+	host, p = splitHostPort(req.Host)
 
 	hostPort := requiredHTTPPort(req.TLS != nil, p)
 	if hostPort > 0 {
+		count++
+	}
+
+	clientName := req.Header.Get("Server")
+	if clientName != "" {
 		count++
 	}
 
@@ -105,6 +100,10 @@ func RequestTraceAttrs(req *http.Request) []attribute.KeyValue {
 
 	if clientIP != "" {
 		attrs = append(attrs, semconv.ClientAddress(clientIP))
+	}
+
+	if clientName != "" {
+		attrs = append(attrs, attribute.Key("client.name").String(clientName))
 	}
 
 	if req.URL != nil && req.URL.Path != "" {

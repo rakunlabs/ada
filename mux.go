@@ -60,6 +60,14 @@ func (n *node) IsHandlerExists() bool {
 }
 
 func (n *node) FindNode(path string, r *http.Request) *node {
+	if path == "" {
+		if n.IsHandlerExists() {
+			return n
+		}
+
+		return nil
+	}
+
 	if n.TypeStatic != nil {
 		current := n
 		isFound := true
@@ -384,7 +392,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 	current := m.root
-	possible := current
+	var possible *node
 
 	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for i, segment := range segments {

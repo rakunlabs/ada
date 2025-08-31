@@ -52,10 +52,26 @@ func TestMux(t *testing.T) {
 								w.Write([]byte("Test!"))
 							},
 						},
+						{
+							name:   "GET /grpc.reflection.v1alpha.ServerReflection/",
+							path:   "/grpc.reflection.v1alpha.ServerReflection/",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("gRPC Reflection!"))
+							},
+						},
 					},
 				},
 			},
 			tests: []testWant{
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/grpc.reflection.v1alpha.ServerReflection/", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "gRPC Reflection!",
+				},
 				{
 					request: func() *http.Request {
 						req, _ := http.NewRequest(http.MethodGet, "/", nil)

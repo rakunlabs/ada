@@ -63,6 +63,10 @@ export default defineConfig({
                 link: "/guide/middleware/cors.md",
               },
               {
+                text: "Telemetry",
+                link: "/guide/middleware/telemetry.md",
+              },
+              {
                 text: "Folder",
                 link: "/guide/middleware/folder.md",
               },
