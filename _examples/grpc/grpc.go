@@ -23,24 +23,26 @@ func Run(ctx context.Context) error {
 			mrecover.Middleware(),
 			mrequestid.Middleware(),
 			mlog.Middleware(),
-			mcors.Middleware(),
-			mtelemetry.Middleware(),
 		)
 
 		// grpc handler
 		gRPChelloHandler := NewHelloHandler()
-		mux.Handle(gRPChelloHandler.Handler())
+		mux.HandleAll(gRPChelloHandler.Handler())
 
 		// add gRPC health check
 		healthChecker := grpchealth.NewStaticChecker(gRPChelloHandler.ServiceName())
-		mux.Handle(grpchealth.NewHandler(healthChecker))
+		mux.HandleAll(grpchealth.NewHandler(healthChecker))
 
 		// add gRPC reflection
 		reflector := grpcreflect.NewStaticReflector(gRPChelloHandler.ServiceName())
-		mux.Handle(grpcreflect.NewHandlerV1(reflector))
-		mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
+		mux.HandleAll(grpcreflect.NewHandlerV1(reflector))
+		mux.HandleAll(grpcreflect.NewHandlerV1Alpha(reflector))
 
 		// add http handler
+		mux.Use(
+			mcors.Middleware(),
+			mtelemetry.Middleware(),
+		)
 		mux.POST("/hello", mux.Wrap(SayHello))
 
 		return nil

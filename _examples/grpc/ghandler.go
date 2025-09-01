@@ -7,20 +7,31 @@ import (
 	"net/http"
 
 	"connectrpc.com/connect"
+	"connectrpc.com/otelconnect"
+
 	v1 "github.com/rakunlabs/ada/_examples/grpc/protobuf/gen/test/v1"
 	"github.com/rakunlabs/ada/_examples/grpc/protobuf/gen/test/v1/testv1connect"
 )
 
-type HelloHandler struct{}
+type HelloHandler struct {
+	otelInterceptor *otelconnect.Interceptor
+}
 
 var _ testv1connect.MyServiceHandler = (*HelloHandler)(nil)
 
 func NewHelloHandler() *HelloHandler {
-	return &HelloHandler{}
+	otelInterceptor, err := otelconnect.NewInterceptor(otelconnect.WithoutServerPeerAttributes())
+	if err != nil {
+		panic(err)
+	}
+
+	return &HelloHandler{
+		otelInterceptor: otelInterceptor,
+	}
 }
 
 func (h *HelloHandler) Handler() (string, http.Handler) {
-	return testv1connect.NewMyServiceHandler(h)
+	return testv1connect.NewMyServiceHandler(h, connect.WithInterceptors(h.otelInterceptor))
 }
 
 func (h *HelloHandler) ServiceName() string {

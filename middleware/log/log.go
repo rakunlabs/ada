@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/felixge/httpsnoop"
 )
 
 // Logger is based on echo's log middleware.
@@ -107,14 +109,11 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 				return
 			}
 
-			// Create a custom response writer to capture response details
-			responseWriter := &responseWriter{ResponseWriter: w}
-
 			// Record start time
 			start := time.Now()
 
 			// Execute the next handler
-			next.ServeHTTP(responseWriter, r)
+			m := httpsnoop.CaptureMetrics(next, w, r)
 
 			// Calculate latency
 			latency := time.Since(start)
@@ -172,7 +171,7 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 
 			// Extract status if enabled
 			if l.LogStatus {
-				values.Status = responseWriter.status
+				values.Status = m.Code
 			}
 
 			// Extract content length if enabled
@@ -182,7 +181,7 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 
 			// Extract response size if enabled
 			if l.LogResponseSize {
-				values.ResponseSize = responseWriter.size
+				values.ResponseSize = m.Written
 			}
 
 			// Extract headers if enabled
@@ -225,27 +224,6 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 			}
 		})
 	}
-}
-
-// responseWriter wraps http.ResponseWriter to capture response details
-type responseWriter struct {
-	http.ResponseWriter
-	status int
-	size   int64
-}
-
-func (rw *responseWriter) WriteHeader(statusCode int) {
-	rw.status = statusCode
-	rw.ResponseWriter.WriteHeader(statusCode)
-}
-
-func (rw *responseWriter) Write(b []byte) (int, error) {
-	if rw.status == 0 {
-		rw.status = http.StatusOK
-	}
-	size, err := rw.ResponseWriter.Write(b)
-	rw.size += int64(size)
-	return size, err
 }
 
 func New(opts ...Option) *Logger {

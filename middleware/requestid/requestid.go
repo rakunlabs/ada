@@ -22,7 +22,9 @@ func New(opts ...Option) *RequestID {
 	}
 
 	if o.Generate == nil {
-		o.Generate = ulid.Make().String
+		o.Generate = func() string {
+			return ulid.Make().String()
+		}
 	}
 
 	return &RequestID{

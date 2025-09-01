@@ -6,6 +6,7 @@ require (
 	connectrpc.com/connect v1.18.1
 	connectrpc.com/grpchealth v1.4.0
 	connectrpc.com/grpcreflect v1.3.0
+	connectrpc.com/otelconnect v0.7.2
 	github.com/rakunlabs/ada v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/cors v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/log v0.0.0-00010101000000-000000000000
@@ -33,7 +34,6 @@ require (
 	buf.build/go/spdx v0.2.0 // indirect
 	buf.build/go/standard v0.1.0 // indirect
 	cel.dev/expr v0.24.0 // indirect
-	connectrpc.com/otelconnect v0.7.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect

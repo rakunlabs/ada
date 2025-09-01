@@ -54,6 +54,7 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 			for _, filter := range cfg.Filters {
 				if !filter(r) {
 					next.ServeHTTP(w, r)
+
 					return
 				}
 			}
