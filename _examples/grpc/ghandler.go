@@ -20,7 +20,10 @@ type HelloHandler struct {
 var _ testv1connect.MyServiceHandler = (*HelloHandler)(nil)
 
 func NewHelloHandler() *HelloHandler {
-	otelInterceptor, err := otelconnect.NewInterceptor(otelconnect.WithoutServerPeerAttributes())
+	otelInterceptor, err := otelconnect.NewInterceptor(
+		otelconnect.WithoutServerPeerAttributes(),
+		otelconnect.WithTraceRequestHeader("X-Request-Id", "Server"),
+	)
 	if err != nil {
 		panic(err)
 	}
