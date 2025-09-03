@@ -2,9 +2,8 @@
 
 Opentelemetry middleware for trace and metrics.
 
-```sh
-# mtelemetry "github.com/rakunlabs/ada/middleware/telemetry"
-go get github.com/rakunlabs/ada/middleware/telemetry
+```go
+mtelemetry "github.com/rakunlabs/ada/middleware/telemetry"
 ```
 
 To use telemetry middleware, you need to start and set global tracing and metrics providers.

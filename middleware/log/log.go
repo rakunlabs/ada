@@ -232,7 +232,6 @@ func New(opts ...Option) *Logger {
 			LogValuesFunc: func(r *http.Request, v *RequestLoggerValues) {
 				slog.Debug("request",
 					slog.String("user", r.Header.Get("X-User")),
-					slog.String("client", r.Header.Get("Server")),
 					slog.String("route", r.Pattern),
 					slog.String("request_id", v.RequestID),
 					slog.String("remote_ip", v.RemoteIP),

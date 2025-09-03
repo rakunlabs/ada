@@ -14,6 +14,7 @@ import (
 	mlog "github.com/rakunlabs/ada/middleware/log"
 	mrecover "github.com/rakunlabs/ada/middleware/recover"
 	mrequestid "github.com/rakunlabs/ada/middleware/requestid"
+	mserver "github.com/rakunlabs/ada/middleware/server"
 	mtelemetry "github.com/rakunlabs/ada/middleware/telemetry"
 )
 
@@ -21,6 +22,7 @@ func Run(ctx context.Context) error {
 	server, err := ada.NewWithFunc(ctx, func(_ context.Context, mux *ada.Mux) error {
 		mux.Use(
 			mrecover.Middleware(),
+			mserver.Middleware("MyServer"),
 			mrequestid.Middleware(),
 			mlog.Middleware(),
 		)

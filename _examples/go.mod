@@ -13,6 +13,7 @@ require (
 	github.com/rakunlabs/ada/middleware/mcp v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/recover v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/requestid v0.0.0-00010101000000-000000000000
+	github.com/rakunlabs/ada/middleware/server v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/telemetry v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/into v0.4.1
 	github.com/rakunlabs/logi v0.4.1
@@ -139,5 +140,7 @@ replace github.com/rakunlabs/ada/middleware/log => ../middleware/log
 replace github.com/rakunlabs/ada/middleware/cors => ../middleware/cors
 
 replace github.com/rakunlabs/ada/middleware/telemetry => ../middleware/telemetry
+
+replace github.com/rakunlabs/ada/middleware/server => ../middleware/server
 
 tool github.com/bufbuild/buf/cmd/buf
