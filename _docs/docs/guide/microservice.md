@@ -28,7 +28,7 @@ import (
 server := ada.New()
 server.Use(
     mrecover.Middleware(),
-    mserver.Middleware("my-server:v0.1.0"),
+    mserver.Middleware("my-server/v0.1.0"),
     mcors.Middleware(),
     mrequestid.Middleware(),
     mlog.Middleware(),
