@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	DefaultShutdownTimeout = 10 * time.Second
-	ErrAlreadyStarted      = errors.New("server started already")
-	ErrListen              = errors.New("listen")
+	DefaultShutdownTimeout   = 10 * time.Second
+	DefaultReadHeaderTimeout = 10 * time.Second
+	ErrAlreadyStarted        = errors.New("server started already")
+	ErrListen                = errors.New("listen")
 
 	ListenerAddrContextKey = "listener_addr"
 )
@@ -96,7 +97,8 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 
 	s.server = opt.HTTPServerFunc(
 		&http.Server{
-			Handler: h2c.NewHandler(s.Mux, &http2.Server{}),
+			ReadHeaderTimeout: opt.ReadHeaderTimeout,
+			Handler:           h2c.NewHandler(s.Mux, &http2.Server{}),
 			BaseContext: func(_ net.Listener) context.Context {
 				return context.WithValue(baseContext, ListenerAddrContextKey, s.listener.Addr())
 			},

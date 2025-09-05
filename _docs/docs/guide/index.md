@@ -31,12 +31,12 @@ const guides = [
     description: 'Build microservices with essential middleware and best practices',
     href: './microservice'
   },
-  // {
-  //   icon: '⚙️',
-  //   title: 'Configuration',
-  //   description: 'Configure your Ada application with environment variables and settings',
-  //   href: './configuration'
-  // },
+  {
+     icon: '🪢',
+     title: 'Binding',
+     description: 'Bind request data to structs',
+     href: './binding'
+  },
   // {
   //   icon: '🔧',
   //   title: 'API Reference',

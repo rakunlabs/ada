@@ -84,3 +84,11 @@ func (s *MCP) handleResourcesRead(id any, params json.RawMessage) JSONRPCRespons
 		Result:  result,
 	}
 }
+
+func (s *MCP) handlePing(id any) JSONRPCResponse {
+	return JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  map[string]any{"status": "pong"},
+	}
+}

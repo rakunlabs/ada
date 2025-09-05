@@ -62,6 +62,8 @@ func (s *MCP) handleRequest(request JSONRPCRequest) JSONRPCResponse {
 		} else {
 			return s.createErrorResponse(request.ID, -32602, "Missing params")
 		}
+	case "ping":
+		return s.handlePing(request.ID)
 	default:
 		return s.createErrorResponse(request.ID, -32601, "Method not found: "+request.Method)
 	}

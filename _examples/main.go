@@ -13,6 +13,7 @@ import (
 	"github.com/rakunlabs/logi"
 	"github.com/rakunlabs/tell"
 
+	"github.com/rakunlabs/ada/_examples/bind"
 	"github.com/rakunlabs/ada/_examples/grpc"
 	"github.com/rakunlabs/ada/_examples/hello"
 	"github.com/rakunlabs/ada/_examples/mcp"
@@ -30,6 +31,7 @@ var Examples = map[string]func(ctx context.Context) error{
 	"grpc":  grpc.Run,
 	"mcp":   mcp.Run,
 	"hello": hello.Run,
+	"bind":  bind.Run,
 }
 
 func run(ctx context.Context) error {

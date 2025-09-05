@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	// "github.com/rakunlabs/ada/utils/openapi"
 )
 
 type typeNode int
@@ -43,12 +44,14 @@ func (n *nodeStatic) SetChild(char byte, child *node) {
 }
 
 type nodeParam struct {
-	Name     string // Name of the parameter, e.g., "id"
+	// Name of the parameter, ex "id"
+	Name     string
 	Children *node
 }
 
 type nodeWildcard struct {
-	Children *node // Children nodes for wildcard
+	// Children nodes for wildcard
+	Children *node
 }
 
 func (n *node) IsHandlerExists() bool {
@@ -297,6 +300,8 @@ type Mux struct {
 	notFound    http.HandlerFunc
 	middlewares []func(next http.Handler) http.Handler
 	prefix      string
+
+	// openAPI *openapi.Builder
 }
 
 func NewMux() *Mux {
@@ -471,3 +476,5 @@ func Chain(middlewares ...func(next http.Handler) http.Handler) func(next http.H
 		return next
 	}
 }
+
+// ////////////////////////////////////////////

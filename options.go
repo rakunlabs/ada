@@ -40,10 +40,11 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 }
 
 type optionStart struct {
-	Network        string
-	Context        context.Context
-	BaseContext    context.Context
-	HTTPServerFunc func(*http.Server) *http.Server
+	Network           string
+	Context           context.Context
+	BaseContext       context.Context
+	HTTPServerFunc    func(*http.Server) *http.Server
+	ReadHeaderTimeout time.Duration
 }
 
 type OptionStart func(*optionStart)
@@ -61,6 +62,10 @@ func getOptionStart(opt optionStart, opts ...OptionStart) optionStart {
 		opt.HTTPServerFunc = func(s *http.Server) *http.Server {
 			return s
 		}
+	}
+
+	if opt.ReadHeaderTimeout == 0 {
+		opt.ReadHeaderTimeout = DefaultReadHeaderTimeout
 	}
 
 	return opt
@@ -92,5 +97,13 @@ func WithContext(ctx context.Context) OptionStart {
 func WithHTTPServerFunc(fn func(server *http.Server) *http.Server) OptionStart {
 	return func(opt *optionStart) {
 		opt.HTTPServerFunc = fn
+	}
+}
+
+// WithReadHeaderTimeout sets the ReadHeaderTimeout for the http.Server.
+//   - Default is 5 seconds.
+func WithReadHeaderTimeout(d time.Duration) OptionStart {
+	return func(opt *optionStart) {
+		opt.ReadHeaderTimeout = d
 	}
 }

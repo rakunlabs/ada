@@ -2,14 +2,13 @@ package ada
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+
+	"github.com/rakunlabs/ada/utils/bind"
 )
 
 type HandlerFunc func(c *Context) error
-
-var DefaultErrHandler = func(err error, c *Context) {
-	c.SetStatus(http.StatusInternalServerError).SendJSON(map[string]string{"message": err.Error()})
-}
 
 // Wrap converts ada.HandlerFunc to http.HandlerFunc.
 func (m *Mux) Wrap(handler HandlerFunc) func(http.ResponseWriter, *http.Request) {
@@ -46,9 +45,16 @@ func NewContext(w http.ResponseWriter, r *http.Request) *Context {
 	}
 }
 
+// Bind binds the request data to the provided struct based on content type and struct tags.
+//   - The obj parameter must be a pointer.
+func (c *Context) Bind(obj any) error {
+	return bind.Bind(c.Request, obj)
+}
+
 // SetHeader sets a response header.
 func (c *Context) SetHeader(key, value string) *Context {
 	c.Response.Header().Set(key, value)
+
 	return c
 }
 
@@ -59,6 +65,19 @@ func (c *Context) SetStatus(code int) *Context {
 
 	return c
 }
+
+func (c *Context) Err(err error) error {
+	if c.code < 400 {
+		c.code = http.StatusInternalServerError
+	}
+
+	return &HandlerError{
+		Code: c.code,
+		Err:  err,
+	}
+}
+
+// //////////////////////////////////////////
 
 // SendJSON sends a json response.
 func (c *Context) SendJSON(data any) error {
@@ -76,9 +95,37 @@ func (c *Context) SendJSONP(data any, indent string) error {
 	return encoder.Encode(data)
 }
 
+func (c *Context) SendJSONRaw(data []byte) error {
+	c.Response.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
+	c.Response.WriteHeader(c.code)
+
+	_, err := c.Response.Write(data)
+
+	return err
+}
+
 // SendNoContent always sends a 204 No Content response without body.
 func (c *Context) SendNoContent() error {
 	c.Response.WriteHeader(http.StatusNoContent)
 
 	return nil
+}
+
+func (c *Context) SendString(s string) error {
+	c.Response.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
+	c.Response.WriteHeader(c.code)
+
+	_, err := c.Response.Write([]byte(s))
+
+	return err
+}
+
+// SendIO streams data from an io.Reader to the response.
+//   - Content-Type should be set via SetHeader before calling this method.
+func (c *Context) SendIO(reader io.Reader) error {
+	c.Response.WriteHeader(c.code)
+
+	_, err := io.Copy(c.Response, reader)
+
+	return err
 }
