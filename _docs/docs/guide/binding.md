@@ -57,7 +57,7 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 // //////////////////////////////////
 // if using the ada.Context function
 
-func handleUser(c *ada.Context) {
+func handleUser(c *ada.Context) error {
     var user User
     if err := c.Bind(&user); err != nil {
         return c.SetStatus(http.StatusBadRequest).Err(err)

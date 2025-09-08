@@ -19,8 +19,8 @@ var (
 	typeDuration   = reflect.TypeOf(time.Duration(0))
 )
 
-// Bind binds HTTP request data to a struct based on content type and struct tags
-func Bind(req *http.Request, obj interface{}) error {
+// Bind binds HTTP request data to a struct based on content type and struct tags.
+func Bind(req *http.Request, obj any) error {
 	if req == nil {
 		return fmt.Errorf("request cannot be nil")
 	}
@@ -189,7 +189,7 @@ func bindURI(req *http.Request, rv reflect.Value) error {
 
 	rt := rv.Type()
 
-	for i := 0; i < rv.NumField(); i++ {
+	for i := range rv.NumField() {
 		field := rv.Field(i)
 		fieldType := rt.Field(i)
 
@@ -226,7 +226,7 @@ func bindURI(req *http.Request, rv reflect.Value) error {
 func bindFormData(values url.Values, rv reflect.Value, tagName string) error {
 	rt := rv.Type()
 
-	for i := 0; i < rv.NumField(); i++ {
+	for i := range rv.NumField() {
 		field := rv.Field(i)
 		fieldType := rt.Field(i)
 
@@ -269,7 +269,7 @@ func bindFormData(values url.Values, rv reflect.Value, tagName string) error {
 func bindFiles(files map[string][]*multipart.FileHeader, rv reflect.Value) error {
 	rt := rv.Type()
 
-	for i := 0; i < rv.NumField(); i++ {
+	for i := range rv.NumField() {
 		field := rv.Field(i)
 		fieldType := rt.Field(i)
 
