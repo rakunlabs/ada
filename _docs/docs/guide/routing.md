@@ -53,6 +53,7 @@ Wildcard routes use `*` to match any segment at that position:
 
 ```go
 server.GET("/files/*", func(w http.ResponseWriter, r *http.Request) {
+    // requestedPath := r.PathValue("*") // "/files/anything/1881" -> "anything/1881"
     // Matches /files/anything, /files/path/to/file, etc.
     fmt.Fprintf(w, "File path requested")
 })

@@ -43,6 +43,14 @@ export default defineConfig({
             link: "/guide/routing.md",
           },
           {
+            text: "Context",
+            link: "/guide/context.md",
+          },
+          {
+            text: "Binding",
+            link: "/guide/binding.md",
+          },
+          {
             text: "Middleware",
             link: "/guide/middleware.md",
             items: [

@@ -37,6 +37,34 @@ func TestMux(t *testing.T) {
 				{
 					handler: []testHandler{
 						{
+							name:   "GET /{test}/*",
+							path:   "/{test}/*",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								pathTest := r.PathValue("test")
+								pathAsterisk := r.PathValue("*")
+								w.Write([]byte("Test Param: " + pathTest + ", Asterisk: " + pathAsterisk))
+							},
+						},
+					},
+				},
+			},
+			tests: []testWant{
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/mmmm/1234/vvv/555", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Test Param: mmmm, Asterisk: 1234/vvv/555",
+				},
+			},
+		},
+		{
+			handlerGroup: []testHandlerGroup{
+				{
+					handler: []testHandler{
+						{
 							name:   "GET /",
 							path:   "/",
 							method: http.MethodGet,

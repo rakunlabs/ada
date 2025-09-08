@@ -296,12 +296,10 @@ func findTypeNode(part string) typeNode {
 type Mux struct {
 	root *node
 
-	errHandler  func(err error, c *Context)
+	errHandler  func(c *Context, err error)
 	notFound    http.HandlerFunc
 	middlewares []func(next http.Handler) http.Handler
 	prefix      string
-
-	// openAPI *openapi.Builder
 }
 
 func NewMux() *Mux {
@@ -398,7 +396,7 @@ func (m *Mux) NotFound(handler http.HandlerFunc) {
 // ErrorHandler sets the handler for 500 Internal Server Error responses.
 //   - If not set, it defaults to a generic error handler.
 //   - Only usable for ada.HandlerFunc handlers.
-func (m *Mux) ErrorHandler(handler func(err error, c *Context)) {
+func (m *Mux) ErrorHandler(handler func(c *Context, err error)) {
 	m.errHandler = handler
 }
 
@@ -412,11 +410,13 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	current := m.root
 	var possible *node
+	var possiblePath string
 
 	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for i, segment := range segments {
 		if current.TypeWildcard != nil && current.TypeWildcard.Children.Possible {
 			possible = current.TypeWildcard.Children
+			possiblePath = strings.Join(segments[i:], "/")
 		}
 		// find the type of the node
 		node := current.FindNode(segment, r)
@@ -432,6 +432,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			if node.Segment == nil {
 				current = possible
+				possiblePath = strings.Join(segments[i:], "/")
 				break
 			}
 			current = node.Segment
@@ -459,6 +460,10 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if handler == nil {
 		notFound(w, r)
 		return
+	}
+
+	if possiblePath != "" {
+		r.SetPathValue("*", possiblePath)
 	}
 
 	handler.ServeHTTP(w, r)

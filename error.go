@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-var DefaultErrHandler = func(err error, c *Context) {
+var DefaultErrHandler = func(c *Context, err error) {
 	var errResp *HandlerError
 	if errors.As(err, &errResp) {
 		c.SetStatus(errResp.Code).SendJSON(errResp)

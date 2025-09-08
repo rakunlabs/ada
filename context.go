@@ -18,10 +18,10 @@ func (m *Mux) Wrap(handler HandlerFunc) func(http.ResponseWriter, *http.Request)
 		if err := handler(c); err != nil {
 			if m.errHandler == nil {
 				if DefaultErrHandler != nil {
-					DefaultErrHandler(err, c)
+					DefaultErrHandler(c, err)
 				}
 			} else {
-				m.errHandler(err, c)
+				m.errHandler(c, err)
 			}
 		}
 	}
