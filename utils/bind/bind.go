@@ -14,13 +14,12 @@ import (
 )
 
 var (
-	typeTime       = reflect.TypeOf(time.Time{})
-	typeJSONNumber = reflect.TypeOf(json.Number(""))
-	typeDuration   = reflect.TypeOf(time.Duration(0))
+	typeTime     = reflect.TypeOf(time.Time{})
+	typeDuration = reflect.TypeOf(time.Duration(0))
 )
 
 // Bind binds HTTP request data to a struct based on content type and struct tags.
-func Bind(req *http.Request, obj any) error {
+func Bind(req *http.Request, obj any, opts ...Option) error {
 	if req == nil {
 		return fmt.Errorf("request cannot be nil")
 	}
@@ -31,7 +30,7 @@ func Bind(req *http.Request, obj any) error {
 
 	// Get the reflect value and type
 	rv := reflect.ValueOf(obj)
-	if rv.Kind() != reflect.Ptr {
+	if rv.Kind() != reflect.Pointer {
 		return fmt.Errorf("binding target must be a pointer")
 	}
 
@@ -40,20 +39,23 @@ func Bind(req *http.Request, obj any) error {
 		return fmt.Errorf("binding target must be settable")
 	}
 
-	// Parse form data first (for both form and multipart)
-	if err := req.ParseForm(); err != nil {
-		return fmt.Errorf("failed to parse form: %w", err)
-	}
-
-	// Parse multipart form if needed
-	if strings.HasPrefix(req.Header.Get("Content-Type"), "multipart/") {
-		if err := req.ParseMultipartForm(32 << 20); err != nil { // 32MB max
-			return fmt.Errorf("failed to parse multipart form: %w", err)
-		}
-	}
+	opt := applyOptions(opts...)
 
 	// Bind based on content type
 	contentType := req.Header.Get("Content-Type")
+
+	// Parse form data if it's a form type
+	if strings.Contains(contentType, "application/x-www-form-urlencoded") || strings.Contains(contentType, "multipart/form-data") {
+		if err := req.ParseForm(); err != nil {
+			return fmt.Errorf("failed to parse form: %w", err)
+		}
+		if strings.HasPrefix(contentType, "multipart/") {
+			if err := req.ParseMultipartForm(opt.MultipartFormMaxMemory); err != nil {
+				return fmt.Errorf("failed to parse multipart form: %w", err)
+			}
+		}
+	}
+
 	switch {
 	case strings.Contains(contentType, "application/json"):
 		if err := bindJSON(req, rv); err != nil {
@@ -74,7 +76,7 @@ func Bind(req *http.Request, obj any) error {
 	}
 
 	// Always bind query parameters, headers, and URI parameters
-	if err := bindQuery(req, rv); err != nil {
+	if err := bindQuery(req, rv, opt.QuerySeparator); err != nil {
 		return err
 	}
 
@@ -89,7 +91,7 @@ func Bind(req *http.Request, obj any) error {
 	return nil
 }
 
-// bindJSON binds JSON data from request body
+// bindJSON binds JSON data from request body.
 func bindJSON(req *http.Request, rv reflect.Value) error {
 	if req.Body == nil {
 		return nil
@@ -105,7 +107,7 @@ func bindJSON(req *http.Request, rv reflect.Value) error {
 	return nil
 }
 
-// bindXML binds XML data from request body
+// bindXML binds XML data from request body.
 func bindXML(req *http.Request, rv reflect.Value) error {
 	if req.Body == nil {
 		return nil
@@ -120,19 +122,19 @@ func bindXML(req *http.Request, rv reflect.Value) error {
 	return nil
 }
 
-// bindForm binds form data to struct fields with "form" tags
+// bindForm binds form data to struct fields with "form" tags.
 func bindForm(req *http.Request, rv reflect.Value) error {
-	return bindFormData(req.Form, rv, "form")
+	return bindFormData(req.Form, rv, "form", "")
 }
 
-// bindMultipartForm binds multipart form data to struct fields
+// bindMultipartForm binds multipart form data to struct fields.
 func bindMultipartForm(req *http.Request, rv reflect.Value) error {
 	if req.MultipartForm == nil {
 		return nil
 	}
 
 	// Bind form values
-	if err := bindFormData(req.MultipartForm.Value, rv, "form"); err != nil {
+	if err := bindFormData(req.MultipartForm.Value, rv, "form", ""); err != nil {
 		return err
 	}
 
@@ -140,13 +142,12 @@ func bindMultipartForm(req *http.Request, rv reflect.Value) error {
 	return bindFiles(req.MultipartForm.File, rv)
 }
 
-// bindQuery binds query parameters to struct fields with "query" tags
-func bindQuery(req *http.Request, rv reflect.Value) error {
-	queryParams := req.URL.Query()
-	return bindFormData(queryParams, rv, "query")
+// bindQuery binds query parameters to struct fields with "query" tags.
+func bindQuery(req *http.Request, rv reflect.Value, sep string) error {
+	return bindFormData(req.URL.Query(), rv, "query", sep)
 }
 
-// bindHeaders binds HTTP headers to struct fields with "header" tags
+// bindHeaders binds HTTP headers to struct fields with "header" tags.
 func bindHeaders(req *http.Request, rv reflect.Value) error {
 	rt := rv.Type()
 
@@ -181,7 +182,7 @@ func bindHeaders(req *http.Request, rv reflect.Value) error {
 	return nil
 }
 
-// bindURI binds URI parameters to struct fields with "uri" or "param" tags
+// bindURI binds URI parameters to struct fields with "uri" or "param" tags.
 func bindURI(req *http.Request, rv reflect.Value) error {
 	// This would typically be populated by the router
 	// For now, we'll check if there's a context value or similar mechanism
@@ -212,7 +213,7 @@ func bindURI(req *http.Request, rv reflect.Value) error {
 		}
 
 		// Try to get URI parameter from request context
-		if paramValue := getURIParam(req, paramName); paramValue != "" {
+		if paramValue := req.PathValue(paramName); paramValue != "" {
 			if err := setFieldValue(field, fieldType, paramValue); err != nil {
 				return fmt.Errorf("failed to bind URI param %s: %w", paramName, err)
 			}
@@ -222,8 +223,8 @@ func bindURI(req *http.Request, rv reflect.Value) error {
 	return nil
 }
 
-// bindFormData binds form data to struct fields
-func bindFormData(values url.Values, rv reflect.Value, tagName string) error {
+// bindFormData binds form data to struct fields.
+func bindFormData(values url.Values, rv reflect.Value, tagName, sep string) error {
 	rt := rv.Type()
 
 	for i := range rv.NumField() {
@@ -249,10 +250,12 @@ func bindFormData(values url.Values, rv reflect.Value, tagName string) error {
 			continue
 		}
 
-		// comma seperated form values
-		for i, v := range formValues {
-			if strings.Contains(v, ",") {
-				formValues = append(formValues[:i], append(strings.Split(v, ","), formValues[i+1:]...)...)
+		// comma separated values
+		if sep != "" {
+			for i, v := range formValues {
+				if strings.Contains(v, sep) {
+					formValues = append(formValues[:i], append(strings.Split(v, sep), formValues[i+1:]...)...)
+				}
 			}
 		}
 
@@ -272,7 +275,7 @@ func bindFormData(values url.Values, rv reflect.Value, tagName string) error {
 	return nil
 }
 
-// bindFiles binds file uploads to struct fields
+// bindFiles binds file uploads to struct fields.
 func bindFiles(files map[string][]*multipart.FileHeader, rv reflect.Value) error {
 	rt := rv.Type()
 
@@ -319,7 +322,7 @@ func bindFiles(files map[string][]*multipart.FileHeader, rv reflect.Value) error
 	return nil
 }
 
-// setFieldValue sets a field value from a string
+// setFieldValue sets a field value from a string.
 func setFieldValue(field reflect.Value, fieldType reflect.StructField, value string) error {
 	// Handle special types first before checking Kind()
 	if field.Type() == typeDuration {
@@ -376,7 +379,7 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 		} else {
 			field.SetBool(boolVal)
 		}
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if field.IsNil() {
 			field.Set(reflect.New(field.Type().Elem()))
 		}
@@ -389,7 +392,7 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 	return nil
 }
 
-// setSliceField sets a slice field from multiple values
+// setSliceField sets a slice field from multiple values.
 func setSliceField(field reflect.Value, fieldType reflect.StructField, values []string) error {
 	slice := reflect.MakeSlice(field.Type(), len(values), len(values))
 
@@ -400,15 +403,9 @@ func setSliceField(field reflect.Value, fieldType reflect.StructField, values []
 		}
 	}
 
-	for i := 0; i < slice.Len(); i++ {
+	for i := range slice.Len() {
 		field.Set(reflect.Append(field, slice.Index(i)))
 	}
 
 	return nil
-}
-
-// getURIParam extracts URI parameter from request context
-// This is a placeholder function - implement based on your router
-func getURIParam(req *http.Request, paramName string) string {
-	return req.PathValue(paramName)
 }
