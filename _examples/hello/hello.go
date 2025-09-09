@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/rakunlabs/ada"
+	"github.com/rakunlabs/logi"
 
 	mcors "github.com/rakunlabs/ada/middleware/cors"
 	mlog "github.com/rakunlabs/ada/middleware/log"
@@ -55,6 +56,8 @@ func (h *Hello) Info(c *ada.Context) error {
 
 func (h *Hello) SayHello(w http.ResponseWriter, r *http.Request) {
 	v, _ := io.ReadAll(r.Body)
+
+	logi.Ctx(r.Context()).Info("saying hello")
 
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)

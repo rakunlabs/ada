@@ -157,8 +157,8 @@ github.com/quic-go/quic-go v0.54.0 h1:6s1YB9QotYI6Ospeiguknbp2Znb/jZYjZLRXn9kMQB
 github.com/quic-go/quic-go v0.54.0/go.mod h1:e68ZEaCdyviluZmy44P6Iey98v/Wfz6HCjQEm+l8zTY=
 github.com/rakunlabs/into v0.4.1 h1:TLJC24M0G0njsParQFLI/ZLwZoA+/Rf3xH7Ks4082oA=
 github.com/rakunlabs/into v0.4.1/go.mod h1:1fWgREm1FXNLCnfFPTPf6mCzgmi9jlqevYQbWLMnXeo=
-github.com/rakunlabs/logi v0.4.1 h1:7P60OishtLpQh24V5R2oI1udHLWIi0ivg45Yuc7tBcU=
-github.com/rakunlabs/logi v0.4.1/go.mod h1:lx+Tkgygd4KSEwgZaJquM05ePlArP9sEBCY6YHcRGVU=
+github.com/rakunlabs/logi v0.4.3 h1:nB/e3hlXi3JcRqI8tKhUoRnb3qgb0kRcZ0hRm37PPzc=
+github.com/rakunlabs/logi v0.4.3/go.mod h1:h7mqo7Yj+IJt2o5Li4uO0Bn5hLZuoKUKMS4RkkVS2/M=
 github.com/rakunlabs/tell v0.1.0 h1:6HeDeW9IXtuDzUZMJAYFNR6pCzVI6WXBFmIohJmN5zk=
 github.com/rakunlabs/tell v0.1.0/go.mod h1:cLNKeU3YLMLdWAo4hn6Mp1xeHQOsvwmWle1I5/4/zOY=
 github.com/rogpeppe/go-internal v1.13.1 h1:KvO1DLK/DRN07sQ1LQKScxyZJuNnedQ5/wKSR38lUII=

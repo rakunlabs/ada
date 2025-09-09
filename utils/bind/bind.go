@@ -249,6 +249,13 @@ func bindFormData(values url.Values, rv reflect.Value, tagName string) error {
 			continue
 		}
 
+		// comma seperated form values
+		for i, v := range formValues {
+			if strings.Contains(v, ",") {
+				formValues = append(formValues[:i], append(strings.Split(v, ","), formValues[i+1:]...)...)
+			}
+		}
+
 		// Handle slice fields
 		if field.Kind() == reflect.Slice {
 			if err := setSliceField(field, fieldType, formValues); err != nil {
@@ -314,6 +321,34 @@ func bindFiles(files map[string][]*multipart.FileHeader, rv reflect.Value) error
 
 // setFieldValue sets a field value from a string
 func setFieldValue(field reflect.Value, fieldType reflect.StructField, value string) error {
+	// Handle special types first before checking Kind()
+	if field.Type() == typeDuration {
+		durationVal, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("failed to parse duration %s: %s %w", field.Type(), value, err)
+		}
+
+		field.Set(reflect.ValueOf(durationVal))
+
+		return nil
+	}
+
+	if field.Type() == typeTime {
+		timeFormat := fieldType.Tag.Get("time_format")
+		if timeFormat == "" {
+			timeFormat = time.RFC3339Nano // Default format
+		}
+
+		timeVal, err := time.Parse(timeFormat, value)
+		if err != nil {
+			return err
+		}
+
+		field.Set(reflect.ValueOf(timeVal))
+
+		return nil
+	}
+
 	switch field.Kind() {
 	case reflect.String:
 		field.SetString(value)
@@ -348,41 +383,6 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 
 		return setFieldValue(field.Elem(), fieldType, value)
 	default:
-		// Handle custom types
-
-		if field.Type() == typeTime {
-			timeFormat := fieldType.Tag.Get("time_format")
-			if timeFormat == "" {
-				timeFormat = time.RFC3339Nano // Default format
-			}
-
-			timeVal, err := time.Parse(timeFormat, value)
-			if err != nil {
-				return err
-			}
-
-			field.Set(reflect.ValueOf(timeVal))
-
-			return nil
-		}
-
-		if field.Type() == typeJSONNumber {
-			field.Set(reflect.ValueOf(json.Number(value)))
-
-			return nil
-		}
-
-		if field.Type() == typeDuration {
-			durationVal, err := time.ParseDuration(value)
-			if err != nil {
-				return fmt.Errorf("failed to parse duration %s: %s %w", field.Type(), value, err)
-			}
-
-			field.Set(reflect.ValueOf(durationVal))
-
-			return nil
-		}
-
 		return fmt.Errorf("unsupported field type: %s", field.Type())
 	}
 
@@ -400,7 +400,9 @@ func setSliceField(field reflect.Value, fieldType reflect.StructField, values []
 		}
 	}
 
-	field.Set(slice)
+	for i := 0; i < slice.Len(); i++ {
+		field.Set(reflect.Append(field, slice.Index(i)))
+	}
 
 	return nil
 }

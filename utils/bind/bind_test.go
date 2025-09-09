@@ -2,6 +2,7 @@ package bind
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"mime/multipart"
@@ -62,6 +63,9 @@ type ExampleUser struct {
 	Hobbies     []string `json:"hobbies" form:"hobbies"`
 	LuckyNums   []int    `query:"lucky_nums"`
 	Preferences []bool   `form:"preferences"`
+
+	Duration   time.Duration `query:"duration"`
+	HugeNumber json.Number   `query:"huge_number"`
 }
 
 // Address represents a nested struct
@@ -207,7 +211,7 @@ func TestDefaultBinder_BindForm(t *testing.T) {
 
 func TestDefaultBinder_BindQuery(t *testing.T) {
 	// Test query parameter binding
-	req, _ := http.NewRequest("GET", "/users?page=2&page_size=10&tags=go&tags=web&active=true&score=95.5", nil)
+	req, _ := http.NewRequest("GET", "/users?lucky_nums=10,60&lucky_nums=1,2,3&lucky_nums=99&page=2&page_size=10&tags=go&tags=web&active=true&score=95.5&duration=10s&huge_number=19.94324", nil)
 
 	var user ExampleUser
 	err := Bind(req, &user)
@@ -226,6 +230,18 @@ func TestDefaultBinder_BindQuery(t *testing.T) {
 
 	if len(user.Tags) != 2 || user.Tags[0] != "go" || user.Tags[1] != "web" {
 		t.Errorf("Expected tags [go, web], got %v", user.Tags)
+	}
+
+	if len(user.LuckyNums) != 6 || user.LuckyNums[0] != 10 || user.LuckyNums[1] != 60 || user.LuckyNums[2] != 1 || user.LuckyNums[3] != 2 || user.LuckyNums[4] != 3 || user.LuckyNums[5] != 99 {
+		t.Errorf("Expected lucky numbers [10, 60, 1, 2, 3, 99], got %v", user.LuckyNums)
+	}
+
+	if user.Duration != 10*time.Second {
+		t.Errorf("Expected duration 10s, got %v", user.Duration)
+	}
+
+	if user.HugeNumber != "19.94324" {
+		t.Errorf("Expected huge number '19.94324', got %v", user.HugeNumber)
 	}
 
 	if !user.Active {

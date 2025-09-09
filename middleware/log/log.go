@@ -6,98 +6,26 @@ import (
 	"time"
 
 	"github.com/felixge/httpsnoop"
+	"github.com/rakunlabs/logi"
 )
 
-// Logger is based on echo's log middleware.
-
+// Logger is a middleware that logs HTTP requests and additional information to context.
 type Logger struct {
-	Skipper       func(r *http.Request) bool
-	LogValuesFunc func(r *http.Request, v *RequestLoggerValues)
-
-	// LogLatency instructs logger to record duration it took to execute rest of the handler chain (next(c) call).
-	LogLatency bool
-	// LogProtocol instructs logger to extract request protocol (i.e. `HTTP/1.1` or `HTTP/2`)
-	LogProtocol bool
-	// LogRemoteIP instructs logger to extract request remote IP. See `echo.Context.RealIP()` for implementation details.
-	LogRemoteIP bool
-	// LogHost instructs logger to extract request host value (i.e. `example.com`)
-	LogHost bool
-	// LogMethod instructs logger to extract request method value (i.e. `GET` etc)
-	LogMethod bool
-	// LogURI instructs logger to extract request URI (i.e. `/list?lang=en&page=1`)
-	LogURI bool
-	// LogURIPath instructs logger to extract request URI path part (i.e. `/list`)
-	LogURIPath bool
-	// LogRequestID instructs logger to extract request ID from request `X-Request-ID` header or response if request did not have value.
-	LogRequestID bool
-	// LogReferer instructs logger to extract request referer values.
-	LogReferer bool
-	// LogUserAgent instructs logger to extract request user agent values.
-	LogUserAgent bool
-	// LogStatus instructs logger to extract response status code.
-	LogStatus bool
-	// LogContentLength instructs logger to extract content length header value. Note: this value could be different from
-	// actual request body size as it could be spoofed etc.
-	LogContentLength bool
-	// LogResponseSize instructs logger to extract response content length value. Note: when used with Gzip middleware
-	// this value may not be always correct.
-	LogResponseSize bool
-	// LogHeaders instructs logger to extract given list of headers from request. Note: request can contain more than
-	// one header with same value so slice of values is been logger for each given header.
-	//
-	// Note: header values are converted to canonical form with http.CanonicalHeaderKey as this how request parser converts header
-	// names to. For example, the canonical key for "accept-encoding" is "Accept-Encoding".
-	LogHeaders []string
-	// LogQueryParams instructs logger to extract given list of query parameters from request URI. Note: request can
-	// contain more than one query parameter with same name so slice of values is been logger for each given query param name.
-	LogQueryParams []string
-	// LogFormValues instructs logger to extract given list of form values from request body+URI. Note: request can
-	// contain more than one form value with same name so slice of values is been logger for each given form value name.
-	LogFormValues []string
+	Skipper  func(r *http.Request) bool
+	PreFunc  func(r *http.Request) *http.Request
+	PostFunc func(r *http.Request, v *Response)
 }
 
-// RequestLoggerValues contains extracted values from logger.
-type RequestLoggerValues struct {
+// Response contains extracted values from logger.
+type Response struct {
 	// StartTime is time recorded before next middleware/handler is executed.
 	StartTime time.Time
 	// Latency is duration it took to execute rest of the handler chain (next(c) call).
 	Latency time.Duration
-	// Protocol is request protocol (i.e. `HTTP/1.1` or `HTTP/2`)
-	Protocol string
-	// RemoteIP is request remote IP. See `echo.Context.RealIP()` for implementation details.
-	RemoteIP string
-	// Host is request host value (i.e. `example.com`)
-	Host string
-	// Method is request method value (i.e. `GET` etc)
-	Method string
-	// URI is request URI (i.e. `/list?lang=en&page=1`)
-	URI string
-	// URIPath is request URI path part (i.e. `/list`)
-	URIPath string
-	// RequestID is request ID from request `X-Request-ID` header or response if request did not have value.
-	RequestID string
-	// Referer is request referer values.
-	Referer string
-	// UserAgent is request user agent values.
-	UserAgent string
 	// Status is response status code. Then handler returns an echo.HTTPError then code from there.
 	Status int
-	// ContentLength is content length header value. Note: this value could be different from actual request body size
-	// as it could be spoofed etc.
-	ContentLength string
 	// ResponseSize is response content length value. Note: when used with Gzip middleware this value may not be always correct.
 	ResponseSize int64
-	// Headers are list of headers from request. Note: request can contain more than one header with same value so slice
-	// of values is been logger for each given header.
-	// Note: header values are converted to canonical form with http.CanonicalHeaderKey as this how request parser converts header
-	// names to. For example, the canonical key for "accept-encoding" is "Accept-Encoding".
-	Headers map[string][]string
-	// QueryParams are list of query parameters from request URI. Note: request can contain more than one query parameter
-	// with same name so slice of values is been logger for each given query param name.
-	QueryParams map[string][]string
-	// FormValues are list of form values from request body+URI. Note: request can contain more than one form value with
-	// same name so slice of values is been logger for each given form value name.
-	FormValues map[string][]string
 }
 
 func (l *Logger) Middleware() func(next http.Handler) http.Handler {
@@ -112,6 +40,10 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 			// Record start time
 			start := time.Now()
 
+			if l.PreFunc != nil {
+				r = l.PreFunc(r)
+			}
+
 			// Execute the next handler
 			m := httpsnoop.CaptureMetrics(next, w, r)
 
@@ -119,108 +51,20 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 			latency := time.Since(start)
 
 			// Extract request values based on configuration
-			values := &RequestLoggerValues{
+			values := &Response{
 				StartTime: start,
 				Latency:   latency,
 			}
 
-			// Extract protocol if enabled
-			if l.LogProtocol {
-				values.Protocol = r.Proto
-			}
-
-			// Extract remote IP if enabled
-			if l.LogRemoteIP {
-				values.RemoteIP = r.RemoteAddr
-			}
-
-			// Extract host if enabled
-			if l.LogHost {
-				values.Host = r.Host
-			}
-
-			// Extract method if enabled
-			if l.LogMethod {
-				values.Method = r.Method
-			}
-
-			// Extract URI if enabled
-			if l.LogURI {
-				values.URI = r.RequestURI
-			}
-
-			// Extract URI path if enabled
-			if l.LogURIPath {
-				values.URIPath = r.URL.Path
-			}
-
-			// Extract request ID if enabled
-			if l.LogRequestID {
-				values.RequestID = r.Header.Get("X-Request-ID")
-			}
-
-			// Extract referer if enabled
-			if l.LogReferer {
-				values.Referer = r.Header.Get("Referer")
-			}
-
-			// Extract user agent if enabled
-			if l.LogUserAgent {
-				values.UserAgent = r.Header.Get("User-Agent")
-			}
-
 			// Extract status if enabled
-			if l.LogStatus {
-				values.Status = m.Code
-			}
-
-			// Extract content length if enabled
-			if l.LogContentLength {
-				values.ContentLength = r.Header.Get("Content-Length")
-			}
+			values.Status = m.Code
 
 			// Extract response size if enabled
-			if l.LogResponseSize {
-				values.ResponseSize = m.Written
-			}
-
-			// Extract headers if enabled
-			if len(l.LogHeaders) > 0 {
-				values.Headers = make(map[string][]string)
-				for _, headerName := range l.LogHeaders {
-					canonicalName := http.CanonicalHeaderKey(headerName)
-					if headerValues, exists := r.Header[canonicalName]; exists {
-						values.Headers[canonicalName] = headerValues
-					}
-				}
-			}
-
-			// Extract query parameters if enabled
-			if len(l.LogQueryParams) > 0 {
-				values.QueryParams = make(map[string][]string)
-				for _, paramName := range l.LogQueryParams {
-					if paramValues, exists := r.URL.Query()[paramName]; exists {
-						values.QueryParams[paramName] = paramValues
-					}
-				}
-			}
-
-			// Extract form values if enabled
-			if len(l.LogFormValues) > 0 {
-				values.FormValues = make(map[string][]string)
-				// Parse form if not already parsed
-				if err := r.ParseForm(); err == nil {
-					for _, formName := range l.LogFormValues {
-						if formValues, exists := r.Form[formName]; exists {
-							values.FormValues[formName] = formValues
-						}
-					}
-				}
-			}
+			values.ResponseSize = m.Written
 
 			// Call the custom logging function if provided
-			if l.LogValuesFunc != nil {
-				l.LogValuesFunc(r, values)
+			if l.PostFunc != nil {
+				l.PostFunc(r, values)
 			}
 		})
 	}
@@ -228,35 +72,42 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 
 func New(opts ...Option) *Logger {
 	o := option{
-		Config: Logger{
-			LogValuesFunc: func(r *http.Request, v *RequestLoggerValues) {
+		Logger: Logger{
+			PreFunc: func(r *http.Request) *http.Request {
+				user := r.Header.Get("X-User")
+				requestID := r.Header.Get("X-Request-ID")
+				userAgent := r.Header.Get("User-Agent")
+
+				slogAttrs := make([]any, 0, 3)
+				if requestID != "" {
+					slogAttrs = append(slogAttrs, slog.String("request_id", requestID))
+				}
+				if user != "" {
+					slogAttrs = append(slogAttrs, slog.String("user", user))
+				}
+				if userAgent != "" {
+					slogAttrs = append(slogAttrs, slog.String("user_agent", userAgent))
+				}
+
+				return r.WithContext(logi.WithContext(r.Context(), slog.With(slogAttrs...)))
+			},
+			PostFunc: func(r *http.Request, v *Response) {
 				slog.Debug("request",
 					slog.String("user", r.Header.Get("X-User")),
 					slog.String("route", r.Pattern),
-					slog.String("request_id", v.RequestID),
-					slog.String("remote_ip", v.RemoteIP),
-					slog.String("host", v.Host),
-					slog.String("method", v.Method),
-					slog.String("uri", v.URI),
-					slog.String("user_agent", v.UserAgent),
+					slog.String("request_id", r.Header.Get("X-Request-ID")),
+					slog.String("remote_ip", r.RemoteAddr),
+					slog.String("host", r.Host),
+					slog.String("method", r.Method),
+					slog.String("uri", r.RequestURI),
+					slog.String("user_agent", r.Header.Get("User-Agent")),
 					slog.Int("status", v.Status),
 					slog.Int64("latency", v.Latency.Nanoseconds()),
 					slog.String("latency_human", v.Latency.String()),
-					slog.String("bytes_in", v.ContentLength),
+					slog.String("bytes_in", r.Header.Get("Content-Length")),
 					slog.Int64("bytes_out", v.ResponseSize),
 				)
 			},
-			LogLatency:       true,
-			LogRemoteIP:      true,
-			LogHost:          true,
-			LogMethod:        true,
-			LogURI:           true,
-			LogRequestID:     true,
-			LogReferer:       true,
-			LogUserAgent:     true,
-			LogStatus:        true,
-			LogContentLength: true,
-			LogResponseSize:  true,
 		},
 	}
 
@@ -264,7 +115,7 @@ func New(opts ...Option) *Logger {
 		opt(&o)
 	}
 
-	return &o.Config
+	return &o.Logger
 }
 
 func Middleware(opts ...Option) func(next http.Handler) http.Handler {
@@ -274,13 +125,38 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 // //////////////////////////////////////////////////////
 
 type option struct {
-	Config Logger
+	Logger Logger
 }
 
 type Option func(*option)
 
-func WithConfig(cfg Logger) Option {
+// WithLogger sets a custom Logger directly.
+func WithLogger(l Logger) Option {
 	return func(o *option) {
-		o.Config = cfg
+		o.Logger = l
+	}
+}
+
+// WithSkipper sets a function to skip middleware.
+//   - Default is nil.
+func WithSkipper(skipper func(r *http.Request) bool) Option {
+	return func(o *option) {
+		o.Logger.Skipper = skipper
+	}
+}
+
+// WithPostFunc sets a function which is called after the request is processed.
+//   - This will override the default PostFunc which logs some useful information.
+func WithPostFunc(f func(r *http.Request, v *Response)) Option {
+	return func(o *option) {
+		o.Logger.PostFunc = f
+	}
+}
+
+// WithPreFunc sets a function which is called before the request is processed.
+//   - This will override the default PreFunc which adds some useful information to the context.
+func WithPreFunc(f func(r *http.Request) *http.Request) Option {
+	return func(o *option) {
+		o.Logger.PreFunc = f
 	}
 }
