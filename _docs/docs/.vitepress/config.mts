@@ -3,7 +3,7 @@ import { defineConfig } from "vitepress";
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
   title: "> ada",
-  description: "Go Web Library",
+  description: "Go Web Framework",
   head: [["link", { rel: "icon", href: "/ada/assets/favicon.ico" }]],
   base: "/ada/",
   // Configure syntax highlighting with Monokai theme

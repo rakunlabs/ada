@@ -7,7 +7,7 @@
 [![Go PKG](https://raw.githubusercontent.com/rakunlabs/.github/main/assets/badges/gopkg.svg)](https://pkg.go.dev/github.com/rakunlabs/ada)
 [![Web](https://img.shields.io/badge/web-document-blueviolet?style=flat-square)](https://rakunlabs.github.io/ada/)
 
-Simple, flexible go web library.
+Simple, flexible go web framework.
 
 ```sh
 go get github.com/rakunlabs/ada

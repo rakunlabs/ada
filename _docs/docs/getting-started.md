@@ -1,6 +1,6 @@
 # Getting Started
 
-Ada is a simple, flexible Go web library that allows you to build web applications with our mux and middlewares.
+Ada is a simple, flexible Go web framework that allows you to build web applications with our mux and middlewares.
 
 Get `ada` with golang package manager:
 
