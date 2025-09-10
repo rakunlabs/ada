@@ -16,7 +16,90 @@ import (
 var (
 	typeTime     = reflect.TypeOf(time.Time{})
 	typeDuration = reflect.TypeOf(time.Duration(0))
+
+	fieldCacheMap = make(map[reflect.Type]*fieldCache)
 )
+
+// Cached field information for faster binding.
+type fieldCache struct {
+	formFields   []fieldInfo
+	queryFields  []fieldInfo
+	headerFields []fieldInfo
+	uriFields    []fieldInfo
+	fileFields   []fieldInfo
+}
+
+type fieldInfo struct {
+	index    int
+	tagValue string
+}
+
+// getFieldCache returns cached field information for a struct type.
+func getFieldCache(rt reflect.Type) *fieldCache {
+	if cache, exists := fieldCacheMap[rt]; exists {
+		return cache
+	}
+
+	cache := &fieldCache{
+		formFields:   []fieldInfo{},
+		queryFields:  []fieldInfo{},
+		headerFields: []fieldInfo{},
+		uriFields:    []fieldInfo{},
+		fileFields:   []fieldInfo{},
+	}
+
+	for i := range rt.NumField() {
+		field := rt.Field(i)
+
+		// Form fields
+		if tag := field.Tag.Get("form"); tag != "" && tag != "-" {
+			if commaIdx := strings.Index(tag, ","); commaIdx != -1 {
+				tag = tag[:commaIdx]
+			}
+			cache.formFields = append(cache.formFields, fieldInfo{index: i, tagValue: tag})
+		}
+
+		// Query fields
+		if tag := field.Tag.Get("query"); tag != "" && tag != "-" {
+			if commaIdx := strings.Index(tag, ","); commaIdx != -1 {
+				tag = tag[:commaIdx]
+			}
+			cache.queryFields = append(cache.queryFields, fieldInfo{index: i, tagValue: tag})
+		}
+
+		// Header fields
+		if tag := field.Tag.Get("header"); tag != "" && tag != "-" {
+			if commaIdx := strings.Index(tag, ","); commaIdx != -1 {
+				tag = tag[:commaIdx]
+			}
+			cache.headerFields = append(cache.headerFields, fieldInfo{index: i, tagValue: tag})
+		}
+
+		// URI fields
+		uriTag := field.Tag.Get("uri")
+		if uriTag == "" {
+			uriTag = field.Tag.Get("param")
+		}
+		if uriTag != "" && uriTag != "-" {
+			if commaIdx := strings.Index(uriTag, ","); commaIdx != -1 {
+				uriTag = uriTag[:commaIdx]
+			}
+			cache.uriFields = append(cache.uriFields, fieldInfo{index: i, tagValue: uriTag})
+		}
+
+		// File fields
+		if tag := field.Tag.Get("file"); tag != "" && tag != "-" {
+			if commaIdx := strings.Index(tag, ","); commaIdx != -1 {
+				tag = tag[:commaIdx]
+			}
+			cache.fileFields = append(cache.fileFields, fieldInfo{index: i, tagValue: tag})
+		}
+	}
+
+	fieldCacheMap[rt] = cache
+
+	return cache
+}
 
 // Bind binds HTTP request data to a struct based on content type and struct tags.
 func Bind(req *http.Request, obj any, opts ...Option) error {
@@ -38,6 +121,9 @@ func Bind(req *http.Request, obj any, opts ...Option) error {
 	if !rv.CanSet() {
 		return fmt.Errorf("binding target must be settable")
 	}
+
+	rt := rv.Type()
+	cache := getFieldCache(rt)
 
 	opt := applyOptions(opts...)
 
@@ -66,25 +152,25 @@ func Bind(req *http.Request, obj any, opts ...Option) error {
 			return err
 		}
 	case strings.Contains(contentType, "application/x-www-form-urlencoded"):
-		if err := bindForm(req, rv); err != nil {
+		if err := bindForm(req, rv, cache); err != nil {
 			return err
 		}
 	case strings.Contains(contentType, "multipart/form-data"):
-		if err := bindMultipartForm(req, rv); err != nil {
+		if err := bindMultipartForm(req, rv, cache); err != nil {
 			return err
 		}
 	}
 
 	// Always bind query parameters, headers, and URI parameters
-	if err := bindQuery(req, rv, opt.QuerySeparator); err != nil {
+	if err := bindQuery(req, rv, opt.QuerySeparator, cache); err != nil {
 		return err
 	}
 
-	if err := bindHeaders(req, rv); err != nil {
+	if err := bindHeaders(req, rv, cache); err != nil {
 		return err
 	}
 
-	if err := bindURI(req, rv); err != nil {
+	if err := bindURI(req, rv, cache); err != nil {
 		return err
 	}
 
@@ -123,59 +209,47 @@ func bindXML(req *http.Request, rv reflect.Value) error {
 }
 
 // bindForm binds form data to struct fields with "form" tags.
-func bindForm(req *http.Request, rv reflect.Value) error {
-	return bindFormData(req.Form, rv, "form", "")
+func bindForm(req *http.Request, rv reflect.Value, cache *fieldCache) error {
+	return bindFormData(req.Form, rv, cache.formFields, "")
 }
 
 // bindMultipartForm binds multipart form data to struct fields.
-func bindMultipartForm(req *http.Request, rv reflect.Value) error {
+func bindMultipartForm(req *http.Request, rv reflect.Value, cache *fieldCache) error {
 	if req.MultipartForm == nil {
 		return nil
 	}
 
 	// Bind form values
-	if err := bindFormData(req.MultipartForm.Value, rv, "form", ""); err != nil {
+	if err := bindFormData(req.MultipartForm.Value, rv, cache.formFields, ""); err != nil {
 		return err
 	}
 
 	// Bind file uploads
-	return bindFiles(req.MultipartForm.File, rv)
+	return bindFiles(req.MultipartForm.File, rv, cache)
 }
 
 // bindQuery binds query parameters to struct fields with "query" tags.
-func bindQuery(req *http.Request, rv reflect.Value, sep string) error {
-	return bindFormData(req.URL.Query(), rv, "query", sep)
+func bindQuery(req *http.Request, rv reflect.Value, sep string, cache *fieldCache) error {
+	return bindFormData(req.URL.Query(), rv, cache.queryFields, sep)
 }
 
 // bindHeaders binds HTTP headers to struct fields with "header" tags.
-func bindHeaders(req *http.Request, rv reflect.Value) error {
-	rt := rv.Type()
-
-	for i := range rv.NumField() {
-		field := rv.Field(i)
-		fieldType := rt.Field(i)
+func bindHeaders(req *http.Request, rv reflect.Value, cache *fieldCache) error {
+	for _, fieldInfo := range cache.headerFields {
+		field := rv.Field(fieldInfo.index)
+		fieldType := rv.Type().Field(fieldInfo.index)
 
 		if !field.CanSet() {
 			continue
 		}
 
-		headerTag := fieldType.Tag.Get("header")
-		if headerTag == "" || headerTag == "-" {
-			continue
-		}
-
-		headerName := headerTag
-		if commaIdx := strings.Index(headerTag, ","); commaIdx != -1 {
-			headerName = headerTag[:commaIdx]
-		}
-
-		headerValue := req.Header.Get(headerName)
+		headerValue := req.Header.Get(fieldInfo.tagValue)
 		if headerValue == "" {
 			continue
 		}
 
 		if err := setFieldValue(field, fieldType, headerValue); err != nil {
-			return fmt.Errorf("failed to bind header %s: %w", headerName, err)
+			return fmt.Errorf("failed to bind header %s: %w", fieldInfo.tagValue, err)
 		}
 	}
 
@@ -183,39 +257,23 @@ func bindHeaders(req *http.Request, rv reflect.Value) error {
 }
 
 // bindURI binds URI parameters to struct fields with "uri" or "param" tags.
-func bindURI(req *http.Request, rv reflect.Value) error {
+func bindURI(req *http.Request, rv reflect.Value, cache *fieldCache) error {
 	// This would typically be populated by the router
 	// For now, we'll check if there's a context value or similar mechanism
 	// This is a placeholder - actual implementation depends on your routing system
 
-	rt := rv.Type()
-
-	for i := range rv.NumField() {
-		field := rv.Field(i)
-		fieldType := rt.Field(i)
+	for _, fieldInfo := range cache.uriFields {
+		field := rv.Field(fieldInfo.index)
+		fieldType := rv.Type().Field(fieldInfo.index)
 
 		if !field.CanSet() {
 			continue
 		}
 
-		uriTag := fieldType.Tag.Get("uri")
-		if uriTag == "" {
-			uriTag = fieldType.Tag.Get("param")
-		}
-
-		if uriTag == "" || uriTag == "-" {
-			continue
-		}
-
-		paramName := uriTag
-		if commaIdx := strings.Index(uriTag, ","); commaIdx != -1 {
-			paramName = uriTag[:commaIdx]
-		}
-
 		// Try to get URI parameter from request context
-		if paramValue := req.PathValue(paramName); paramValue != "" {
+		if paramValue := req.PathValue(fieldInfo.tagValue); paramValue != "" {
 			if err := setFieldValue(field, fieldType, paramValue); err != nil {
-				return fmt.Errorf("failed to bind URI param %s: %w", paramName, err)
+				return fmt.Errorf("failed to bind URI param %s: %w", fieldInfo.tagValue, err)
 			}
 		}
 	}
@@ -224,28 +282,16 @@ func bindURI(req *http.Request, rv reflect.Value) error {
 }
 
 // bindFormData binds form data to struct fields.
-func bindFormData(values url.Values, rv reflect.Value, tagName, sep string) error {
-	rt := rv.Type()
-
-	for i := range rv.NumField() {
-		field := rv.Field(i)
-		fieldType := rt.Field(i)
+func bindFormData(values url.Values, rv reflect.Value, fields []fieldInfo, sep string) error {
+	for _, fieldInfo := range fields {
+		field := rv.Field(fieldInfo.index)
+		fieldType := rv.Type().Field(fieldInfo.index)
 
 		if !field.CanSet() {
 			continue
 		}
 
-		tag := fieldType.Tag.Get(tagName)
-		if tag == "" || tag == "-" {
-			continue
-		}
-
-		fieldName := tag
-		if commaIdx := strings.Index(tag, ","); commaIdx != -1 {
-			fieldName = tag[:commaIdx]
-		}
-
-		formValues := values[fieldName]
+		formValues := values[fieldInfo.tagValue]
 		if len(formValues) == 0 {
 			continue
 		}
@@ -262,12 +308,12 @@ func bindFormData(values url.Values, rv reflect.Value, tagName, sep string) erro
 		// Handle slice fields
 		if field.Kind() == reflect.Slice {
 			if err := setSliceField(field, fieldType, formValues); err != nil {
-				return fmt.Errorf("failed to bind %s field %s: %w", tagName, fieldName, err)
+				return fmt.Errorf("failed to bind field %s: %w", fieldInfo.tagValue, err)
 			}
 		} else {
 			// Use the first value for non-slice fields
 			if err := setFieldValue(field, fieldType, formValues[0]); err != nil {
-				return fmt.Errorf("failed to bind %s field %s: %w", tagName, fieldName, err)
+				return fmt.Errorf("failed to bind field %s: %w", fieldInfo.tagValue, err)
 			}
 		}
 	}
@@ -276,28 +322,15 @@ func bindFormData(values url.Values, rv reflect.Value, tagName, sep string) erro
 }
 
 // bindFiles binds file uploads to struct fields.
-func bindFiles(files map[string][]*multipart.FileHeader, rv reflect.Value) error {
-	rt := rv.Type()
-
-	for i := range rv.NumField() {
-		field := rv.Field(i)
-		fieldType := rt.Field(i)
+func bindFiles(files map[string][]*multipart.FileHeader, rv reflect.Value, cache *fieldCache) error {
+	for _, fieldInfo := range cache.fileFields {
+		field := rv.Field(fieldInfo.index)
 
 		if !field.CanSet() {
 			continue
 		}
 
-		fileTag := fieldType.Tag.Get("file")
-		if fileTag == "" || fileTag == "-" {
-			continue
-		}
-
-		fileName := fileTag
-		if commaIdx := strings.Index(fileTag, ","); commaIdx != -1 {
-			fileName = fileTag[:commaIdx]
-		}
-
-		fileHeaders := files[fileName]
+		fileHeaders := files[fieldInfo.tagValue]
 		if len(fileHeaders) == 0 {
 			continue
 		}

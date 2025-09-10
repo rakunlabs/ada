@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -450,8 +450,7 @@ func TestDefaultBinder_ErrorCases(t *testing.T) {
 func BenchmarkBinder_JSON(b *testing.B) {
 	jsonData := `{"id": 123, "username": "johndoe", "email": "john@example.com"}`
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		req, _ := http.NewRequest("POST", "/users", strings.NewReader(jsonData))
 		req.Header.Set("Content-Type", "application/json")
 
@@ -466,9 +465,13 @@ func BenchmarkBinder_Form(b *testing.B) {
 	form.Add("last_name", "Doe")
 	form.Add("age", "30")
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		req, _ := http.NewRequest("POST", "/users", strings.NewReader(form.Encode()))
+	// Pre-encode form data to avoid encoding overhead in benchmark
+	encodedForm := form.Encode()
+
+	b.ResetTimer() // Reset timer after setup
+
+	for b.Loop() {
+		req, _ := http.NewRequest("POST", "/users", strings.NewReader(encodedForm))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 		var user ExampleUser
@@ -476,8 +479,22 @@ func BenchmarkBinder_Form(b *testing.B) {
 	}
 }
 
-// Helper function to create a request with body that can be read multiple times
-func createRequestWithBody(method, url string, body io.Reader) *http.Request {
-	req, _ := http.NewRequest(method, url, body)
-	return req
+func BenchmarkBinder_Form_Parsed(b *testing.B) {
+	form := url.Values{}
+	form.Add("first_name", "John")
+	form.Add("last_name", "Doe")
+	form.Add("age", "30")
+
+	// Pre-create and parse request to isolate binding performance
+	req, _ := http.NewRequest("POST", "/users", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.ParseForm() // Pre-parse the form
+
+	b.ResetTimer()
+
+	for b.Loop() {
+		var user ExampleUser
+		// Test only the binding logic, not request parsing
+		bindForm(req, reflect.ValueOf(&user).Elem(), getFieldCache(reflect.TypeOf(user)))
+	}
 }
