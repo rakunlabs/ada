@@ -4,13 +4,13 @@ import (
 	"net/http"
 	"path"
 	"strings"
-	// "github.com/rakunlabs/ada/utils/openapi"
 )
 
 type typeNode int
 
 const (
-	typeNodeStatic   typeNode = iota // Static node, e.g., /users
+	typeNodeSelf     typeNode = iota // Self node, e.g., /
+	typeNodeStatic                   // Static node, e.g., /users
 	typeNodeWildcard                 // Wildcard node, e.g., /users/*
 	typeNodeParam                    // Parameterized node, e.g., /users/{id}
 )
@@ -62,13 +62,13 @@ func (n *node) IsHandlerExists() bool {
 	return false
 }
 
-func (n *node) FindNode(path string, r *http.Request) *node {
+func (n *node) FindNode(path string, r *http.Request) (*node, typeNode) {
 	if path == "" {
 		if n.IsHandlerExists() {
-			return n
+			return n, 0
 		}
 
-		return nil
+		return nil, 0
 	}
 
 	if n.TypeStatic != nil {
@@ -96,22 +96,21 @@ func (n *node) FindNode(path string, r *http.Request) *node {
 		}
 
 		if isFound {
-			return current
+			return current, typeNodeStatic
 		}
 	}
 
 	// Check for parameter nodes - they match any segment and capture the value
 	if n.TypeParam != nil && path != "" {
-		r.SetPathValue(n.TypeParam.Name, path)
-		return n.TypeParam.Children
+		return n.TypeParam.Children, typeNodeParam
 	}
 
 	// Check for wildcard nodes - they match any remaining path
 	if n.TypeWildcard != nil {
-		return n.TypeWildcard.Children
+		return n.TypeWildcard.Children, typeNodeWildcard
 	}
 
-	return nil
+	return nil, 0
 }
 
 func (n *node) SetHandler(method, path string, handler http.HandlerFunc) {
@@ -410,19 +409,29 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	current := m.root
 	var possible *node
-	var possiblePath string
+	var possibleIndex int
+
+	pathPattern := make([]indexValue, 0)
 
 	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for i, segment := range segments {
 		if current.TypeWildcard != nil && current.TypeWildcard.Children.Possible {
 			possible = current.TypeWildcard.Children
-			possiblePath = strings.Join(segments[i:], "/")
+			possibleIndex = i
 		}
 		// find the type of the node
-		node := current.FindNode(segment, r)
+		node, nodeType := current.FindNode(segment, r)
 		if node == nil {
 			current = possible
 			break
+		}
+
+		if nodeType == typeNodeParam {
+			pathPattern = append(pathPattern, indexValue{
+				index: i,
+				name:  current.TypeParam.Name,
+				value: segment,
+			})
 		}
 
 		if i != len(segments)-1 {
@@ -432,7 +441,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			if node.Segment == nil {
 				current = possible
-				possiblePath = strings.Join(segments[i:], "/")
+				possibleIndex = i
 				break
 			}
 			current = node.Segment
@@ -462,8 +471,18 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if possiblePath != "" {
-		r.SetPathValue("*", possiblePath)
+	if current.Possible {
+		r.SetPathValue("*", strings.Join(segments[possibleIndex:], "/"))
+	}
+
+	if len(pathPattern) > 0 {
+		for _, v := range pathPattern {
+			if current.Possible && possibleIndex <= v.index {
+				continue
+			}
+
+			r.SetPathValue(v.name, v.value)
+		}
 	}
 
 	handler.ServeHTTP(w, r)
@@ -483,3 +502,9 @@ func Chain(middlewares ...func(next http.Handler) http.Handler) func(next http.H
 }
 
 // ////////////////////////////////////////////
+
+type indexValue struct {
+	index int
+	name  string
+	value string
+}
