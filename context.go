@@ -58,8 +58,14 @@ func (c *Context) Bind(obj any) error {
 }
 
 // SetHeader sets a response header.
-func (c *Context) SetHeader(key, value string) *Context {
-	c.Response.Header().Set(key, value)
+//
+//	SetHeader("Content-Type", "application/json", "X-Custom-Header", "value")
+func (c *Context) SetHeader(kv ...string) *Context {
+	for i := 0; i+1 < len(kv); i += 2 {
+		key := kv[i]
+		value := kv[i+1]
+		c.Response.Header().Set(key, value)
+	}
 
 	return c
 }
@@ -101,11 +107,11 @@ func (c *Context) SendJSONP(data any, indent string) error {
 	return encoder.Encode(data)
 }
 
-func (c *Context) SendJSONRaw(data []byte) error {
+func (c *Context) SendJSONRaw(data io.Reader) error {
 	c.Response.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
 	c.Response.WriteHeader(c.code)
 
-	_, err := c.Response.Write(data)
+	_, err := io.Copy(c.Response, data)
 
 	return err
 }
@@ -127,8 +133,8 @@ func (c *Context) SendString(s string) error {
 }
 
 // SendBlob streams data from an io.Reader to the response.
-func (c *Context) SendBlob(contentType string, reader io.Reader) error {
-	c.Response.Header().Set(HeaderContentType, contentType)
+//   - The caller is responsible for setting appropriate headers (e.g., Content-Type).
+func (c *Context) SendBlob(reader io.Reader) error {
 	c.Response.WriteHeader(c.code)
 
 	_, err := io.Copy(c.Response, reader)
