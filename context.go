@@ -1,14 +1,20 @@
 package ada
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/rakunlabs/ada/utils/bind"
 )
 
 type HandlerFunc func(c *Context) error
+
+var escaper = strings.NewReplacer(`"`, `\"`, `\`, `\\`)
 
 // Wrap converts ada.HandlerFunc to http.HandlerFunc.
 func (m *Mux) Wrap(handler HandlerFunc) func(http.ResponseWriter, *http.Request) {
@@ -120,12 +126,62 @@ func (c *Context) SendString(s string) error {
 	return err
 }
 
-// SendIO streams data from an io.Reader to the response.
-//   - Content-Type should be set via SetHeader before calling this method.
-func (c *Context) SendIO(reader io.Reader) error {
+// SendBlob streams data from an io.Reader to the response.
+func (c *Context) SendBlob(contentType string, reader io.Reader) error {
+	c.Response.Header().Set(HeaderContentType, contentType)
 	c.Response.WriteHeader(c.code)
 
 	_, err := io.Copy(c.Response, reader)
+
+	return err
+}
+
+// SendFile sends a single file to the client.
+func (c *Context) SendFile(name string, reader io.Reader) error {
+	c.Response.Header().Set(HeaderContentType, MIMEOctetStream)
+	c.Response.Header().Set(HeaderContentDisposition, `attachment; filename="`+escaper.Replace(name)+`"`)
+	c.Response.WriteHeader(c.code)
+
+	_, err := io.Copy(c.Response, reader)
+
+	return err
+}
+
+// SendZip sends files to the client as a zip file.
+//   - If name is empty, defaults to "files.zip".
+func (c *Context) SendZip(name string, files map[string]io.Reader) error {
+	if name == "" {
+		name = "files.zip"
+	}
+
+	// Multiple files: create zip
+	buf := &bytes.Buffer{}
+	zipWriter := zip.NewWriter(buf)
+
+	for filename, reader := range files {
+		fileWriter, err := zipWriter.Create(escaper.Replace(filename))
+		if err != nil {
+			zipWriter.Close()
+
+			return fmt.Errorf("failed to create zip entry for %s: %w", filename, err)
+		}
+		_, err = io.Copy(fileWriter, reader)
+		if err != nil {
+			zipWriter.Close()
+
+			return fmt.Errorf("failed to copy data for %s: %w", filename, err)
+		}
+	}
+
+	if err := zipWriter.Close(); err != nil {
+		return fmt.Errorf("failed to close zip writer: %w", err)
+	}
+
+	c.Response.Header().Set(HeaderContentType, MIMEOctetStream)
+	c.Response.Header().Set(HeaderContentDisposition, `attachment; filename="`+escaper.Replace(name)+`"`)
+	c.Response.WriteHeader(c.code)
+
+	_, err := io.Copy(c.Response, buf)
 
 	return err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/rakunlabs/ada"
 	"github.com/rakunlabs/logi"
@@ -31,6 +32,8 @@ func Run(ctx context.Context) error {
 		mux.POST("/hello", helloHandler.SayHello)
 		mux.GET("/", helloHandler.Main)
 		mux.GET("/hello/info", mux.Wrap(helloHandler.Info))
+		mux.GET("/hello/zip", mux.Wrap(helloHandler.Zip))
+		mux.GET("/hello/file", mux.Wrap(helloHandler.File))
 
 		return nil
 	})
@@ -52,6 +55,17 @@ func (h *Hello) Info(c *ada.Context) error {
 				"message": "Info!",
 			},
 		)
+}
+
+func (h *Hello) Zip(c *ada.Context) error {
+	return c.SendZip("files.zip", map[string]io.Reader{
+		"test.txt": strings.NewReader("Hello, World!"),
+		"data.csv": strings.NewReader("name,age\nAlice,30\nBob,25"),
+	})
+}
+
+func (h *Hello) File(c *ada.Context) error {
+	return c.SendFile("greeting.txt", strings.NewReader("Hello, World!"))
 }
 
 func (h *Hello) SayHello(w http.ResponseWriter, r *http.Request) {

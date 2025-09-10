@@ -21,15 +21,17 @@ const (
 	MIMETextPlain                        = "text/plain"
 	MIMETextPlainCharsetUTF8             = MIMETextPlain + "; " + charsetUTF8
 	MIMEMultipartForm                    = "multipart/form-data"
+	MIMEMultipartMixed                   = "multipart/mixed"
 	MIMEOctetStream                      = "application/octet-stream"
 )
 
 const (
-	HeaderContentType = "Content-Type"
-	HeaderXRequestID  = "X-Request-Id"
-	HeaderVary        = "Vary"
-	HeaderOrigin      = "Origin"
-	HeaderLocation    = "Location"
+	HeaderContentType        = "Content-Type"
+	HeaderContentDisposition = "Content-Disposition"
+	HeaderXRequestID         = "X-Request-Id"
+	HeaderVary               = "Vary"
+	HeaderOrigin             = "Origin"
+	HeaderLocation           = "Location"
 
 	HeaderAccessControlAllowOrigin      = "Access-Control-Allow-Origin"
 	HeaderAccessControlAllowCredentials = "Access-Control-Allow-Credentials"
