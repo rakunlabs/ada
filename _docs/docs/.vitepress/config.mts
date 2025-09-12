@@ -74,10 +74,19 @@ export default defineConfig({
                 text: "Telemetry",
                 link: "/guide/middleware/telemetry.md",
               },
+            ],
+          },
+          {
+            text: "Handler",
+            items: [
               {
                 text: "Folder",
-                link: "/guide/middleware/folder.md",
+                link: "/guide/handler/folder.md",
               },
+              {
+                text: "Swagger",
+                link: "/guide/handler/swagger.md",
+              }
             ],
           },
           {
