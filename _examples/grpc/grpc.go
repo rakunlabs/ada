@@ -29,16 +29,16 @@ func Run(ctx context.Context) error {
 
 		// grpc handler
 		gRPChelloHandler := NewHelloHandler()
-		mux.HandleAll(gRPChelloHandler.Handler())
+		mux.HandleWildcard(gRPChelloHandler.Handler())
 
 		// add gRPC health check
 		healthChecker := grpchealth.NewStaticChecker(gRPChelloHandler.ServiceName())
-		mux.HandleAll(grpchealth.NewHandler(healthChecker))
+		mux.HandleWildcard(grpchealth.NewHandler(healthChecker))
 
 		// add gRPC reflection
 		reflector := grpcreflect.NewStaticReflector(gRPChelloHandler.ServiceName())
-		mux.HandleAll(grpcreflect.NewHandlerV1(reflector))
-		mux.HandleAll(grpcreflect.NewHandlerV1Alpha(reflector))
+		mux.HandleWildcard(grpcreflect.NewHandlerV1(reflector))
+		mux.HandleWildcard(grpcreflect.NewHandlerV1Alpha(reflector))
 
 		// add http handler
 		mux.Use(

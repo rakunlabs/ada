@@ -8,9 +8,10 @@ require (
 	connectrpc.com/grpcreflect v1.3.0
 	connectrpc.com/otelconnect v0.7.2
 	github.com/rakunlabs/ada v0.0.0-00010101000000-000000000000
+	github.com/rakunlabs/ada/handler/folder v0.0.0-00010101000000-000000000000
+	github.com/rakunlabs/ada/handler/mcp v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/cors v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/log v0.0.0-00010101000000-000000000000
-	github.com/rakunlabs/ada/middleware/mcp v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/recover v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/requestid v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/server v0.0.0-00010101000000-000000000000
@@ -129,7 +130,9 @@ require (
 
 replace github.com/rakunlabs/ada => ../
 
-replace github.com/rakunlabs/ada/middleware/mcp => ../middleware/mcp
+replace github.com/rakunlabs/ada/handler/mcp => ../handler/mcp
+
+replace github.com/rakunlabs/ada/handler/folder => ../handler/folder
 
 replace github.com/rakunlabs/ada/middleware/recover => ../middleware/recover
 

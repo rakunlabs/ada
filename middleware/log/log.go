@@ -2,12 +2,18 @@ package log
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/felixge/httpsnoop"
 	"github.com/rakunlabs/logi"
 )
+
+var trueClientIP = http.CanonicalHeaderKey("True-Client-IP")
+var xForwardedFor = http.CanonicalHeaderKey("X-Forwarded-For")
+var xRealIP = http.CanonicalHeaderKey("X-Real-IP")
 
 // Logger is a middleware that logs HTTP requests and additional information to context.
 type Logger struct {
@@ -96,7 +102,7 @@ func New(opts ...Option) *Logger {
 					slog.String("user", r.Header.Get("X-User")),
 					slog.String("route", r.Pattern),
 					slog.String("request_id", r.Header.Get("X-Request-ID")),
-					slog.String("remote_ip", r.RemoteAddr),
+					slog.String("remote_ip", realIP(r)),
 					slog.String("host", r.Host),
 					slog.String("method", r.Method),
 					slog.String("uri", r.RequestURI),
@@ -120,6 +126,27 @@ func New(opts ...Option) *Logger {
 
 func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 	return New(opts...).Middleware()
+}
+
+func realIP(r *http.Request) (ip string) {
+	defer func() {
+		if ip == "" {
+			ip = r.RemoteAddr
+		}
+	}()
+
+	if tcip := r.Header.Get(trueClientIP); tcip != "" {
+		ip = tcip
+	} else if xrip := r.Header.Get(xRealIP); xrip != "" {
+		ip = xrip
+	} else if xff := r.Header.Get(xForwardedFor); xff != "" {
+		ip, _, _ = strings.Cut(xff, ",")
+	}
+	if ip == "" || net.ParseIP(ip) == nil {
+		return ""
+	}
+
+	return ip
 }
 
 // //////////////////////////////////////////////////////

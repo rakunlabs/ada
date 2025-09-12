@@ -353,8 +353,8 @@ func (m *Mux) HandleFunc(path string, handler http.HandlerFunc, middlewares ...f
 	m.HandleWithMethod("", path, handler, middlewares...)
 }
 
-// HandleFuncAll is registering all paths under the given path.
-func (m *Mux) HandleFuncAll(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
+// HandleFuncWildcard is registering all paths under the given path.
+func (m *Mux) HandleFuncWildcard(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
 	if path[len(path)-1] == '/' {
 		path += "*"
 	}
@@ -366,9 +366,9 @@ func (m *Mux) Handle(path string, handler http.Handler, middlewares ...func(next
 	m.HandleFunc(path, handler.ServeHTTP, middlewares...)
 }
 
-// HandleAll is registering all paths under the given path.
-func (m *Mux) HandleAll(path string, handler http.Handler, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleFuncAll(path, handler.ServeHTTP, middlewares...)
+// HandleWildcard is registering all paths under the given path.
+func (m *Mux) HandleWildcard(path string, handler http.Handler, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleFuncWildcard(path, handler.ServeHTTP, middlewares...)
 }
 
 func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {

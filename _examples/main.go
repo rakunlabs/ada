@@ -14,6 +14,7 @@ import (
 	"github.com/rakunlabs/tell"
 
 	"github.com/rakunlabs/ada/_examples/bind"
+	"github.com/rakunlabs/ada/_examples/folder"
 	"github.com/rakunlabs/ada/_examples/grpc"
 	"github.com/rakunlabs/ada/_examples/hello"
 	"github.com/rakunlabs/ada/_examples/mcp"
@@ -28,10 +29,11 @@ func main() {
 }
 
 var Examples = map[string]func(ctx context.Context) error{
-	"grpc":  grpc.Run,
-	"mcp":   mcp.Run,
-	"hello": hello.Run,
-	"bind":  bind.Run,
+	"grpc":   grpc.Run,
+	"mcp":    mcp.Run,
+	"hello":  hello.Run,
+	"bind":   bind.Run,
+	"folder": folder.Run,
 }
 
 func run(ctx context.Context) error {

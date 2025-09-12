@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/rakunlabs/ada"
-	"github.com/rakunlabs/ada/middleware/mcp"
+	"github.com/rakunlabs/ada/handler/mcp"
 
 	mlog "github.com/rakunlabs/ada/middleware/log"
 )
