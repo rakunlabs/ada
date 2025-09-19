@@ -9,6 +9,7 @@ import (
 	"github.com/rakunlabs/ada"
 
 	"github.com/rakunlabs/ada/handler/folder"
+	_ "github.com/rakunlabs/ada/handler/folder/browser"
 
 	mcors "github.com/rakunlabs/ada/middleware/cors"
 	mlog "github.com/rakunlabs/ada/middleware/log"
@@ -33,9 +34,9 @@ func Run(ctx context.Context) error {
 		)
 
 		f, err := folder.New(&folder.Config{
-			Browse:         false,
-			SPA:            true,
-			Index:          true,
+			Browse:         true,
+			SPA:            false,
+			Index:          false,
 			StripIndexName: true,
 			// PrefixPath:     "/mypath",
 			CacheRegex: []*folder.RegexCacheStore{

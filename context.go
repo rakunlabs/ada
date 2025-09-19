@@ -83,10 +83,7 @@ func (c *Context) Err(err error) error {
 		c.code = http.StatusInternalServerError
 	}
 
-	return &HandlerError{
-		Code: c.code,
-		Err:  err,
-	}
+	return err
 }
 
 // //////////////////////////////////////////

@@ -8,8 +8,15 @@ import (
 	"strconv"
 
 	"github.com/rakunlabs/ada/handler/folder"
+
+	_ "github.com/rytsh/mugo/fstore/registry/cast"
 	_ "github.com/rytsh/mugo/fstore/registry/codec"
+	_ "github.com/rytsh/mugo/fstore/registry/html2"
+	_ "github.com/rytsh/mugo/fstore/registry/humanize"
 	_ "github.com/rytsh/mugo/fstore/registry/minify"
+	_ "github.com/rytsh/mugo/fstore/registry/sprig"
+	_ "github.com/rytsh/mugo/fstore/registry/template"
+	_ "github.com/rytsh/mugo/fstore/registry/time"
 
 	"github.com/rytsh/mugo/render"
 )
@@ -42,7 +49,7 @@ func Browser(w http.ResponseWriter, r *http.Request, opt folder.BrowserOption) e
 
 	dirs = append(folderDirs, folderFiles...)
 
-	values := map[string]interface{}{
+	values := map[string]any{
 		"basePath":  opt.BasePath,
 		"dirs":      dirs,
 		"url":       r.URL.Path,

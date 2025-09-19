@@ -8,10 +8,10 @@ import (
 
 // Based in chi's timeout middleware
 
-// Timeout is a middleware that cancels ctx after a given timeout.
+// Middleware is a timeout middleware that cancels ctx after a given timeout.
 //   - Return a 504 Gateway Timeout error to the client.
 //   - If timeout <= 0, the middleware is a no-op.
-func Timeout(timeout time.Duration) func(next http.Handler) http.Handler {
+func Middleware(timeout time.Duration) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if timeout <= 0 {
 			return next

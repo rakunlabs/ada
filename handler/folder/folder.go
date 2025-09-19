@@ -236,7 +236,7 @@ func (f *Folder) serveFile(w http.ResponseWriter, r *http.Request, uPath, cPath 
 
 	// Still a directory? (we didn't find an index.html file)
 	if d.IsDir() {
-		if f.cfg.Browse {
+		if f.cfg.Browse && BrowserFunc != nil {
 			return BrowserFunc(w, r, BrowserOption{
 				Folder:      file,
 				UTC:         f.cfg.UTC,
