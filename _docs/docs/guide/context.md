@@ -103,13 +103,7 @@ The default error handler checks if the error is an `ada.HandlerError` and uses 
 
 ```go
 var DefaultErrHandler = func(c *ada.Context, err error) {
-	var errResp *ada.HandlerError
-	if errors.As(err, &errResp) {
-		c.SetStatus(errResp.Code).SendJSON(errResp)
-		return
-	}
-
-	c.SetStatus(http.StatusInternalServerError).SendJSON(map[string]string{"message": err.Error()})
+    c.SendJSON(map[string]string{"message": err.Error()})
 }
 ```
 

@@ -3,20 +3,7 @@ package mcp
 import "encoding/json"
 
 func (s *MCP) handleResourcesList(id any) JSONRPCResponse {
-	resources := []Resource{
-		{
-			URI:         "config://server-info",
-			Name:        "Server Information",
-			Description: "Information about this MCP server",
-			MimeType:    "application/json",
-		},
-		{
-			URI:         "data://sample-text",
-			Name:        "Sample Text",
-			Description: "A sample text resource",
-			MimeType:    "text/plain",
-		},
-	}
+	resources := s.Resources.List()
 
 	result := map[string]any{
 		"resources": resources,
@@ -38,33 +25,22 @@ func (s *MCP) handleResourcesRead(id any, params json.RawMessage) JSONRPCRespons
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 
-	var content any
-	var mimeType string
-
-	switch readParams.URI {
-	case "config://server-info":
-		content = map[string]any{
-			"name":    "example-go-http-server",
-			"version": "1.0.0",
-			"port":    8080,
-			"capabilities": []string{
-				"tools",
-				"resources",
-			},
-		}
-		mimeType = "application/json"
-	case "data://sample-text":
-		content = "This is a sample text resource served by the MCP HTTP server.\nIt can contain multiple lines and various content."
-		mimeType = "text/plain"
-	default:
+	// Get the handler for this resource
+	handler := s.Resources.GetHandler(readParams.URI)
+	if handler == nil {
 		return s.createErrorResponse(id, -32602, "Resource not found: "+readParams.URI)
+	}
+
+	// Call the handler
+	content, err := handler(readParams.URI)
+	if err != nil {
+		return s.createErrorResponse(id, -32603, "Resource read error: "+err.Error())
 	}
 
 	result := map[string]any{
 		"contents": []map[string]any{
 			{
-				"uri":      readParams.URI,
-				"mimeType": mimeType,
+				"uri": readParams.URI,
 			},
 		},
 	}
@@ -72,10 +48,12 @@ func (s *MCP) handleResourcesRead(id any, params json.RawMessage) JSONRPCRespons
 	// Add content based on type
 	if str, ok := content.(string); ok {
 		result["contents"].([]map[string]any)[0]["text"] = str
+		result["contents"].([]map[string]any)[0]["mimeType"] = "text/plain"
 	} else {
 		// For JSON content, convert to text
 		jsonBytes, _ := json.MarshalIndent(content, "", "  ")
 		result["contents"].([]map[string]any)[0]["text"] = string(jsonBytes)
+		result["contents"].([]map[string]any)[0]["mimeType"] = "application/json"
 	}
 
 	return JSONRPCResponse{

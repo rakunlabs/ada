@@ -1,6 +1,7 @@
 package bind
 
 import (
+	"encoding"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -14,8 +15,9 @@ import (
 )
 
 var (
-	typeTime     = reflect.TypeOf(time.Time{})
-	typeDuration = reflect.TypeOf(time.Duration(0))
+	typeTime        = reflect.TypeOf(time.Time{})
+	typeDuration    = reflect.TypeOf(time.Duration(0))
+	typeUnmarshaler = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 
 	fieldCacheMap = make(map[reflect.Type]*fieldCache)
 )
@@ -381,6 +383,18 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 		}
 
 		field.Set(reflect.ValueOf(timeVal))
+
+		return nil
+	}
+
+	// Handle types that implement encoding.TextUnmarshaler
+	if field.Type().Implements(typeUnmarshaler) || reflect.PointerTo(field.Type()).Implements(typeUnmarshaler) {
+		unmarshaler, _ := field.Addr().Interface().(encoding.TextUnmarshaler)
+		if unmarshaler != nil {
+			if err := unmarshaler.UnmarshalText([]byte(value)); err != nil {
+				return fmt.Errorf("failed to unmarshal text for field %s: %w", fieldType.Name, err)
+			}
+		}
 
 		return nil
 	}

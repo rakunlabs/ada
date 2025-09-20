@@ -4,6 +4,8 @@ HTTP request binding system that automatically maps HTTP request data to Go stru
 
 ## Supported Struct Tags
 
+Own struct types can implement the `encoding.TextUnmarshaler` interface for custom parsing logic.
+
 | Tag                    | Description                     | Example                    |
 | ---------------------- | ------------------------------- | -------------------------- |
 | `json:"field_name"`    | Binds from JSON request body    | `json:"username"`          |

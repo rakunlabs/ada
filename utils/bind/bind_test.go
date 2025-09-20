@@ -66,6 +66,18 @@ type ExampleUser struct {
 
 	Duration   time.Duration `query:"duration"`
 	HugeNumber json.Number   `query:"huge_number"`
+
+	// Custom type with TextUnmarshaler
+	CustomField CustomType `query:"custom_field"`
+}
+
+type CustomType struct {
+	Value string
+}
+
+func (c *CustomType) UnmarshalText(text []byte) error {
+	c.Value = strings.ToUpper(string(text))
+	return nil
 }
 
 // Address represents a nested struct
@@ -103,7 +115,7 @@ type APIRequest struct {
 	AcceptLang  string `header:"Accept-Language"`
 
 	// Body (JSON)
-	Data map[string]interface{} `json:"data"`
+	Data map[string]any `json:"data"`
 }
 
 // FileUploadRequest demonstrates file upload binding
@@ -211,7 +223,7 @@ func TestDefaultBinder_BindForm(t *testing.T) {
 
 func TestDefaultBinder_BindQuery(t *testing.T) {
 	// Test query parameter binding
-	req, _ := http.NewRequest("GET", "/users?lucky_nums=10,60&lucky_nums=1,2,3&lucky_nums=99&page=2&page_size=10&tags=go&tags=web&active=true&score=95.5&duration=10s&huge_number=19.94324", nil)
+	req, _ := http.NewRequest("GET", "/users?lucky_nums=10,60&lucky_nums=1,2,3&lucky_nums=99&page=2&page_size=10&tags=go&tags=web&active=true&score=95.5&duration=10s&huge_number=19.94324&custom_field=custom", nil)
 
 	var user ExampleUser
 	err := Bind(req, &user)
@@ -250,6 +262,10 @@ func TestDefaultBinder_BindQuery(t *testing.T) {
 
 	if user.Score == nil || *user.Score != 95.5 {
 		t.Errorf("Expected score 95.5, got %v", user.Score)
+	}
+
+	if user.CustomField.Value != "CUSTOM" {
+		t.Errorf("Expected custom field 'CUSTOM', got %s", user.CustomField.Value)
 	}
 }
 
