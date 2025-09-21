@@ -387,18 +387,6 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 		return nil
 	}
 
-	// Handle types that implement encoding.TextUnmarshaler
-	if field.Type().Implements(typeUnmarshaler) || reflect.PointerTo(field.Type()).Implements(typeUnmarshaler) {
-		unmarshaler, _ := field.Addr().Interface().(encoding.TextUnmarshaler)
-		if unmarshaler != nil {
-			if err := unmarshaler.UnmarshalText([]byte(value)); err != nil {
-				return fmt.Errorf("failed to unmarshal text for field %s: %w", fieldType.Name, err)
-			}
-		}
-
-		return nil
-	}
-
 	switch field.Kind() {
 	case reflect.String:
 		field.SetString(value)
@@ -433,6 +421,18 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 
 		return setFieldValue(field.Elem(), fieldType, value)
 	default:
+		// Handle types that implement encoding.TextUnmarshaler
+		if field.Type().Implements(typeUnmarshaler) || reflect.PointerTo(field.Type()).Implements(typeUnmarshaler) {
+			unmarshaler, _ := field.Addr().Interface().(encoding.TextUnmarshaler)
+			if unmarshaler != nil {
+				if err := unmarshaler.UnmarshalText([]byte(value)); err != nil {
+					return fmt.Errorf("failed to unmarshal text for field %s: %w", fieldType.Name, err)
+				}
+			}
+
+			return nil
+		}
+
 		return fmt.Errorf("unsupported field type: %s", field.Type())
 	}
 

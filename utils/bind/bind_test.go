@@ -45,8 +45,8 @@ type ExampleUser struct {
 	Documents []*multipart.FileHeader `file:"documents"`
 
 	// Time binding with custom format
-	CreatedAt time.Time `json:"created_at" time_format:"2006-01-02T15:04:05Z07:00"`
-	UpdatedAt time.Time `form:"updated_at" time_format:"2006-01-02"`
+	CreatedAt time.Time  `json:"created_at" time_format:"2006-01-02T15:04:05Z07:00"`
+	UpdatedAt *time.Time `form:"updated_at" time_format:"2006-01-02"`
 
 	// Pointer fields for optional values
 	Bio        *string  `json:"bio,omitempty"`
@@ -384,6 +384,9 @@ func TestDefaultBinder_BindTimeFields(t *testing.T) {
 	}
 
 	expected := time.Date(2023, 12, 25, 0, 0, 0, 0, time.UTC)
+	if user.UpdatedAt == nil {
+		t.Fatalf("Expected updated_at to be set")
+	}
 	if !user.UpdatedAt.Equal(expected) {
 		t.Errorf("Expected updated_at %v, got %v", expected, user.UpdatedAt)
 	}
