@@ -82,7 +82,7 @@ func New(opts ...Option) *Logger {
 			PreFunc: func(r *http.Request) *http.Request {
 				user := r.Header.Get("X-User")
 				requestID := r.Header.Get("X-Request-ID")
-				userAgent := r.Header.Get("User-Agent")
+				userAgent := userAgent(r)
 
 				slogAttrs := make([]any, 0, 3)
 				if requestID != "" {
@@ -106,7 +106,7 @@ func New(opts ...Option) *Logger {
 					slog.String("host", r.Host),
 					slog.String("method", r.Method),
 					slog.String("uri", r.RequestURI),
-					slog.String("user_agent", r.Header.Get("User-Agent")),
+					slog.String("user_agent", userAgent(r)),
 					slog.Int("status", v.Status),
 					slog.Int64("latency", v.Latency.Nanoseconds()),
 					slog.String("latency_human", v.Latency.String()),
@@ -147,6 +147,19 @@ func realIP(r *http.Request) (ip string) {
 	}
 
 	return ip
+}
+
+func userAgent(r *http.Request) string {
+	// get first part of user-agent before space
+	if ua := r.Header.Get("User-Agent"); ua != "" {
+		if i := strings.Index(ua, " "); i != -1 {
+			return ua[:i]
+		}
+
+		return ua
+	}
+
+	return ""
 }
 
 // //////////////////////////////////////////////////////
