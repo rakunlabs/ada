@@ -381,6 +381,10 @@ func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
 
 func (m Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http.Handler) *Mux {
 	m.prefix = path.Join("/", m.prefix, pathGroup)
+	if m.prefix == "/" {
+		m.prefix = ""
+	}
+
 	m.middlewares = append(m.middlewares, middlewares...)
 
 	return &m
