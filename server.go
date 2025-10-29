@@ -8,9 +8,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 var (
@@ -95,13 +92,17 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 		return fmt.Errorf("address cannot listen %s: %w, %w", addr, ErrListen, err)
 	}
 
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+
 	s.server = opt.HTTPServerFunc(
 		&http.Server{
 			ReadHeaderTimeout: opt.ReadHeaderTimeout,
-			Handler:           h2c.NewHandler(s.Mux, &http2.Server{}),
 			BaseContext: func(_ net.Listener) context.Context {
 				return context.WithValue(baseContext, ListenerAddrContextKey, s.listener.Addr())
 			},
+			Protocols: protocols,
 		},
 	)
 
