@@ -94,6 +94,7 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
 	protocols.SetUnencryptedHTTP2(true)
 
 	s.server = opt.HTTPServerFunc(
@@ -103,6 +104,7 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 				return context.WithValue(baseContext, ListenerAddrContextKey, s.listener.Addr())
 			},
 			Protocols: protocols,
+			Handler:   s.Mux,
 		},
 	)
 
