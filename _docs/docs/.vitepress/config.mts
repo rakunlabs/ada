@@ -74,6 +74,10 @@ export default defineConfig({
                 text: "Telemetry",
                 link: "/guide/middleware/telemetry.md",
               },
+              {
+                text: "Encoding",
+                link: "/guide/middleware/encoding.md",
+              }
             ],
           },
           {
