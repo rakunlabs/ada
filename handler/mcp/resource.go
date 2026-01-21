@@ -21,7 +21,7 @@ func (s *MCP) handleResourcesRead(id any, params json.RawMessage) JSONRPCRespons
 		URI string `json:"uri"`
 	}
 
-	if err := json.Unmarshal(params, &readParams); err != nil {
+	if err := decodeJSON(params, &readParams); err != nil {
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 

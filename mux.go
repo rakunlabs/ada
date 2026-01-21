@@ -470,6 +470,17 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		handler = current.Handler
 	}
 
+	// Fallback to wildcard handler if specific method handler not found
+	if handler == nil && possible != nil {
+		handler = possible.MethodHandler[strings.ToUpper(r.Method)]
+		if handler == nil {
+			handler = possible.Handler
+		}
+		if handler != nil {
+			current = possible
+		}
+	}
+
 	if handler == nil {
 		notFound(w, r)
 		return

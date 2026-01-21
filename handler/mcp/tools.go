@@ -59,7 +59,7 @@ func (s *MCP) handleToolsCall(id any, params json.RawMessage) JSONRPCResponse {
 		Arguments map[string]any `json:"arguments"`
 	}
 
-	if err := json.Unmarshal(params, &callParams); err != nil {
+	if err := decodeJSON(params, &callParams); err != nil {
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 

@@ -2,8 +2,6 @@ package mcp
 
 import (
 	"encoding/json"
-	"fmt"
-	"strings"
 )
 
 type MCP struct {
@@ -34,17 +32,12 @@ func New() *MCP {
 		},
 	}
 
-	// Add default tools
-	mcp.addDefaultTools()
-	mcp.addDefaultResources()
-	mcp.addDefaultPrompts()
-
 	return mcp
 }
 
 func (s *MCP) handleInitialize(id any, params json.RawMessage) JSONRPCResponse {
 	var initParams InitializeParams
-	if err := json.Unmarshal(params, &initParams); err != nil {
+	if err := decodeJSON(params, &initParams); err != nil {
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 
@@ -104,7 +97,7 @@ func (s *MCP) handlePromptsGet(id any, params json.RawMessage) JSONRPCResponse {
 		Arguments map[string]string `json:"arguments,omitempty"`
 	}
 
-	if err := json.Unmarshal(params, &getParams); err != nil {
+	if err := decodeJSON(params, &getParams); err != nil {
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 
@@ -158,7 +151,7 @@ func (s *MCP) handleResourcesTemplatesList(id any) JSONRPCResponse {
 
 func (s *MCP) handleResourcesSubscribe(id any, params json.RawMessage) JSONRPCResponse {
 	var subscribeParams SubscribeRequest
-	if err := json.Unmarshal(params, &subscribeParams); err != nil {
+	if err := decodeJSON(params, &subscribeParams); err != nil {
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 
@@ -175,7 +168,7 @@ func (s *MCP) handleResourcesSubscribe(id any, params json.RawMessage) JSONRPCRe
 
 func (s *MCP) handleResourcesUnsubscribe(id any, params json.RawMessage) JSONRPCResponse {
 	var unsubscribeParams UnsubscribeRequest
-	if err := json.Unmarshal(params, &unsubscribeParams); err != nil {
+	if err := decodeJSON(params, &unsubscribeParams); err != nil {
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 
@@ -192,7 +185,7 @@ func (s *MCP) handleResourcesUnsubscribe(id any, params json.RawMessage) JSONRPC
 
 func (s *MCP) handleCompletionComplete(id any, params json.RawMessage) JSONRPCResponse {
 	var completeParams CompleteRequest
-	if err := json.Unmarshal(params, &completeParams); err != nil {
+	if err := decodeJSON(params, &completeParams); err != nil {
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 
@@ -229,7 +222,7 @@ func (s *MCP) handleCompletionComplete(id any, params json.RawMessage) JSONRPCRe
 
 func (s *MCP) handleLoggingSetLevel(id any, params json.RawMessage) JSONRPCResponse {
 	var levelParams SetLevelRequest
-	if err := json.Unmarshal(params, &levelParams); err != nil {
+	if err := decodeJSON(params, &levelParams); err != nil {
 		return s.createErrorResponse(id, -32602, "Invalid params")
 	}
 
@@ -245,200 +238,198 @@ func (s *MCP) handleLoggingSetLevel(id any, params json.RawMessage) JSONRPCRespo
 }
 
 // Default initialization methods
-func (s *MCP) addDefaultTools() {
-	// Add the built-in tools
-	s.Tools.Add(Tool{
-		Name:        "echo",
-		Description: "Echo back the input text",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"text": map[string]any{
-					"type":        "string",
-					"description": "Text to echo back",
-				},
-			},
-			"required": []string{"text"},
-		},
-	}, func(args map[string]any) (any, error) {
-		if text, ok := args["text"].(string); ok {
-			return map[string]any{
-				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": fmt.Sprintf("Echo: %s", text),
-					},
-				},
-			}, nil
-		}
-		return nil, fmt.Errorf("missing or invalid 'text' parameter")
-	})
+// func (s *MCP) addDefaultTools() {
+// 	// Add the built-in tools
+// 	s.Tools.Add(Tool{
+// 		Name:        "echo",
+// 		Description: "Echo back the input text",
+// 		InputSchema: map[string]any{
+// 			"type": "object",
+// 			"properties": map[string]any{
+// 				"text": map[string]any{
+// 					"type":        "string",
+// 					"description": "Text to echo back",
+// 				},
+// 			},
+// 			"required": []string{"text"},
+// 		},
+// 	}, func(args map[string]any) (any, error) {
+// 		if text, ok := args["text"].(string); ok {
+// 			return map[string]any{
+// 				"content": []map[string]any{
+// 					{
+// 						"type": "text",
+// 						"text": fmt.Sprintf("Echo: %s", text),
+// 					},
+// 				},
+// 			}, nil
+// 		}
+// 		return nil, fmt.Errorf("missing or invalid 'text' parameter")
+// 	})
 
-	s.Tools.Add(Tool{
-		Name:        "uppercase",
-		Description: "Convert text to uppercase",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"text": map[string]any{
-					"type":        "string",
-					"description": "Text to convert to uppercase",
-				},
-			},
-			"required": []string{"text"},
-		},
-	}, func(args map[string]any) (any, error) {
-		if text, ok := args["text"].(string); ok {
-			return map[string]any{
-				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": strings.ToUpper(text),
-					},
-				},
-			}, nil
-		}
-		return nil, fmt.Errorf("missing or invalid 'text' parameter")
-	})
+// 	s.Tools.Add(Tool{
+// 		Name:        "uppercase",
+// 		Description: "Convert text to uppercase",
+// 		InputSchema: map[string]any{
+// 			"type": "object",
+// 			"properties": map[string]any{
+// 				"text": map[string]any{
+// 					"type":        "string",
+// 					"description": "Text to convert to uppercase",
+// 				},
+// 			},
+// 			"required": []string{"text"},
+// 		},
+// 	}, func(args map[string]any) (any, error) {
+// 		if text, ok := args["text"].(string); ok {
+// 			return map[string]any{
+// 				"content": []map[string]any{
+// 					{
+// 						"type": "text",
+// 						"text": strings.ToUpper(text),
+// 					},
+// 				},
+// 			}, nil
+// 		}
+// 		return nil, fmt.Errorf("missing or invalid 'text' parameter")
+// 	})
 
-	s.Tools.Add(Tool{
-		Name:        "word_count",
-		Description: "Count words in the given text",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"text": map[string]any{
-					"type":        "string",
-					"description": "Text to count words in",
-				},
-			},
-			"required": []string{"text"},
-		},
-	}, func(args map[string]any) (any, error) {
-		if text, ok := args["text"].(string); ok {
-			words := strings.Fields(text)
-			count := len(words)
-			return map[string]any{
-				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": fmt.Sprintf("Word count: %d", count),
-					},
-				},
-			}, nil
-		}
-		return nil, fmt.Errorf("missing or invalid 'text' parameter")
-	})
-}
+// 	s.Tools.Add(Tool{
+// 		Name:        "word_count",
+// 		Description: "Count words in the given text",
+// 		InputSchema: map[string]any{
+// 			"type": "object",
+// 			"properties": map[string]any{
+// 				"text": map[string]any{
+// 					"type":        "string",
+// 					"description": "Text to count words in",
+// 				},
+// 			},
+// 			"required": []string{"text"},
+// 		},
+// 	}, func(args map[string]any) (any, error) {
+// 		if text, ok := args["text"].(string); ok {
+// 			words := strings.Fields(text)
+// 			count := len(words)
+// 			return map[string]any{
+// 				"content": []map[string]any{
+// 					{
+// 						"type": "text",
+// 						"text": fmt.Sprintf("Word count: %d", count),
+// 					},
+// 				},
+// 			}, nil
+// 		}
+// 		return nil, fmt.Errorf("missing or invalid 'text' parameter")
+// 	})
+// }
 
-func (s *MCP) addDefaultResources() {
-	// Add built-in resources
-	s.Resources.Add(Resource{
-		URI:         "config://server-info",
-		Name:        "Server Information",
-		Description: "Information about this MCP server",
-		MimeType:    "application/json",
-	}, func(uri string) (any, error) {
-		return map[string]any{
-			"name":    "example-go-http-server",
-			"version": "1.0.0",
-			"port":    8080,
-			"capabilities": []string{
-				"tools",
-				"resources",
-				"prompts",
-				"logging",
-				"completions",
-			},
-		}, nil
-	})
+// func (s *MCP) addDefaultResources() {
+// 	// Add built-in resources
+// 	s.Resources.Add(Resource{
+// 		URI:         "config://server-info",
+// 		Name:        "Server Information",
+// 		Description: "Information about this MCP server",
+// 		MimeType:    "application/json",
+// 	}, func(uri string) (any, error) {
+// 		return map[string]any{
+// 			"name":    "example-go-http-server",
+// 			"version": "1.0.0",
+// 			"port":    8080,
+// 			"capabilities": []string{
+// 				"tools",
+// 				"resources",
+// 				"prompts",
+// 			},
+// 		}, nil
+// 	})
 
-	s.Resources.Add(Resource{
-		URI:         "data://sample-text",
-		Name:        "Sample Text",
-		Description: "A sample text resource",
-		MimeType:    "text/plain",
-	}, func(uri string) (any, error) {
-		return "This is a sample text resource served by the MCP HTTP server.\nIt can contain multiple lines and various content.", nil
-	})
-}
+// 	s.Resources.Add(Resource{
+// 		URI:         "data://sample-text",
+// 		Name:        "Sample Text",
+// 		Description: "A sample text resource",
+// 		MimeType:    "text/plain",
+// 	}, func(uri string) (any, error) {
+// 		return "This is a sample text resource served by the MCP HTTP server.\nIt can contain multiple lines and various content.", nil
+// 	})
+// }
 
-func (s *MCP) addDefaultPrompts() {
-	// Add built-in prompts
-	s.Prompts.Add(Prompt{
-		Name:        "code_review",
-		Title:       "Code Review Assistant",
-		Description: "Asks the LLM to analyze code quality and suggest improvements",
-		Arguments: []PromptArg{
-			{
-				Name:        "code",
-				Description: "The code to review",
-				Required:    true,
-			},
-			{
-				Name:        "language",
-				Description: "Programming language of the code",
-				Required:    false,
-			},
-		},
-	}, func(args map[string]string) (GetPromptResult, error) {
-		code := args["code"]
-		language := args["language"]
-		if language == "" {
-			language = "unknown"
-		}
+// func (s *MCP) addDefaultPrompts() {
+// 	// Add built-in prompts
+// 	s.Prompts.Add(Prompt{
+// 		Name:        "code_review",
+// 		Title:       "Code Review Assistant",
+// 		Description: "Asks the LLM to analyze code quality and suggest improvements",
+// 		Arguments: []PromptArg{
+// 			{
+// 				Name:        "code",
+// 				Description: "The code to review",
+// 				Required:    true,
+// 			},
+// 			{
+// 				Name:        "language",
+// 				Description: "Programming language of the code",
+// 				Required:    false,
+// 			},
+// 		},
+// 	}, func(args map[string]string) (GetPromptResult, error) {
+// 		code := args["code"]
+// 		language := args["language"]
+// 		if language == "" {
+// 			language = "unknown"
+// 		}
 
-		return GetPromptResult{
-			Description: "Code review prompt for " + language,
-			Messages: []PromptMessage{
-				{
-					Role: "user",
-					Content: PromptContent{
-						Type: "text",
-						Text: fmt.Sprintf("Please review the following %s code and provide feedback on:\n1. Code quality and best practices\n2. Potential bugs or issues\n3. Performance considerations\n4. Security concerns\n\nCode:\n```%s\n%s\n```", language, language, code),
-					},
-				},
-			},
-		}, nil
-	})
+// 		return GetPromptResult{
+// 			Description: "Code review prompt for " + language,
+// 			Messages: []PromptMessage{
+// 				{
+// 					Role: "user",
+// 					Content: PromptContent{
+// 						Type: "text",
+// 						Text: fmt.Sprintf("Please review the following %s code and provide feedback on:\n1. Code quality and best practices\n2. Potential bugs or issues\n3. Performance considerations\n4. Security concerns\n\nCode:\n```%s\n%s\n```", language, language, code),
+// 					},
+// 				},
+// 			},
+// 		}, nil
+// 	})
 
-	s.Prompts.Add(Prompt{
-		Name:        "explain_concept",
-		Title:       "Concept Explainer",
-		Description: "Explains technical concepts in simple terms",
-		Arguments: []PromptArg{
-			{
-				Name:        "concept",
-				Description: "The concept to explain",
-				Required:    true,
-			},
-			{
-				Name:        "audience",
-				Description: "Target audience (beginner, intermediate, expert)",
-				Required:    false,
-			},
-		},
-	}, func(args map[string]string) (GetPromptResult, error) {
-		concept := args["concept"]
-		audience := args["audience"]
-		if audience == "" {
-			audience = "intermediate"
-		}
+// 	s.Prompts.Add(Prompt{
+// 		Name:        "explain_concept",
+// 		Title:       "Concept Explainer",
+// 		Description: "Explains technical concepts in simple terms",
+// 		Arguments: []PromptArg{
+// 			{
+// 				Name:        "concept",
+// 				Description: "The concept to explain",
+// 				Required:    true,
+// 			},
+// 			{
+// 				Name:        "audience",
+// 				Description: "Target audience (beginner, intermediate, expert)",
+// 				Required:    false,
+// 			},
+// 		},
+// 	}, func(args map[string]string) (GetPromptResult, error) {
+// 		concept := args["concept"]
+// 		audience := args["audience"]
+// 		if audience == "" {
+// 			audience = "intermediate"
+// 		}
 
-		return GetPromptResult{
-			Description: "Concept explanation for " + audience + " audience",
-			Messages: []PromptMessage{
-				{
-					Role: "user",
-					Content: PromptContent{
-						Type: "text",
-						Text: fmt.Sprintf("Please explain the concept of '%s' to a %s audience. Use simple language, provide examples, and break down complex ideas into understandable parts.", concept, audience),
-					},
-				},
-			},
-		}, nil
-	})
-}
+// 		return GetPromptResult{
+// 			Description: "Concept explanation for " + audience + " audience",
+// 			Messages: []PromptMessage{
+// 				{
+// 					Role: "user",
+// 					Content: PromptContent{
+// 						Type: "text",
+// 						Text: fmt.Sprintf("Please explain the concept of '%s' to a %s audience. Use simple language, provide examples, and break down complex ideas into understandable parts.", concept, audience),
+// 					},
+// 				},
+// 			},
+// 		}, nil
+// 	})
+// }
 
 // Public API methods for users to register their own tools, resources, and prompts
 
@@ -470,7 +461,7 @@ func (s *MCP) handleResourcesListChanged() {
 
 func (s *MCP) handleResourceUpdated(params json.RawMessage) {
 	var updateParams ResourceUpdatedNotification
-	if err := json.Unmarshal(params, &updateParams); err != nil {
+	if err := decodeJSON(params, &updateParams); err != nil {
 		// Log error but don't fail - notifications are fire-and-forget
 		return
 	}
@@ -486,7 +477,7 @@ func (s *MCP) handlePromptsListChanged() {
 
 func (s *MCP) handleLogMessage(params json.RawMessage) {
 	var logParams LogMessageParams
-	if err := json.Unmarshal(params, &logParams); err != nil {
+	if err := decodeJSON(params, &logParams); err != nil {
 		// Log error but don't fail - notifications are fire-and-forget
 		return
 	}

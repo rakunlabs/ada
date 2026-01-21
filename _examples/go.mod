@@ -21,6 +21,7 @@ require (
 	github.com/rakunlabs/into v0.4.2
 	github.com/rakunlabs/logi v0.4.3
 	github.com/rakunlabs/tell v0.1.0
+	github.com/shopspring/decimal v1.4.0
 	github.com/swaggo/swag v1.16.6
 	google.golang.org/protobuf v1.36.8
 )
@@ -107,7 +108,6 @@ require (
 	github.com/rytsh/mugo v0.9.1 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
 	github.com/segmentio/encoding v0.5.3 // indirect
-	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/cobra v1.10.1 // indirect

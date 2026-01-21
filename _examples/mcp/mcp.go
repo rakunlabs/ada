@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/rakunlabs/ada"
 	"github.com/rakunlabs/ada/handler/mcp"
+	"github.com/shopspring/decimal"
 
 	mlog "github.com/rakunlabs/ada/middleware/log"
 )
@@ -44,29 +46,29 @@ func Run(ctx context.Context) error {
 				return nil, fmt.Errorf("invalid operation")
 			}
 
-			a, ok := args["a"].(float64)
+			a, ok := args["a"].(json.Number)
 			if !ok {
 				return nil, fmt.Errorf("invalid first number")
 			}
 
-			b, ok := args["b"].(float64)
+			b, ok := args["b"].(json.Number)
 			if !ok {
 				return nil, fmt.Errorf("invalid second number")
 			}
 
-			var result float64
+			var result string
 			switch operation {
 			case "add":
-				result = a + b
+				result = decimal.RequireFromString(a.String()).Add(decimal.RequireFromString(b.String())).String()
 			case "subtract":
-				result = a - b
+				result = decimal.RequireFromString(a.String()).Sub(decimal.RequireFromString(b.String())).String()
 			case "multiply":
-				result = a * b
+				result = decimal.RequireFromString(a.String()).Mul(decimal.RequireFromString(b.String())).String()
 			case "divide":
-				if b == 0 {
+				if decimal.RequireFromString(b.String()).Equal(decimal.Zero) {
 					return nil, fmt.Errorf("division by zero")
 				}
-				result = a / b
+				result = decimal.RequireFromString(a.String()).Div(decimal.RequireFromString(b.String())).String()
 			default:
 				return nil, fmt.Errorf("unknown operation: %s", operation)
 			}
@@ -75,7 +77,7 @@ func Run(ctx context.Context) error {
 				"content": []map[string]any{
 					{
 						"type": "text",
-						"text": fmt.Sprintf("Result: %.2f", result),
+						"text": fmt.Sprintf("Result: %s", result),
 					},
 				},
 			}, nil
@@ -91,49 +93,46 @@ func Run(ctx context.Context) error {
 			return map[string]any{
 				"server":    "custom-mcp-server",
 				"version":   "1.0.0",
-				"features":  []string{"calculator", "custom-data"},
+				"features":  []string{"calculator"},
 				"timestamp": "2025-01-13T10:00:00Z",
 			}, nil
 		})
 
 		// Add a custom prompt
 		server.AddPrompt(mcp.Prompt{
-			Name:        "write_email",
-			Title:       "Email Writer",
-			Description: "Generate professional emails",
+			Name:        "calculate",
+			Title:       "Calculator",
+			Description: "Perform arithmetic calculations",
 			Arguments: []mcp.PromptArg{
 				{
-					Name:        "recipient",
-					Description: "Email recipient",
+					Name:        "operation",
+					Description: "Operation to perform (add, subtract, multiply, divide)",
 					Required:    true,
 				},
 				{
-					Name:        "subject",
-					Description: "Email subject",
+					Name:        "a",
+					Description: "First number",
 					Required:    true,
 				},
 				{
-					Name:        "tone",
-					Description: "Email tone (formal, casual, friendly)",
-					Required:    false,
+					Name:        "b",
+					Description: "Second number",
+					Required:    true,
 				},
 			},
 		}, func(args map[string]string) (mcp.GetPromptResult, error) {
-			recipient := args["recipient"]
-			subject := args["subject"]
-			tone := args["tone"]
-			if tone == "" {
-				tone = "formal"
-			}
+			operation := args["operation"]
+			a := args["a"]
+			b := args["b"]
 
 			return mcp.GetPromptResult{
-				Description: "Email writing prompt",
+				Description: "Calculation prompt",
 				Messages: []mcp.PromptMessage{
 					{
 						Role: "user",
 						Content: mcp.PromptContent{
 							Type: "text",
-							Text: fmt.Sprintf("Write a %s email to %s with the subject '%s'. Make it professional and appropriate for the context.", tone, recipient, subject),
+							Text: fmt.Sprintf("Calculate %s %s %s", a, operation, b),
 						},
 					},
 				},
