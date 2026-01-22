@@ -669,3 +669,59 @@ func TestInsertStatic(t *testing.T) {
 		}
 	}
 }
+
+func TestUse(t *testing.T) {
+	mux := NewMux()
+
+	groupTest := mux.Group("/test")
+
+	groupTest.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodOptions {
+				w.Write([]byte("OK"))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// Use HandleFunc to register for all methods, allowing middleware to intercept OPTIONS
+	groupTest.HandleFunc("/xxx", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("GET Test"))
+	})
+
+	// OPTIONS request should be intercepted by middleware
+	reqOptions, _ := http.NewRequest(http.MethodOptions, "/test/abc", nil)
+	recorderOptions := httptest.NewRecorder()
+	mux.ServeHTTP(recorderOptions, reqOptions)
+
+	if recorderOptions.Body.String() != "OK" {
+		t.Errorf("expected OPTIONS middleware to return 'OK', got '%s'", recorderOptions.Body.String())
+	}
+
+	// OPTIONS request should be intercepted by middleware
+	reqOptions, _ = http.NewRequest(http.MethodOptions, "/test/xxx", nil)
+	recorderOptions = httptest.NewRecorder()
+	mux.ServeHTTP(recorderOptions, reqOptions)
+
+	if recorderOptions.Body.String() != "OK" {
+		t.Errorf("expected OPTIONS middleware to return 'OK', got '%s'", recorderOptions.Body.String())
+	}
+
+	// OPTIONS request should not be intercepted by middleware
+	reqOptions, _ = http.NewRequest(http.MethodOptions, "/abc/xxx", nil)
+	recorderOptions = httptest.NewRecorder()
+	mux.ServeHTTP(recorderOptions, reqOptions)
+
+	if recorderOptions.Body.String() != "404 page not found\n" {
+		t.Errorf("expected OPTIONS middleware to return '404 page not found', got '%s'", recorderOptions.Body.String())
+	}
+
+	reqGet, _ := http.NewRequest(http.MethodGet, "/test/xxx", nil)
+	recorderGet := httptest.NewRecorder()
+	mux.ServeHTTP(recorderGet, reqGet)
+
+	if recorderGet.Body.String() != "GET Test" {
+		t.Errorf("expected GET /test to return 'GET Test', got '%s'", recorderGet.Body.String())
+	}
+}

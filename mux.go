@@ -377,6 +377,12 @@ func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
 	}
 
 	m.middlewares = append(m.middlewares, middlewares...)
+
+	// Register a wildcard handler to catch all requests under this prefix
+	// This allows middlewares to intercept requests even for unregistered routes
+	m.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
+		m.notFoundHandler(w, r)
+	})
 }
 
 func (m Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http.Handler) *Mux {
@@ -396,6 +402,16 @@ func (m *Mux) NotFound(handler http.HandlerFunc) {
 	m.notFound = handler
 }
 
+func (m *Mux) notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	notFound := m.notFound
+	if notFound == nil {
+		notFound = http.NotFound
+	}
+
+	// Call the not found handler with middlewares applied
+	Chain(m.middlewares...)(notFound).ServeHTTP(w, r)
+}
+
 // ErrorHandler sets the handler for 500 Internal Server Error responses.
 //   - If not set, it defaults to a generic error handler.
 //   - Only usable for ada.HandlerFunc handlers.
@@ -405,11 +421,6 @@ func (m *Mux) ErrorHandler(handler func(c *Context, err error)) {
 
 // ServeHTTP implements the http.Handler interface for Mux.
 func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	notFound := m.notFound
-	if notFound == nil {
-		notFound = http.NotFound
-	}
-
 	path := r.URL.Path
 	current := m.root
 	var possible *node
@@ -461,7 +472,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if current == nil {
-		notFound(w, r)
+		m.notFoundHandler(w, r)
 		return
 	}
 
@@ -482,7 +493,7 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if handler == nil {
-		notFound(w, r)
+		m.notFoundHandler(w, r)
 		return
 	}
 
