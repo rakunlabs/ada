@@ -725,3 +725,22 @@ func TestUse(t *testing.T) {
 		t.Errorf("expected GET /test to return 'GET Test', got '%s'", recorderGet.Body.String())
 	}
 }
+
+func TestMux_Prefix(t *testing.T) {
+	mux := NewMux()
+
+	mux = mux.Group("")
+	if mux.Prefix() != "" {
+		t.Errorf("expected root mux prefix to be '', got '%s'", mux.Prefix())
+	}
+
+	group := mux.Group("/api/v1")
+	if group.Prefix() != "/api/v1" {
+		t.Errorf("expected group mux prefix to be '/api/v1', got '%s'", group.Prefix())
+	}
+
+	subGroup := group.Group("/users")
+	if subGroup.Prefix() != "/api/v1/users" {
+		t.Errorf("expected subgroup mux prefix to be '/api/v1/users', got '%s'", subGroup.Prefix())
+	}
+}

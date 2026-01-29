@@ -396,6 +396,12 @@ func (m Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http
 	return &m
 }
 
+// Prefix returns the current prefix of the Mux.
+//   - Useful when giving basepath for sub-routers.
+func (m *Mux) Prefix() string {
+	return m.prefix
+}
+
 // NotFound sets the handler for 404 Not Found responses.
 //   - If not set, it defaults to http.NotFound.
 func (m *Mux) NotFound(handler http.HandlerFunc) {
