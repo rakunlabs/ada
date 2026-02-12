@@ -517,3 +517,416 @@ func BenchmarkBinder_Form_Parsed(b *testing.B) {
 		bindForm(req, reflect.ValueOf(&user).Elem(), getFieldCache(reflect.TypeOf(user)))
 	}
 }
+
+func TestDefaultBinder_BindJSONRawMessage(t *testing.T) {
+	type RequestWithRawMessage struct {
+		Name  string            `query:"name"`
+		Data  json.RawMessage   `query:"data"`
+		Items []json.RawMessage `query:"items"`
+	}
+
+	// Test single json.RawMessage and []json.RawMessage via query params
+	req, _ := http.NewRequest("GET", `/test?name=test&data={"key":"value"}&items={"id":1}&items={"id":2}`, nil)
+
+	var result RequestWithRawMessage
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if result.Name != "test" {
+		t.Errorf("Expected name 'test', got %s", result.Name)
+	}
+
+	// Check single RawMessage
+	expectedData := `{"key":"value"}`
+	if string(result.Data) != expectedData {
+		t.Errorf("Expected data '%s', got '%s'", expectedData, string(result.Data))
+	}
+
+	// Check slice of RawMessage
+	if len(result.Items) != 2 {
+		t.Fatalf("Expected 2 items, got %d", len(result.Items))
+	}
+
+	expectedItem1 := `{"id":1}`
+	expectedItem2 := `{"id":2}`
+	if string(result.Items[0]) != expectedItem1 {
+		t.Errorf("Expected items[0] '%s', got '%s'", expectedItem1, string(result.Items[0]))
+	}
+	if string(result.Items[1]) != expectedItem2 {
+		t.Errorf("Expected items[1] '%s', got '%s'", expectedItem2, string(result.Items[1]))
+	}
+}
+
+func TestDefaultBinder_BindJSONRawMessageForm(t *testing.T) {
+	type RequestWithRawMessage struct {
+		Data  json.RawMessage   `form:"data"`
+		Items []json.RawMessage `form:"items"`
+	}
+
+	form := url.Values{}
+	form.Add("data", `{"nested":"object"}`)
+	form.Add("items", `{"id":1}`)
+	form.Add("items", `{"id":2}`)
+	form.Add("items", `[1,2,3]`)
+
+	req, _ := http.NewRequest("POST", "/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var result RequestWithRawMessage
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	// Check single RawMessage
+	expectedData := `{"nested":"object"}`
+	if string(result.Data) != expectedData {
+		t.Errorf("Expected data '%s', got '%s'", expectedData, string(result.Data))
+	}
+
+	// Check slice of RawMessage
+	if len(result.Items) != 3 {
+		t.Fatalf("Expected 3 items, got %d", len(result.Items))
+	}
+
+	if string(result.Items[0]) != `{"id":1}` {
+		t.Errorf("Expected items[0] '{\"id\":1}', got '%s'", string(result.Items[0]))
+	}
+	if string(result.Items[1]) != `{"id":2}` {
+		t.Errorf("Expected items[1] '{\"id\":2}', got '%s'", string(result.Items[1]))
+	}
+	if string(result.Items[2]) != `[1,2,3]` {
+		t.Errorf("Expected items[2] '[1,2,3]', got '%s'", string(result.Items[2]))
+	}
+}
+
+func TestDefaultBinder_BindNestedStructFromForm(t *testing.T) {
+	type NestedObject struct {
+		Key   string `json:"key"`
+		Items []int  `json:"items"`
+	}
+
+	type Request struct {
+		Name   string       `form:"name"`
+		Nested NestedObject `form:"nested"`
+	}
+
+	form := url.Values{}
+	form.Add("name", "test")
+	form.Add("nested", `{"key":"value","items":[1,2,3]}`)
+
+	req, _ := http.NewRequest("POST", "/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if result.Name != "test" {
+		t.Errorf("Expected name 'test', got %s", result.Name)
+	}
+
+	if result.Nested.Key != "value" {
+		t.Errorf("Expected nested.key 'value', got %s", result.Nested.Key)
+	}
+
+	if len(result.Nested.Items) != 3 || result.Nested.Items[0] != 1 || result.Nested.Items[1] != 2 || result.Nested.Items[2] != 3 {
+		t.Errorf("Expected nested.items [1,2,3], got %v", result.Nested.Items)
+	}
+}
+
+func TestDefaultBinder_BindNestedStructPointerFromForm(t *testing.T) {
+	type NestedObject struct {
+		Key   string `json:"key"`
+		Value int    `json:"value"`
+	}
+
+	type Request struct {
+		Nested *NestedObject `form:"nested"`
+	}
+
+	form := url.Values{}
+	form.Add("nested", `{"key":"test","value":42}`)
+
+	req, _ := http.NewRequest("POST", "/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if result.Nested == nil {
+		t.Fatal("Expected nested to be non-nil")
+	}
+
+	if result.Nested.Key != "test" {
+		t.Errorf("Expected nested.key 'test', got %s", result.Nested.Key)
+	}
+
+	if result.Nested.Value != 42 {
+		t.Errorf("Expected nested.value 42, got %d", result.Nested.Value)
+	}
+}
+
+func TestDefaultBinder_BindMapFromForm(t *testing.T) {
+	type Request struct {
+		Data map[string]any `form:"data"`
+	}
+
+	form := url.Values{}
+	form.Add("data", `{"key":"value","number":123}`)
+
+	req, _ := http.NewRequest("POST", "/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if result.Data["key"] != "value" {
+		t.Errorf("Expected data.key 'value', got %v", result.Data["key"])
+	}
+
+	if result.Data["number"] != float64(123) {
+		t.Errorf("Expected data.number 123, got %v", result.Data["number"])
+	}
+}
+
+func TestDefaultBinder_BindSliceOfStructsFromForm(t *testing.T) {
+	type Item struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+
+	type Request struct {
+		Items []Item `form:"items"`
+	}
+
+	form := url.Values{}
+	form.Add("items", `{"id":1,"name":"first"}`)
+	form.Add("items", `{"id":2,"name":"second"}`)
+
+	req, _ := http.NewRequest("POST", "/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if len(result.Items) != 2 {
+		t.Fatalf("Expected 2 items, got %d", len(result.Items))
+	}
+
+	if result.Items[0].ID != 1 || result.Items[0].Name != "first" {
+		t.Errorf("Expected items[0] {1, first}, got %+v", result.Items[0])
+	}
+
+	if result.Items[1].ID != 2 || result.Items[1].Name != "second" {
+		t.Errorf("Expected items[1] {2, second}, got %+v", result.Items[1])
+	}
+}
+
+func TestDefaultBinder_BindNestedStructFromMultipartForm(t *testing.T) {
+	type NestedObject struct {
+		Key   string `json:"key"`
+		Items []int  `json:"items"`
+	}
+
+	type Request struct {
+		Title  string       `form:"title"`
+		Nested NestedObject `form:"nested"`
+	}
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	writer.WriteField("title", "Test Title")
+	writer.WriteField("nested", `{"key":"value","items":[1,2,3]}`)
+
+	writer.Close()
+
+	req, _ := http.NewRequest("POST", "/test", &buf)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if result.Title != "Test Title" {
+		t.Errorf("Expected title 'Test Title', got %s", result.Title)
+	}
+
+	if result.Nested.Key != "value" {
+		t.Errorf("Expected nested.key 'value', got %s", result.Nested.Key)
+	}
+
+	if len(result.Nested.Items) != 3 {
+		t.Errorf("Expected 3 items, got %d", len(result.Nested.Items))
+	}
+}
+
+func TestDefaultBinder_HeaderOverridesJSONAndForm(t *testing.T) {
+	// Test that header binding overrides JSON and form values for the same field
+	type Request struct {
+		Token string `json:"token" form:"token" header:"X-Token"`
+	}
+
+	// Send JSON body with token, form with token, and header with token
+	// Header should win since it's bound last
+	jsonData := `{"token": "json-token"}`
+
+	req, _ := http.NewRequest("POST", "/test", strings.NewReader(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Token", "header-token")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	// Header should override JSON value
+	if result.Token != "header-token" {
+		t.Errorf("Expected token 'header-token' (header should override JSON), got '%s'", result.Token)
+	}
+}
+
+func TestDefaultBinder_HeaderOverridesForm(t *testing.T) {
+	type Request struct {
+		Token string `form:"-" header:"X-Token"`
+	}
+
+	form := url.Values{}
+	form.Add("token", "form-token")
+
+	req, _ := http.NewRequest("POST", "/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	// Header should override form value
+	if result.Token != "" {
+		t.Errorf("Expected token '' (header should override form), got '%s'", result.Token)
+	}
+}
+
+func TestDefaultBinder_HeaderOnly(t *testing.T) {
+	type Request struct {
+		Token string `json:"-" form:"" header:"X-Token"`
+	}
+
+	jsonData := `{"token": "json-token"}`
+
+	req, _ := http.NewRequest("POST", "/test", strings.NewReader(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	// Header should override form value
+	if result.Token != "" {
+		t.Errorf("Expected token '' (header should override form), got '%s'", result.Token)
+	}
+}
+
+func TestDefaultBinder_BindingPriorityOrder(t *testing.T) {
+	// Test the full priority order: JSON/Form -> Query -> Header -> URI
+	// Later bindings should override earlier ones
+	type Request struct {
+		Value string `json:"value" query:"value" header:"X-Value"`
+	}
+
+	jsonData := `{"value": "json-value"}`
+
+	req, _ := http.NewRequest("POST", "/test?value=query-value", strings.NewReader(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Value", "header-value")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	// Header should be the final value (bound after JSON and query)
+	if result.Value != "header-value" {
+		t.Errorf("Expected value 'header-value' (header should override all), got '%s'", result.Value)
+	}
+}
+
+func TestDefaultBinder_IndependentBindingSources(t *testing.T) {
+	type Request struct {
+		// Only from JSON body
+		FromJSON string `json:"from_json" form:"-" query:"-" header:"-"`
+
+		// Only from form data
+		FromForm string `json:"-" form:"from_form" query:"-" header:"-"`
+
+		// Only from query params
+		FromQuery string `json:"-" form:"-" query:"from_query" header:"-"`
+
+		// Only from header
+		FromHeader string `json:"-" form:"-" query:"-" header:"X-From-Header"`
+	}
+
+	// Send all sources with values - each field should only bind from its designated source
+	jsonData := `{"from_json":"json-value","from_form":"should-ignore","from_query":"should-ignore","from_header":"should-ignore"}`
+
+	req, _ := http.NewRequest("POST", "/test?from_query=query-value&from_json=should-ignore", strings.NewReader(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-From-Header", "header-value")
+
+	var result Request
+	err := Bind(req, &result)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	// Each field should only get value from its designated source
+	if result.FromJSON != "json-value" {
+		t.Errorf("Expected FromJSON 'json-value', got '%s'", result.FromJSON)
+	}
+
+	if result.FromForm != "" {
+		t.Errorf("Expected FromForm '' (no form data sent), got '%s'", result.FromForm)
+	}
+
+	if result.FromQuery != "query-value" {
+		t.Errorf("Expected FromQuery 'query-value', got '%s'", result.FromQuery)
+	}
+
+	if result.FromHeader != "header-value" {
+		t.Errorf("Expected FromHeader 'header-value', got '%s'", result.FromHeader)
+	}
+}

@@ -15,8 +15,11 @@ import (
 )
 
 var (
+	ErrBinding = fmt.Errorf("binding")
+
 	typeTime        = reflect.TypeOf(time.Time{})
 	typeDuration    = reflect.TypeOf(time.Duration(0))
+	typeRawMessage  = reflect.TypeOf(json.RawMessage{})
 	typeUnmarshaler = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
 
 	fieldCacheMap = make(map[reflect.Type]*fieldCache)
@@ -104,7 +107,13 @@ func getFieldCache(rt reflect.Type) *fieldCache {
 }
 
 // Bind binds HTTP request data to a struct based on content type and struct tags.
-func Bind(req *http.Request, obj any, opts ...Option) error {
+func Bind(req *http.Request, obj any, opts ...Option) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w: %s", ErrBinding, err)
+		}
+	}()
+
 	if req == nil {
 		return fmt.Errorf("request cannot be nil")
 	}
@@ -137,6 +146,7 @@ func Bind(req *http.Request, obj any, opts ...Option) error {
 		if err := req.ParseForm(); err != nil {
 			return fmt.Errorf("failed to parse form: %w", err)
 		}
+
 		if strings.HasPrefix(contentType, "multipart/") {
 			if err := req.ParseMultipartForm(opt.MultipartFormMaxMemory); err != nil {
 				return fmt.Errorf("failed to parse multipart form: %w", err)
@@ -307,6 +317,50 @@ func bindFormData(values url.Values, rv reflect.Value, fields []fieldInfo, sep s
 			}
 		}
 
+		// Handle json.RawMessage specially (it's a []byte but should be treated as a single value)
+		if field.Type() == typeRawMessage {
+			field.Set(reflect.ValueOf(json.RawMessage(formValues[0])))
+			continue
+		}
+
+		// Handle slice of json.RawMessage
+		if field.Kind() == reflect.Slice && field.Type().Elem() == typeRawMessage {
+			slice := reflect.MakeSlice(field.Type(), len(formValues), len(formValues))
+			for i, v := range formValues {
+				slice.Index(i).Set(reflect.ValueOf(json.RawMessage(v)))
+			}
+			field.Set(slice)
+			continue
+		}
+
+		// Handle struct/map/pointer-to-struct fields by attempting JSON unmarshal
+		if shouldJSONUnmarshal(field) {
+			if err := json.Unmarshal([]byte(formValues[0]), field.Addr().Interface()); err != nil {
+				return fmt.Errorf("failed to unmarshal JSON for field %s: %w", fieldInfo.tagValue, err)
+			}
+			continue
+		}
+
+		// Handle slice of structs/maps by attempting JSON unmarshal on each element
+		if field.Kind() == reflect.Slice && shouldJSONUnmarshalElem(field.Type().Elem()) {
+			slice := reflect.MakeSlice(field.Type(), len(formValues), len(formValues))
+			for i, v := range formValues {
+				elem := slice.Index(i)
+				if elem.Kind() == reflect.Pointer {
+					elem.Set(reflect.New(elem.Type().Elem()))
+				}
+				target := elem.Addr().Interface()
+				if elem.Kind() == reflect.Pointer {
+					target = elem.Interface()
+				}
+				if err := json.Unmarshal([]byte(v), target); err != nil {
+					return fmt.Errorf("failed to unmarshal JSON for field %s[%d]: %w", fieldInfo.tagValue, i, err)
+				}
+			}
+			field.Set(slice)
+			continue
+		}
+
 		// Handle slice fields
 		if field.Kind() == reflect.Slice {
 			if err := setSliceField(field, fieldType, formValues); err != nil {
@@ -387,6 +441,13 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 		return nil
 	}
 
+	// Handle json.RawMessage type
+	if field.Type() == typeRawMessage {
+		field.Set(reflect.ValueOf(json.RawMessage(value)))
+
+		return nil
+	}
+
 	switch field.Kind() {
 	case reflect.String:
 		field.SetString(value)
@@ -455,4 +516,90 @@ func setSliceField(field reflect.Value, fieldType reflect.StructField, values []
 	}
 
 	return nil
+}
+
+// shouldJSONUnmarshal returns true if the field should be JSON unmarshaled.
+// This applies to struct, map, and pointer-to-struct/map types.
+func shouldJSONUnmarshal(field reflect.Value) bool {
+	// Check if type implements TextUnmarshaler - those should use text unmarshaling instead
+	if field.Type().Implements(typeUnmarshaler) || reflect.PointerTo(field.Type()).Implements(typeUnmarshaler) {
+		return false
+	}
+
+	kind := field.Kind()
+
+	if kind == reflect.Struct {
+		// Exclude special types that are handled elsewhere
+		if field.Type() == typeTime {
+			return false
+		}
+		return true
+	}
+
+	if kind == reflect.Map {
+		return true
+	}
+
+	if kind == reflect.Pointer {
+		elemType := field.Type().Elem()
+		// Check if pointed type implements TextUnmarshaler
+		if elemType.Implements(typeUnmarshaler) || reflect.PointerTo(elemType).Implements(typeUnmarshaler) {
+			return false
+		}
+
+		elemKind := elemType.Kind()
+		if elemKind == reflect.Struct {
+			if elemType == typeTime {
+				return false
+			}
+			return true
+		}
+		if elemKind == reflect.Map {
+			return true
+		}
+	}
+
+	return false
+}
+
+// shouldJSONUnmarshalElem returns true if the slice element type should be JSON unmarshaled.
+func shouldJSONUnmarshalElem(elemType reflect.Type) bool {
+	// Check if type implements TextUnmarshaler - those should use text unmarshaling instead
+	if elemType.Implements(typeUnmarshaler) || reflect.PointerTo(elemType).Implements(typeUnmarshaler) {
+		return false
+	}
+
+	kind := elemType.Kind()
+
+	if kind == reflect.Struct {
+		if elemType == typeTime {
+			return false
+		}
+		return true
+	}
+
+	if kind == reflect.Map {
+		return true
+	}
+
+	if kind == reflect.Pointer {
+		pointedType := elemType.Elem()
+		// Check if pointed type implements TextUnmarshaler
+		if pointedType.Implements(typeUnmarshaler) || reflect.PointerTo(pointedType).Implements(typeUnmarshaler) {
+			return false
+		}
+
+		pointedKind := pointedType.Kind()
+		if pointedKind == reflect.Struct {
+			if pointedType == typeTime {
+				return false
+			}
+			return true
+		}
+		if pointedKind == reflect.Map {
+			return true
+		}
+	}
+
+	return false
 }
