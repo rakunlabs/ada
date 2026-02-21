@@ -14,12 +14,13 @@ import (
 
 func Run(ctx context.Context) error {
 	server, err := ada.NewWithFunc(ctx, func(ctx context.Context, mux *ada.Mux) error {
-		// Create a new MCP server
-		server := mcp.New()
+		// Create a new MCP mcpManager
+		mcpManager := mcp.New()
 
 		// Add a custom tool
-		server.AddTool(mcp.Tool{
+		mcpManager.AddTool(mcp.Tool{
 			Name:        "calculator",
+			Title:       "Calculator",
 			Description: "Perform basic arithmetic operations",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -40,20 +41,20 @@ func Run(ctx context.Context) error {
 				},
 				"required": []string{"operation", "a", "b"},
 			},
-		}, func(args map[string]any) (any, error) {
+		}, func(args map[string]any) (mcp.ToolCallResult, error) {
 			operation, ok := args["operation"].(string)
 			if !ok {
-				return nil, fmt.Errorf("invalid operation")
+				return mcp.ToolCallResult{}, fmt.Errorf("invalid operation")
 			}
 
 			a, ok := args["a"].(json.Number)
 			if !ok {
-				return nil, fmt.Errorf("invalid first number")
+				return mcp.ToolCallResult{}, fmt.Errorf("invalid first number")
 			}
 
 			b, ok := args["b"].(json.Number)
 			if !ok {
-				return nil, fmt.Errorf("invalid second number")
+				return mcp.ToolCallResult{}, fmt.Errorf("invalid second number")
 			}
 
 			var result string
@@ -66,40 +67,33 @@ func Run(ctx context.Context) error {
 				result = decimal.RequireFromString(a.String()).Mul(decimal.RequireFromString(b.String())).String()
 			case "divide":
 				if decimal.RequireFromString(b.String()).Equal(decimal.Zero) {
-					return nil, fmt.Errorf("division by zero")
+					return mcp.ToolCallResult{}, fmt.Errorf("division by zero")
 				}
 				result = decimal.RequireFromString(a.String()).Div(decimal.RequireFromString(b.String())).String()
 			default:
-				return nil, fmt.Errorf("unknown operation: %s", operation)
+				return mcp.ToolCallResult{}, fmt.Errorf("unknown operation: %s", operation)
 			}
 
-			return map[string]any{
-				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": fmt.Sprintf("Result: %s", result),
-					},
-				},
-			}, nil
+			return mcp.NewToolCallResult(fmt.Sprintf("Result: %s", result)), nil
 		})
 
 		// Add a custom resource
-		server.AddResource(mcp.Resource{
+		mcpManager.AddResource(mcp.Resource{
 			URI:         "data://custom-info",
 			Name:        "Custom Information",
+			Title:       "Custom Server Information",
 			Description: "Custom server information",
 			MimeType:    "application/json",
-		}, func(uri string) (any, error) {
-			return map[string]any{
-				"server":    "custom-mcp-server",
-				"version":   "1.0.0",
-				"features":  []string{"calculator"},
-				"timestamp": "2025-01-13T10:00:00Z",
+		}, func(uri string) (mcp.ResourceContent, error) {
+			return mcp.ResourceContent{
+				URI:      uri,
+				MimeType: "application/json",
+				Text:     `{"server":"custom-mcp-server","version":"1.0.0","features":["calculator"]}`,
 			}, nil
 		})
 
 		// Add a custom prompt
-		server.AddPrompt(mcp.Prompt{
+		mcpManager.AddPrompt(mcp.Prompt{
 			Name:        "calculate",
 			Title:       "Calculator",
 			Description: "Perform arithmetic calculations",
@@ -140,7 +134,7 @@ func Run(ctx context.Context) error {
 		})
 
 		mux.Use(mlog.Middleware())
-		mux.Handle("/*", server)
+		mux.Handle("/*", mcpManager)
 
 		return nil
 	})

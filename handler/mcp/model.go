@@ -29,7 +29,139 @@ type JSONRPCError struct {
 }
 
 // /////////////////////////////////////////////////////////////
-// MCP specific structures
+// Common types
+
+// Icon represents an icon for display in user interfaces.
+type Icon struct {
+	Src      string   `json:"src"`
+	MimeType string   `json:"mimeType,omitempty"`
+	Sizes    []string `json:"sizes,omitempty"`
+}
+
+// Annotations provide hints to clients about how to use or display content.
+type Annotations struct {
+	Audience     []string `json:"audience,omitempty"`
+	Priority     *float64 `json:"priority,omitempty"`
+	LastModified string   `json:"lastModified,omitempty"`
+}
+
+// /////////////////////////////////////////////////////////////
+// Content types
+
+// TextContent represents plain text content.
+type TextContent struct {
+	Type        string       `json:"type"` // "text"
+	Text        string       `json:"text"`
+	Annotations *Annotations `json:"annotations,omitempty"`
+}
+
+// NewTextContent creates a new TextContent with the type field set.
+func NewTextContent(text string) TextContent {
+	return TextContent{
+		Type: "text",
+		Text: text,
+	}
+}
+
+// ImageContent represents base64-encoded image content.
+type ImageContent struct {
+	Type        string       `json:"type"` // "image"
+	Data        string       `json:"data"`
+	MimeType    string       `json:"mimeType"`
+	Annotations *Annotations `json:"annotations,omitempty"`
+}
+
+// NewImageContent creates a new ImageContent with the type field set.
+func NewImageContent(data string, mimeType string) ImageContent {
+	return ImageContent{
+		Type:     "image",
+		Data:     data,
+		MimeType: mimeType,
+	}
+}
+
+// AudioContent represents base64-encoded audio content.
+type AudioContent struct {
+	Type        string       `json:"type"` // "audio"
+	Data        string       `json:"data"`
+	MimeType    string       `json:"mimeType"`
+	Annotations *Annotations `json:"annotations,omitempty"`
+}
+
+// NewAudioContent creates a new AudioContent with the type field set.
+func NewAudioContent(data string, mimeType string) AudioContent {
+	return AudioContent{
+		Type:     "audio",
+		Data:     data,
+		MimeType: mimeType,
+	}
+}
+
+// ResourceLinkContent represents a link to a resource.
+type ResourceLinkContent struct {
+	Type        string       `json:"type"` // "resource_link"
+	URI         string       `json:"uri"`
+	Name        string       `json:"name,omitempty"`
+	Description string       `json:"description,omitempty"`
+	MimeType    string       `json:"mimeType,omitempty"`
+	Annotations *Annotations `json:"annotations,omitempty"`
+}
+
+// NewResourceLinkContent creates a new ResourceLinkContent with the type field set.
+func NewResourceLinkContent(uri string) ResourceLinkContent {
+	return ResourceLinkContent{
+		Type: "resource_link",
+		URI:  uri,
+	}
+}
+
+// EmbeddedResourceContent represents an embedded resource in content.
+type EmbeddedResourceContent struct {
+	Type        string          `json:"type"` // "resource"
+	Resource    ResourceContent `json:"resource"`
+	Annotations *Annotations    `json:"annotations,omitempty"`
+}
+
+// NewEmbeddedResourceContent creates a new EmbeddedResourceContent with the type field set.
+func NewEmbeddedResourceContent(resource ResourceContent) EmbeddedResourceContent {
+	return EmbeddedResourceContent{
+		Type:     "resource",
+		Resource: resource,
+	}
+}
+
+// ResourceContent represents the contents of a resource (text or binary).
+type ResourceContent struct {
+	URI         string       `json:"uri"`
+	MimeType    string       `json:"mimeType,omitempty"`
+	Text        string       `json:"text,omitempty"`
+	Blob        string       `json:"blob,omitempty"`
+	Annotations *Annotations `json:"annotations,omitempty"`
+}
+
+// /////////////////////////////////////////////////////////////
+// Implementation info
+
+type ClientInfo struct {
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Version     string `json:"version"`
+	Description string `json:"description,omitempty"`
+	Icons       []Icon `json:"icons,omitempty"`
+	WebsiteURL  string `json:"websiteUrl,omitempty"`
+}
+
+type ServerInfo struct {
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Version     string `json:"version"`
+	Description string `json:"description,omitempty"`
+	Icons       []Icon `json:"icons,omitempty"`
+	WebsiteURL  string `json:"websiteUrl,omitempty"`
+}
+
+// /////////////////////////////////////////////////////////////
+// Initialize
 
 type InitializeParams struct {
 	ProtocolVersion string         `json:"protocolVersion"`
@@ -37,15 +169,11 @@ type InitializeParams struct {
 	ClientInfo      ClientInfo     `json:"clientInfo"`
 }
 
-type ClientInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
 type InitializeResult struct {
 	ProtocolVersion string       `json:"protocolVersion"`
 	Capabilities    Capabilities `json:"capabilities"`
 	ServerInfo      ServerInfo   `json:"serverInfo"`
+	Instructions    string       `json:"instructions,omitempty"`
 }
 
 type Capabilities struct {
@@ -73,7 +201,95 @@ type LoggingCapability struct{}
 
 type CompletionsCapability struct{}
 
-// Resources collection
+// /////////////////////////////////////////////////////////////
+// Tools
+
+type Tool struct {
+	Name         string         `json:"name"`
+	Title        string         `json:"title,omitempty"`
+	Description  string         `json:"description"`
+	Icons        []Icon         `json:"icons,omitempty"`
+	InputSchema  map[string]any `json:"inputSchema"`
+	OutputSchema map[string]any `json:"outputSchema,omitempty"`
+	Annotations  *Annotations   `json:"annotations,omitempty"`
+}
+
+type Tools struct {
+	list     []Tool
+	handlers map[string]ToolHandler
+	m        sync.RWMutex
+}
+
+func (t *Tools) Add(tool Tool, handler ToolHandler) {
+	t.m.Lock()
+	defer t.m.Unlock()
+
+	t.list = append(t.list, tool)
+	if handler != nil {
+		t.handlers[tool.Name] = handler
+	}
+}
+
+func (t *Tools) GetHandler(name string) ToolHandler {
+	t.m.RLock()
+	defer t.m.RUnlock()
+	return t.handlers[name]
+}
+
+func (t *Tools) List() []Tool {
+	t.m.RLock()
+	defer t.m.RUnlock()
+	return append([]Tool(nil), t.list...)
+}
+
+// ToolCallParams represents the parameters for a tools/call request.
+type ToolCallParams struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+// ToolsListResult is the result of a tools/list request.
+type ToolsListResult struct {
+	Tools      []Tool `json:"tools"`
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
+// ToolCallResult is the result of a tools/call request.
+type ToolCallResult struct {
+	Content           []any `json:"content,omitempty"`
+	StructuredContent any   `json:"structuredContent,omitempty"`
+	IsError           bool  `json:"isError,omitempty"`
+}
+
+// NewToolCallResult creates a ToolCallResult with a single text content.
+func NewToolCallResult(text string) ToolCallResult {
+	return ToolCallResult{
+		Content: []any{NewTextContent(text)},
+	}
+}
+
+// NewToolCallErrorResult creates a ToolCallResult with isError set to true.
+func NewToolCallErrorResult(text string) ToolCallResult {
+	return ToolCallResult{
+		Content: []any{NewTextContent(text)},
+		IsError: true,
+	}
+}
+
+// /////////////////////////////////////////////////////////////
+// Resources
+
+type Resource struct {
+	URI         string       `json:"uri"`
+	Name        string       `json:"name"`
+	Title       string       `json:"title,omitempty"`
+	Description string       `json:"description,omitempty"`
+	Icons       []Icon       `json:"icons,omitempty"`
+	MimeType    string       `json:"mimeType,omitempty"`
+	Size        *int64       `json:"size,omitempty"`
+	Annotations *Annotations `json:"annotations,omitempty"`
+}
+
 type Resources struct {
 	list     []Resource
 	handlers map[string]ResourceHandler
@@ -102,7 +318,91 @@ func (r *Resources) List() []Resource {
 	return append([]Resource(nil), r.list...)
 }
 
-// Prompts collection
+// ResourcesListResult is the result of a resources/list request.
+type ResourcesListResult struct {
+	Resources  []Resource `json:"resources"`
+	NextCursor string     `json:"nextCursor,omitempty"`
+}
+
+// ResourcesReadResult is the result of a resources/read request.
+type ResourcesReadResult struct {
+	Contents []ResourceContent `json:"contents"`
+}
+
+// ResourcesReadParams represents the parameters for a resources/read request.
+type ResourcesReadParams struct {
+	URI string `json:"uri"`
+}
+
+// /////////////////////////////////////////////////////////////
+// Resource Templates
+
+type ResourceTemplate struct {
+	URITemplate string       `json:"uriTemplate"`
+	Name        string       `json:"name"`
+	Title       string       `json:"title,omitempty"`
+	Description string       `json:"description,omitempty"`
+	Icons       []Icon       `json:"icons,omitempty"`
+	MimeType    string       `json:"mimeType,omitempty"`
+	Annotations *Annotations `json:"annotations,omitempty"`
+}
+
+type ResourceTemplates struct {
+	list []ResourceTemplate
+	m    sync.RWMutex
+}
+
+func (rt *ResourceTemplates) Add(template ResourceTemplate) {
+	rt.m.Lock()
+	defer rt.m.Unlock()
+
+	rt.list = append(rt.list, template)
+}
+
+func (rt *ResourceTemplates) List() []ResourceTemplate {
+	rt.m.RLock()
+	defer rt.m.RUnlock()
+	return append([]ResourceTemplate(nil), rt.list...)
+}
+
+// ResourceTemplatesListResult is the result of a resources/templates/list request.
+type ResourceTemplatesListResult struct {
+	ResourceTemplates []ResourceTemplate `json:"resourceTemplates"`
+	NextCursor        string             `json:"nextCursor,omitempty"`
+}
+
+// /////////////////////////////////////////////////////////////
+// Prompts
+
+type Prompt struct {
+	Name        string      `json:"name"`
+	Title       string      `json:"title,omitempty"`
+	Description string      `json:"description,omitempty"`
+	Icons       []Icon      `json:"icons,omitempty"`
+	Arguments   []PromptArg `json:"arguments,omitempty"`
+}
+
+type PromptArg struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+type PromptMessage struct {
+	Role    string        `json:"role"`
+	Content PromptContent `json:"content"`
+}
+
+type PromptContent struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type GetPromptResult struct {
+	Description string          `json:"description,omitempty"`
+	Messages    []PromptMessage `json:"messages"`
+}
+
 type Prompts struct {
 	list     []Prompt
 	handlers map[string]PromptHandler
@@ -131,48 +431,21 @@ func (p *Prompts) List() []Prompt {
 	return append([]Prompt(nil), p.list...)
 }
 
-type ServerInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+// PromptsListResult is the result of a prompts/list request.
+type PromptsListResult struct {
+	Prompts    []Prompt `json:"prompts"`
+	NextCursor string   `json:"nextCursor,omitempty"`
 }
 
-type Resource struct {
-	URI         string `json:"uri"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	MimeType    string `json:"mimeType,omitempty"`
+// PromptsGetParams represents the parameters for a prompts/get request.
+type PromptsGetParams struct {
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
 }
 
-// Prompts structures
-type Prompt struct {
-	Name        string      `json:"name"`
-	Title       string      `json:"title,omitempty"`
-	Description string      `json:"description,omitempty"`
-	Arguments   []PromptArg `json:"arguments,omitempty"`
-}
+// /////////////////////////////////////////////////////////////
+// Completion
 
-type PromptArg struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Required    bool   `json:"required,omitempty"`
-}
-
-type PromptMessage struct {
-	Role    string        `json:"role"`
-	Content PromptContent `json:"content"`
-}
-
-type PromptContent struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-}
-
-type GetPromptResult struct {
-	Description string          `json:"description,omitempty"`
-	Messages    []PromptMessage `json:"messages"`
-}
-
-// Completion structures
 type CompleteRequest struct {
 	Ref      CompletionRef    `json:"ref"`
 	Argument CompleteArgument `json:"argument"`
@@ -204,7 +477,28 @@ type CompletionValues struct {
 	HasMore bool     `json:"hasMore,omitempty"`
 }
 
-// Logging structures
+// CompletionHandlers holds registered completion handlers.
+type CompletionHandlers struct {
+	handlers map[string]CompletionHandler
+	m        sync.RWMutex
+}
+
+func (ch *CompletionHandlers) Add(refKey string, handler CompletionHandler) {
+	ch.m.Lock()
+	defer ch.m.Unlock()
+
+	ch.handlers[refKey] = handler
+}
+
+func (ch *CompletionHandlers) GetHandler(refKey string) CompletionHandler {
+	ch.m.RLock()
+	defer ch.m.RUnlock()
+	return ch.handlers[refKey]
+}
+
+// /////////////////////////////////////////////////////////////
+// Logging
+
 type SetLevelRequest struct {
 	Level string `json:"level"`
 }
@@ -215,16 +509,9 @@ type LogMessageParams struct {
 	Data   any    `json:"data"`
 }
 
-// Resource templates
-type ResourceTemplate struct {
-	URITemplate string `json:"uriTemplate"`
-	Name        string `json:"name"`
-	Title       string `json:"title,omitempty"`
-	Description string `json:"description,omitempty"`
-	MimeType    string `json:"mimeType,omitempty"`
-}
+// /////////////////////////////////////////////////////////////
+// Subscriptions
 
-// Subscription structures
 type SubscribeRequest struct {
 	URI string `json:"uri"`
 }
@@ -236,4 +523,42 @@ type UnsubscribeRequest struct {
 type ResourceUpdatedNotification struct {
 	URI   string `json:"uri"`
 	Title string `json:"title,omitempty"`
+}
+
+// /////////////////////////////////////////////////////////////
+// Cancellation
+
+// CancelledParams represents the parameters for a notifications/cancelled notification.
+type CancelledParams struct {
+	RequestID any    `json:"requestId"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// /////////////////////////////////////////////////////////////
+// Tasks (notification only, full task support is separate)
+
+// TaskStatusNotification represents the parameters for a notifications/tasks/status notification.
+type TaskStatusNotification struct {
+	TaskID        string `json:"taskId"`
+	Status        string `json:"status"`
+	StatusMessage string `json:"statusMessage,omitempty"`
+	CreatedAt     string `json:"createdAt"`
+	LastUpdatedAt string `json:"lastUpdatedAt,omitempty"`
+	TTL           *int64 `json:"ttl,omitempty"`
+	PollInterval  *int64 `json:"pollInterval,omitempty"`
+}
+
+// /////////////////////////////////////////////////////////////
+// Empty result
+
+// EmptyResult represents an empty JSON-RPC result {}.
+type EmptyResult struct{}
+
+// /////////////////////////////////////////////////////////////
+// Health check
+
+type HealthCheckResponse struct {
+	Status  string `json:"status"`
+	Server  string `json:"server"`
+	Version string `json:"version"`
 }

@@ -104,6 +104,8 @@ func (s *MCP) handleNotification(method string, params json.RawMessage) {
 	switch method {
 	case "notifications/initialized":
 		s.handleInitialized()
+	case "notifications/cancelled":
+		s.handleCancelled(params)
 	case "notifications/tools/list_changed":
 		s.handleToolsListChanged()
 	case "notifications/resources/list_changed":
@@ -114,5 +116,7 @@ func (s *MCP) handleNotification(method string, params json.RawMessage) {
 		s.handlePromptsListChanged()
 	case "notifications/message":
 		s.handleLogMessage(params)
+	case "notifications/tasks/status":
+		s.handleTaskStatusNotification(params)
 	}
 }

@@ -5,12 +5,6 @@ import (
 	"net/http"
 )
 
-type HealthCheckResponse struct {
-	Status  string `json:"status"`
-	Server  string `json:"server"`
-	Version string `json:"version"`
-}
-
 // Health check endpoint
 func (s *MCP) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
