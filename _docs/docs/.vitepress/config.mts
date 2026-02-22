@@ -77,6 +77,10 @@ export default defineConfig({
               {
                 text: "Encoding",
                 link: "/guide/middleware/encoding.md",
+              },
+              {
+                text: "ForwardAuth",
+                link: "/guide/middleware/forwardauth.md",
               }
             ],
           },
