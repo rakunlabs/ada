@@ -85,10 +85,13 @@ type ForwardAuth struct {
 	Timeout time.Duration `cfg:"timeout"`
 
 	// RedirectURL is the URL to redirect the client to when the auth service
-	// returns a non-2xx response on a GET or HEAD request. Supports the {url}
-	// placeholder which is replaced with the original request URL (URL-encoded).
-	// For example: "https://login.example.com?rd={url}".
+	// returns a non-2xx response on a GET or HEAD request.
 	// Non-GET/HEAD requests always receive the auth response directly.
+	//
+	// Supported placeholders (all values are URL-encoded):
+	//   - {url}  — full original request URL (e.g. "https://login.example.com?rd={url}")
+	//   - {uri}  — request URI only, path + query string (e.g. "https://login.example.com?rd={uri}")
+	//   - {host} — request host with port if present (e.g. "https://login.example.com?rd={uri}&host={host}")
 	//
 	// Optional. Default value "" (disabled, auth response is returned as-is).
 	RedirectURL string `cfg:"redirect_url"`
@@ -345,8 +348,13 @@ func (f *ForwardAuth) writeAuthResponse(w http.ResponseWriter, authResp *http.Re
 	_, _ = io.Copy(w, authResp.Body)
 }
 
-// buildRedirectTarget constructs the redirect URL by replacing the {url}
-// placeholder with the URL-encoded original request URL.
+// buildRedirectTarget constructs the redirect URL by replacing placeholders
+// with URL-encoded values from the original request.
+//
+// Supported placeholders:
+//   - {url}  — full original request URL (scheme://host/path?query)
+//   - {uri}  — request URI only (path + query string, e.g. /dashboard?tab=1)
+//   - {host} — request host (with port if present, e.g. app.example.com)
 func (f *ForwardAuth) buildRedirectTarget(r *http.Request) string {
 	proto := "http"
 	if r.TLS != nil {
@@ -361,7 +369,12 @@ func (f *ForwardAuth) buildRedirectTarget(r *http.Request) string {
 
 	originalURL := proto + "://" + r.Host + r.RequestURI
 
-	return strings.ReplaceAll(f.RedirectURL, "{url}", url.QueryEscape(originalURL))
+	result := f.RedirectURL
+	result = strings.ReplaceAll(result, "{url}", url.QueryEscape(originalURL))
+	result = strings.ReplaceAll(result, "{uri}", url.QueryEscape(r.RequestURI))
+	result = strings.ReplaceAll(result, "{host}", url.QueryEscape(r.Host))
+
+	return result
 }
 
 // isRedirectableMethod reports whether the HTTP method should trigger a redirect
@@ -470,8 +483,12 @@ func WithRequestMethod(method string) Option {
 }
 
 // WithRedirectURL sets the URL to redirect to on auth failure for GET/HEAD requests.
-// Supports the {url} placeholder which is replaced with the URL-encoded original
-// request URL. For example: "https://login.example.com?rd={url}".
+// Supports placeholders which are replaced with URL-encoded values:
+//   - {url}  — full original request URL (scheme://host/path?query)
+//   - {uri}  — request URI only (path + query string)
+//   - {host} — request host (with port if present)
+//
+// For example: "https://login.example.com?rd={url}" or "https://login.example.com?rd={uri}".
 func WithRedirectURL(redirectURL string) Option {
 	return func(o *option) {
 		o.Config.RedirectURL = redirectURL
