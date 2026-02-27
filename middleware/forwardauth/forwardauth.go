@@ -62,6 +62,12 @@ type ForwardAuth struct {
 	// Optional. Default value [] (forward all).
 	AuthRequestHeaders []string `cfg:"auth_request_headers"`
 
+	// DeleteRequestHeaders is a list of headers to delete from the original request
+	// before continue next, this is applied before copying auth response headers.
+	//
+	// Optional. Default value [].
+	DeleteRequestHeaders []string `cfg:"delete_request_headers"`
+
 	// RequestMethod is the HTTP method to use when calling the auth service.
 	//
 	// Optional. Default value "GET".
@@ -311,6 +317,12 @@ func (f *ForwardAuth) setForwardedHeaders(authReq *http.Request, origReq *http.R
 // copyAuthResponseHeaders copies configured headers from the auth service
 // response onto the original request so they are visible to downstream handlers.
 func (f *ForwardAuth) copyAuthResponseHeaders(origReq *http.Request, authResp *http.Response) {
+	if len(f.DeleteRequestHeaders) > 0 {
+		for _, h := range f.DeleteRequestHeaders {
+			origReq.Header.Del(h)
+		}
+	}
+
 	for _, h := range f.AuthResponseHeaders {
 		if v := authResp.Header.Get(h); v != "" {
 			origReq.Header.Set(h, v)
