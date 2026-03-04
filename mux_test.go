@@ -27,11 +27,57 @@ func TestMux(t *testing.T) {
 		header  http.Header
 	}
 	type testCase struct {
+		name         string
 		handlerGroup []testHandlerGroup
 		tests        []testWant
 	}
 
 	testCases := []testCase{
+		{
+			name: "Path parameter multiple and method match",
+			handlerGroup: []testHandlerGroup{
+				{
+					handler: []testHandler{
+						{
+							name:   "GET /abc/{code_1}/test",
+							path:   "/abc/{code_1}/test",
+							method: http.MethodOptions,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								pathAsterisk := r.PathValue("code_1")
+								w.Write([]byte("GET " + pathAsterisk))
+							},
+						},
+						{
+							name:   "GET /abc/{code_2}/signal",
+							path:   "/abc/{code_2}/signal",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								code := r.PathValue("code_2")
+								w.Write([]byte("GET " + code))
+							},
+						},
+					},
+				},
+			},
+			tests: []testWant{
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/abc/1234/signal", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "GET 1234",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodOptions, "/abc/yyy/test", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "GET yyy",
+				},
+			},
+		},
 		{
 			handlerGroup: []testHandlerGroup{
 				{
@@ -612,16 +658,16 @@ func TestMux(t *testing.T) {
 			mux.ServeHTTP(recorder, req)
 
 			if recorder.Code != test.status {
-				t.Errorf("expected status %d, got %d for request %s", test.status, recorder.Code, req.URL.Path)
+				t.Errorf("name [%s] expected status %d, got %d for request %s", tc.name, test.status, recorder.Code, req.URL.Path)
 			}
 			if recorder.Body.String() != test.body {
-				t.Errorf("expected body '%s', got '%s' for request %s", test.body, recorder.Body.String(), req.URL.Path)
+				t.Errorf("name [%s] expected body '%s', got '%s' for request %s", tc.name, test.body, recorder.Body.String(), req.URL.Path)
 			}
 
 			recordHeader := recorder.Header()
 			for key, value := range test.header {
 				if !slices.Equal(recordHeader[key], value) {
-					t.Errorf("expected header %s to be %v, got %v for request %s", key, value, recordHeader[key], req.URL.Path)
+					t.Errorf("name [%s] expected header %s to be %v, got %v for request %s", tc.name, key, value, recordHeader[key], req.URL.Path)
 				}
 			}
 		}

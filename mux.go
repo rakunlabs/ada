@@ -15,6 +15,11 @@ const (
 	typeNodeParam                    // Parameterized node, e.g., /users/{id}
 )
 
+type paramInfo struct {
+	Index int    // segment index in the URL path
+	Name  string // parameter name, e.g. "id"
+}
+
 type node struct {
 	Segment  *node
 	Possible bool
@@ -28,6 +33,10 @@ type node struct {
 
 	// Path of the node, used for telemetry.
 	Path string
+
+	// Params holds per-method pre-computed param names.
+	// Key "" is used for the catch-all (no method) handler.
+	Params map[string][]paramInfo
 }
 
 type nodeStatic struct {
@@ -113,11 +122,18 @@ func (n *node) FindNode(path string, r *http.Request) (*node, typeNode) {
 	return nil, 0
 }
 
-func (n *node) SetHandler(method, path string, handler http.HandlerFunc) {
+func (n *node) SetHandler(method, path string, handler http.HandlerFunc, params []paramInfo) {
+	n.Path = path // Store the path template for telemetry
+
 	handlerAssign := func(w http.ResponseWriter, r *http.Request) {
 		r.Pattern = path // Set the pattern
 		handler(w, r)
 	}
+
+	if n.Params == nil {
+		n.Params = make(map[string][]paramInfo)
+	}
+	n.Params[method] = params
 
 	if method == "" {
 		n.Handler = handlerAssign
@@ -136,6 +152,7 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 	pathSegments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 
 	var typeNodeSegment typeNode
+	var params []paramInfo
 	current := n
 	for i, segment := range pathSegments {
 		if segment == "" {
@@ -149,6 +166,10 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 		case typeNodeWildcard:
 			current = current.insertNodeTypeWildcard()
 		case typeNodeParam:
+			params = append(params, paramInfo{
+				Index: i,
+				Name:  strings.Trim(segment, "{}"),
+			})
 			current = current.insertNodeTypeParam(segment)
 		default:
 			panic("unknown node type") // should never happen
@@ -164,7 +185,7 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 		}
 	}
 
-	current.SetHandler(method, path, handler)
+	current.SetHandler(method, path, handler, params)
 	if typeNodeSegment == typeNodeWildcard {
 		current.Possible = true
 	}
@@ -450,7 +471,6 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if nodeType == typeNodeParam {
 			pathPattern = append(pathPattern, indexValue{
 				index: i,
-				name:  current.TypeParam.Name,
 				value: segment,
 			})
 		}
@@ -508,12 +528,23 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(pathPattern) > 0 {
+		// Look up the pre-computed param names for this method (or catch-all "")
+		params := current.Params[strings.ToUpper(r.Method)]
+		if params == nil {
+			params = current.Params[""]
+		}
 		for _, v := range pathPattern {
 			if current.Possible && possibleIndex <= v.index {
 				continue
 			}
 
-			r.SetPathValue(v.name, v.value)
+			// Find the matching param name by segment index
+			for _, p := range params {
+				if p.Index == v.index {
+					r.SetPathValue(p.Name, v.value)
+					break
+				}
+			}
 		}
 	}
 
