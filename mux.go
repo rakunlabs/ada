@@ -330,7 +330,16 @@ func NewMux() *Mux {
 
 func (m *Mux) HandleWithMethod(method, path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
 	handlerFunc := Chain(append(m.middlewares, middlewares...)...)(handler)
-	path = m.prefix + "/" + strings.TrimPrefix(path, "/")
+
+	if path == "" {
+		path = m.prefix
+		if path == "" {
+			path = "/"
+		}
+	} else {
+		path = m.prefix + "/" + strings.TrimPrefix(path, "/")
+	}
+
 	m.root.Insert(method, path, handlerFunc.ServeHTTP)
 }
 

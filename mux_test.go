@@ -638,6 +638,84 @@ func TestMux(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "Group with empty path registration",
+			handlerGroup: []testHandlerGroup{
+				{
+					group: "/api/v1/announcements",
+					handler: []testHandler{
+						{
+							name:   "GET /self",
+							path:   "/self",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("Self!"))
+							},
+						},
+						{
+							name:   "GET (empty - list)",
+							path:   "",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.Write([]byte("List!"))
+							},
+						},
+						{
+							name:   "POST (empty - create)",
+							path:   "",
+							method: http.MethodPost,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								w.WriteHeader(http.StatusCreated)
+								w.Write([]byte("Created!"))
+							},
+						},
+						{
+							name:   "GET /{id}",
+							path:   "/{id}",
+							method: http.MethodGet,
+							handler: func(w http.ResponseWriter, r *http.Request) {
+								id := r.PathValue("id")
+								w.Write([]byte("ID: " + id))
+							},
+						},
+					},
+				},
+			},
+			tests: []testWant{
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/api/v1/announcements", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "List!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodPost, "/api/v1/announcements", nil)
+						return req
+					},
+					status: http.StatusCreated,
+					body:   "Created!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/api/v1/announcements/self", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "Self!",
+				},
+				{
+					request: func() *http.Request {
+						req, _ := http.NewRequest(http.MethodGet, "/api/v1/announcements/abc123", nil)
+						return req
+					},
+					status: http.StatusOK,
+					body:   "ID: abc123",
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
