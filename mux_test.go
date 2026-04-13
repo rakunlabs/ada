@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -758,37 +759,35 @@ func TestInsertStatic(t *testing.T) {
 	mux.root.insertNodeTypeStatic("stat")
 	mux.root.insertNodeTypeStatic("alpha")
 
-	if mux.root.TypeStatic.Key != "" {
-		t.Errorf("expected root.TypeStatic.Key to be '', got '%s'", mux.root.TypeStatic.Key)
+	if mux.root.StaticKey != "" {
+		t.Errorf("expected root.StaticKey to be '', got '%s'", mux.root.StaticKey)
 	}
 
-	for r, node := range mux.root.TypeStatic.Children {
-		switch r {
+	for _, c := range mux.root.StaticChildren {
+		switch c.char {
 		case 's':
-			if node.TypeStatic.Key != "stat" {
-				t.Errorf("expected node.TypeStatic.Key to be 'stat', got '%s'", node.TypeStatic.Key)
+			node := c.node
+			if node.StaticKey != "stat" {
+				t.Errorf("expected node.StaticKey to be 'stat', got '%s'", node.StaticKey)
 			}
-			if node.TypeStatic.Children == nil {
-				t.Errorf("expected node.TypeStatic.Children to be non-nil")
+			if len(node.StaticChildren) == 0 {
+				t.Errorf("expected node.StaticChildren to be non-empty")
 			}
-			for r, child := range node.TypeStatic.Children {
-				switch r {
+			for _, cc := range node.StaticChildren {
+				switch cc.char {
 				case 't':
-					if child.TypeStatic.Key != "ic" {
-						t.Errorf("expected child.TypeStatic.Key to be 'ic', got '%s'", child.TypeStatic.Key)
-					}
-				case 'a':
-					if child.TypeStatic.Key != "alpha" {
-						t.Errorf("expected child.TypeStatic.Key to be 'alpha', got '%s'", child.TypeStatic.Key)
+					if cc.node.StaticKey != "ic" {
+						t.Errorf("expected child.StaticKey to be 'ic', got '%s'", cc.node.StaticKey)
 					}
 				}
 			}
 		case 'a':
-			if node.TypeStatic.Key != "alpha" {
-				t.Errorf("expected node.TypeStatic.Key to be 'alpha', got '%s'", node.TypeStatic.Key)
+			node := c.node
+			if node.StaticKey != "alpha" {
+				t.Errorf("expected node.StaticKey to be 'alpha', got '%s'", node.StaticKey)
 			}
-			if len(node.TypeStatic.Children) != 0 {
-				t.Errorf("expected node.TypeStatic.Children to be zero length")
+			if len(node.StaticChildren) != 0 {
+				t.Errorf("expected node.StaticChildren to be zero length")
 			}
 		}
 	}
@@ -848,6 +847,219 @@ func TestUse(t *testing.T) {
 	if recorderGet.Body.String() != "GET Test" {
 		t.Errorf("expected GET /test to return 'GET Test', got '%s'", recorderGet.Body.String())
 	}
+}
+
+func TestMethodNotAllowed(t *testing.T) {
+	t.Run("basic 405", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("users"))
+		})
+
+		req, _ := http.NewRequest(http.MethodPost, "/users", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405, got %d", rec.Code)
+		}
+
+		allow := rec.Header().Get("Allow")
+		if !strings.Contains(allow, "GET") {
+			t.Fatalf("expected Allow header to contain GET, got %q", allow)
+		}
+		if !strings.Contains(allow, "HEAD") {
+			t.Fatalf("expected Allow header to contain HEAD (auto), got %q", allow)
+		}
+		if !strings.Contains(allow, "OPTIONS") {
+			t.Fatalf("expected Allow header to contain OPTIONS (auto), got %q", allow)
+		}
+	})
+
+	t.Run("multiple methods", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {})
+		mux.POST("/users", func(w http.ResponseWriter, r *http.Request) {})
+
+		req, _ := http.NewRequest(http.MethodDelete, "/users", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405, got %d", rec.Code)
+		}
+
+		allow := rec.Header().Get("Allow")
+		if !strings.Contains(allow, "GET") || !strings.Contains(allow, "POST") {
+			t.Fatalf("expected Allow to contain GET and POST, got %q", allow)
+		}
+	})
+
+	t.Run("custom 405 handler", func(t *testing.T) {
+		mux := NewMux()
+		mux.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			w.Write([]byte(`{"error":"method not allowed"}`))
+		})
+		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {})
+
+		req, _ := http.NewRequest(http.MethodPut, "/users", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405, got %d", rec.Code)
+		}
+		if rec.Body.String() != `{"error":"method not allowed"}` {
+			t.Fatalf("expected custom body, got %q", rec.Body.String())
+		}
+		if rec.Header().Get("Allow") == "" {
+			t.Fatal("expected Allow header to be set even with custom handler")
+		}
+	})
+
+	t.Run("404 for nonexistent path", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {})
+
+		req, _ := http.NewRequest(http.MethodGet, "/nope", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d", rec.Code)
+		}
+		if rec.Header().Get("Allow") != "" {
+			t.Fatalf("expected no Allow header on 404, got %q", rec.Header().Get("Allow"))
+		}
+	})
+
+	t.Run("catch-all handler accepts any method", func(t *testing.T) {
+		mux := NewMux()
+		mux.HandleFunc("/any", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("any"))
+		})
+
+		// HandleFunc registers with empty method — accepts all methods
+		req, _ := http.NewRequest(http.MethodDelete, "/any", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if rec.Body.String() != "any" {
+			t.Fatalf("expected 'any', got %q", rec.Body.String())
+		}
+	})
+}
+
+func TestAutoHead(t *testing.T) {
+	t.Run("HEAD uses GET handler", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Custom", "value")
+			w.Write([]byte("users"))
+		})
+
+		req, _ := http.NewRequest(http.MethodHead, "/users", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if rec.Header().Get("X-Custom") != "value" {
+			t.Fatalf("expected X-Custom header from GET handler, got %q", rec.Header().Get("X-Custom"))
+		}
+	})
+
+	t.Run("explicit HEAD overrides auto", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Source", "get")
+		})
+		mux.HEAD("/users", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Source", "head")
+		})
+
+		req, _ := http.NewRequest(http.MethodHead, "/users", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Header().Get("X-Source") != "head" {
+			t.Fatalf("expected explicit HEAD handler, got X-Source=%q", rec.Header().Get("X-Source"))
+		}
+	})
+
+	t.Run("HEAD 405 when only POST registered", func(t *testing.T) {
+		mux := NewMux()
+		mux.POST("/users", func(w http.ResponseWriter, r *http.Request) {})
+
+		req, _ := http.NewRequest(http.MethodHead, "/users", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405 for HEAD when only POST registered, got %d", rec.Code)
+		}
+	})
+}
+
+func TestAutoOptions(t *testing.T) {
+	t.Run("auto OPTIONS with Allow header", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {})
+		mux.POST("/users", func(w http.ResponseWriter, r *http.Request) {})
+
+		req, _ := http.NewRequest(http.MethodOptions, "/users", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d", rec.Code)
+		}
+
+		allow := rec.Header().Get("Allow")
+		if !strings.Contains(allow, "GET") || !strings.Contains(allow, "POST") {
+			t.Fatalf("expected Allow to contain GET and POST, got %q", allow)
+		}
+		if !strings.Contains(allow, "HEAD") {
+			t.Fatalf("expected Allow to include HEAD (auto from GET), got %q", allow)
+		}
+		if !strings.Contains(allow, "OPTIONS") {
+			t.Fatalf("expected Allow to include OPTIONS, got %q", allow)
+		}
+	})
+
+	t.Run("explicit OPTIONS overrides auto", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {})
+		mux.OPTIONS("/users", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Source", "explicit")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req, _ := http.NewRequest(http.MethodOptions, "/users", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Header().Get("X-Source") != "explicit" {
+			t.Fatalf("expected explicit OPTIONS handler, got X-Source=%q", rec.Header().Get("X-Source"))
+		}
+	})
+
+	t.Run("OPTIONS 404 for nonexistent path", func(t *testing.T) {
+		mux := NewMux()
+
+		req, _ := http.NewRequest(http.MethodOptions, "/nope", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for OPTIONS on nonexistent path, got %d", rec.Code)
+		}
+	})
 }
 
 func TestMux_Prefix(t *testing.T) {

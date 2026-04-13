@@ -3,6 +3,7 @@ package ada
 import (
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -20,11 +21,23 @@ type paramInfo struct {
 	Name  string // parameter name, e.g. "id"
 }
 
+// staticChild is a single entry in the sorted children slice.
+// Sorted by char for fast linear scan (most nodes have 1-4 children).
+type staticChild struct {
+	char byte
+	node *node
+}
+
 type node struct {
 	Segment  *node
 	Possible bool
 
-	TypeStatic   *nodeStatic
+	// Inlined static trie fields (replaces *nodeStatic).
+	// StaticKey is the compressed radix label for this node.
+	// StaticChildren is a sorted slice of children keyed by first byte.
+	StaticKey      string
+	StaticChildren []staticChild
+
 	TypeWildcard *nodeWildcard
 	TypeParam    *nodeParam
 
@@ -39,17 +52,43 @@ type node struct {
 	Params map[string][]paramInfo
 }
 
-type nodeStatic struct {
-	Key      string
-	Children map[byte]*node
-}
+// getStaticChild returns the child node for the given first byte.
+// Uses linear scan on a sorted slice — optimal for 1-8 children.
+func (n *node) getStaticChild(char byte) (*node, bool) {
+	for _, c := range n.StaticChildren {
+		if c.char == char {
+			return c.node, true
+		}
 
-func (n *nodeStatic) SetChild(char byte, child *node) {
-	if n.Children == nil {
-		n.Children = make(map[byte]*node)
+		if c.char > char {
+			return nil, false // sorted, stop early
+		}
 	}
 
-	n.Children[char] = child
+	return nil, false
+}
+
+// setStaticChild inserts or replaces a child node, maintaining sorted order.
+func (n *node) setStaticChild(char byte, child *node) {
+	for i, c := range n.StaticChildren {
+		if c.char == char {
+			n.StaticChildren[i].node = child
+
+			return
+		}
+
+		if c.char > char {
+			// Insert at position i.
+			n.StaticChildren = append(n.StaticChildren, staticChild{})
+			copy(n.StaticChildren[i+1:], n.StaticChildren[i:])
+			n.StaticChildren[i] = staticChild{char: char, node: child}
+
+			return
+		}
+	}
+
+	// Append at end.
+	n.StaticChildren = append(n.StaticChildren, staticChild{char: char, node: child})
 }
 
 type nodeParam struct {
@@ -80,13 +119,13 @@ func (n *node) FindNode(path string, r *http.Request) (*node, typeNode) {
 		return nil, 0
 	}
 
-	if n.TypeStatic != nil {
+	if len(n.StaticChildren) > 0 {
 		current := n
 		isFound := true
 
 		for i := 0; i < len(path); {
 			char := path[i]
-			child, ok := current.TypeStatic.Children[char]
+			child, ok := current.getStaticChild(char)
 			if !ok {
 				isFound = false
 
@@ -94,13 +133,14 @@ func (n *node) FindNode(path string, r *http.Request) (*node, typeNode) {
 			}
 
 			remaining := path[i:]
-			if !strings.HasPrefix(remaining, child.TypeStatic.Key) {
+			childKey := child.StaticKey
+			if len(remaining) < len(childKey) || remaining[:len(childKey)] != childKey {
 				isFound = false
 
 				break
 			}
 
-			i += len(child.TypeStatic.Key)
+			i += len(childKey)
 			current = child
 		}
 
@@ -196,17 +236,13 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 	// place every segment in a node or sub-node
 	for byteIndex := 0; byteIndex < len(path); {
 		char := path[byteIndex]
-		// find the type of the node
-		if current.TypeStatic == nil {
-			current.TypeStatic = &nodeStatic{}
-		}
 
-		if child, exists := current.TypeStatic.Children[char]; exists {
+		if child, exists := current.getStaticChild(char); exists {
 			commonLen := 0
 			// find remaining on path
 			remaining := path[byteIndex:]
-			for commonLen < len(child.TypeStatic.Key) && commonLen < len(remaining) {
-				if child.TypeStatic.Key[commonLen] == remaining[commonLen] {
+			for commonLen < len(child.StaticKey) && commonLen < len(remaining) {
+				if child.StaticKey[commonLen] == remaining[commonLen] {
 					commonLen += 1
 				} else {
 					break
@@ -214,51 +250,42 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 			}
 
 			// if it is inside of this node than switch to it and try to continue to find
-			if commonLen == len(child.TypeStatic.Key) {
+			if commonLen == len(child.StaticKey) {
 				// continue to look inside the child node
 				current = child
 				byteIndex += commonLen
 			} else {
 				// Need to split the node
 				splitNode := &node{
-					TypeStatic: &nodeStatic{
-						Key:      child.TypeStatic.Key[:commonLen],
-						Children: make(map[byte]*node),
-					},
+					StaticKey: child.StaticKey[:commonLen],
 				}
 
 				// Update existing child
-				child.TypeStatic.Key = child.TypeStatic.Key[commonLen:]
-				splitNode.TypeStatic.SetChild(child.TypeStatic.Key[0], child)
+				child.StaticKey = child.StaticKey[commonLen:]
+				splitNode.setStaticChild(child.StaticKey[0], child)
 
 				// Add new path if needed
 				if commonLen < len(remaining) {
 					newSuffix := remaining[commonLen:]
 					newNode := &node{
-						TypeStatic: &nodeStatic{
-							Key:      newSuffix,
-							Children: make(map[byte]*node),
-						},
+						StaticKey: newSuffix,
 					}
 
-					splitNode.TypeStatic.SetChild(newSuffix[0], newNode)
-					current.TypeStatic.SetChild(char, splitNode)
+					splitNode.setStaticChild(newSuffix[0], newNode)
+					current.setStaticChild(char, splitNode)
 
 					return newNode
 				}
-				current.TypeStatic.SetChild(char, splitNode)
+				current.setStaticChild(char, splitNode)
 
 				return splitNode
 			}
 		} else {
 			// Create new node with remaining characters
 			newNode := &node{
-				TypeStatic: &nodeStatic{
-					Key:      path[byteIndex:],
-					Children: make(map[byte]*node),
-				},
+				StaticKey: path[byteIndex:],
 			}
-			current.TypeStatic.SetChild(char, newNode)
+			current.setStaticChild(char, newNode)
 
 			return newNode
 		}
@@ -316,10 +343,11 @@ func findTypeNode(part string) typeNode {
 type Mux struct {
 	root *node
 
-	errHandler  func(c *Context, err error)
-	notFound    http.HandlerFunc
-	middlewares []func(next http.Handler) http.Handler
-	prefix      string
+	errHandler       func(c *Context, err error)
+	notFound         http.HandlerFunc
+	methodNotAllowed http.HandlerFunc
+	middlewares      []func(next http.Handler) http.Handler
+	prefix           string
 }
 
 func NewMux() *Mux {
@@ -448,6 +476,63 @@ func (m *Mux) notFoundHandler(w http.ResponseWriter, r *http.Request) {
 	Chain(m.middlewares...)(notFound).ServeHTTP(w, r)
 }
 
+// MethodNotAllowed sets the handler for 405 Method Not Allowed responses.
+//   - If not set, it defaults to a standard 405 text response.
+//   - The Allow header is always set before the handler is called.
+func (m *Mux) MethodNotAllowed(handler http.HandlerFunc) {
+	m.methodNotAllowed = handler
+}
+
+func (m *Mux) methodNotAllowedHandler(w http.ResponseWriter, r *http.Request, allowed string) {
+	w.Header().Set("Allow", allowed)
+
+	handler := m.methodNotAllowed
+	if handler == nil {
+		handler = func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}
+
+	Chain(m.middlewares...)(handler).ServeHTTP(w, r)
+}
+
+// buildAllowHeader returns a sorted, comma-separated list of HTTP methods
+// allowed on the given node. Returns "" if the node is nil or has a catch-all
+// handler (which accepts any method). HEAD is included if GET is registered.
+// OPTIONS is always included when at least one method is registered.
+func buildAllowHeader(n *node) string {
+	if n == nil || n.Handler != nil {
+		// catch-all handler accepts any method — not a 405 case
+		return ""
+	}
+
+	if len(n.MethodHandler) == 0 {
+		return ""
+	}
+
+	seen := make(map[string]struct{}, len(n.MethodHandler)+2)
+	for method := range n.MethodHandler {
+		seen[method] = struct{}{}
+	}
+
+	// Auto-HEAD: if GET is registered, HEAD is implicitly available
+	if _, hasGet := seen[http.MethodGet]; hasGet {
+		seen[http.MethodHead] = struct{}{}
+	}
+
+	// OPTIONS is always available when at least one method is registered
+	seen[http.MethodOptions] = struct{}{}
+
+	methods := make([]string, 0, len(seen))
+	for method := range seen {
+		methods = append(methods, method)
+	}
+
+	sort.Strings(methods)
+
+	return strings.Join(methods, ", ")
+}
+
 // ErrorHandler sets the handler for 500 Internal Server Error responses.
 //   - If not set, it defaults to a generic error handler.
 //   - Only usable for ada.HandlerFunc handlers.
@@ -457,53 +542,81 @@ func (m *Mux) ErrorHandler(handler func(c *Context, err error)) {
 
 // ServeHTTP implements the http.Handler interface for Mux.
 func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
+	urlPath := r.URL.Path
 	current := m.root
 	var possible *node
 	var possibleIndex int
+	var possibleOffset int // byte offset in urlPath for wildcard reconstruction
 
-	pathPattern := make([]indexValue, 0)
+	pathPattern := make([]indexValue, 0, 4)
 
-	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	for i, segment := range segments {
+	// Walk the path in-place without allocating a []string slice.
+	// We iterate character-by-character, finding '/' delimiters.
+	segmentIndex := 0
+	pos := 1 // skip leading '/'
+	if len(urlPath) == 0 || urlPath[0] != '/' {
+		pos = 0
+	}
+
+	for pos <= len(urlPath) {
+		// Find the end of the current segment.
+		end := strings.IndexByte(urlPath[pos:], '/')
+		var segment string
+		if end < 0 {
+			segment = urlPath[pos:]
+			end = len(urlPath)
+		} else {
+			segment = urlPath[pos : pos+end]
+			end = pos + end
+		}
+
+		isLast := end >= len(urlPath)
+
 		if current.TypeWildcard != nil && current.TypeWildcard.Children.Possible {
 			possible = current.TypeWildcard.Children
-			possibleIndex = i
+			possibleIndex = segmentIndex
+			possibleOffset = pos
 		}
-		// find the type of the node
-		node, nodeType := current.FindNode(segment, r)
-		if node == nil {
+
+		// Find the type of the node.
+		nd, nodeType := current.FindNode(segment, r)
+		if nd == nil {
 			current = possible
 			break
 		}
 
 		if nodeType == typeNodeParam {
 			pathPattern = append(pathPattern, indexValue{
-				index: i,
+				index: segmentIndex,
 				value: segment,
 			})
 		}
 
-		if i != len(segments)-1 {
-			if node.Possible {
-				possible = node
+		if !isLast {
+			if nd.Possible {
+				possible = nd
+				// Note: possibleOffset is NOT updated here. It stays at the value
+				// from the top-of-loop wildcard check, which is the correct byte
+				// position for reconstructing the wildcard path value.
 			}
 
-			if node.Segment == nil {
+			if nd.Segment == nil {
 				current = possible
-				possibleIndex = i
+				possibleIndex = segmentIndex
 				break
 			}
-			current = node.Segment
 
-			continue
-		}
-
-		if node.IsHandlerExists() {
-			current = node
+			current = nd.Segment
 		} else {
-			current = possible
+			if nd.IsHandlerExists() {
+				current = nd
+			} else {
+				current = possible
+			}
 		}
+
+		pos = end + 1
+		segmentIndex++
 	}
 
 	if current == nil {
@@ -511,14 +624,28 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handler := current.MethodHandler[strings.ToUpper(r.Method)]
+	// Optimization #6: use r.Method directly.
+	// HTTP methods from net/http are always uppercase per RFC 7230.
+	method := r.Method
+	handler := current.MethodHandler[method]
+
+	// Auto-HEAD: if HEAD is requested and no explicit HEAD handler exists,
+	// fall back to the GET handler. Go's http.ResponseWriter automatically
+	// suppresses the body for HEAD responses.
+	if handler == nil && method == http.MethodHead {
+		handler = current.MethodHandler[http.MethodGet]
+	}
+
 	if handler == nil {
 		handler = current.Handler
 	}
 
-	// Fallback to wildcard handler if specific method handler not found
+	// Fallback to wildcard handler if specific method handler not found.
 	if handler == nil && possible != nil {
-		handler = possible.MethodHandler[strings.ToUpper(r.Method)]
+		handler = possible.MethodHandler[method]
+		if handler == nil && method == http.MethodHead {
+			handler = possible.MethodHandler[http.MethodGet]
+		}
 		if handler == nil {
 			handler = possible.Handler
 		}
@@ -527,30 +654,58 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Auto-OPTIONS: if OPTIONS is requested and no explicit handler exists,
+	// respond with 204 No Content and an Allow header listing available methods.
+	if handler == nil && method == http.MethodOptions {
+		if allowed := buildAllowHeader(current); allowed != "" {
+			w.Header().Set("Allow", allowed)
+			w.WriteHeader(http.StatusNoContent)
+
+			return
+		}
+	}
+
+	// 405 Method Not Allowed: the path exists (node has handlers) but not
+	// for the requested method.
 	if handler == nil {
+		if allowed := buildAllowHeader(current); allowed != "" {
+			m.methodNotAllowedHandler(w, r, allowed)
+
+			return
+		}
+
 		m.notFoundHandler(w, r)
+
 		return
 	}
 
 	if current.Possible {
-		r.SetPathValue("*", strings.Join(segments[possibleIndex:], "/"))
+		// Reconstruct the wildcard value from the original path string
+		// without allocating via strings.Join.
+		wildcard := urlPath[possibleOffset:]
+		if len(wildcard) > 0 && wildcard[0] == '/' {
+			wildcard = wildcard[1:]
+		}
+		r.SetPathValue("*", wildcard)
 	}
 
 	if len(pathPattern) > 0 {
-		// Look up the pre-computed param names for this method (or catch-all "")
-		params := current.Params[strings.ToUpper(r.Method)]
+		// Look up the pre-computed param names for this method (or catch-all "").
+		params := current.Params[method]
 		if params == nil {
 			params = current.Params[""]
 		}
+
 		for _, v := range pathPattern {
 			if current.Possible && possibleIndex <= v.index {
 				continue
 			}
 
-			// Find the matching param name by segment index
+			// Find the matching param name by segment index.
 			for _, p := range params {
 				if p.Index == v.index {
 					r.SetPathValue(p.Name, v.value)
+
 					break
 				}
 			}

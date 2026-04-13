@@ -29,6 +29,21 @@ api.GET("/users", handler, middleware4)     // Route: 1, 2, 3, 4, handler
 
 > Middleware added with `Use` only affects handlers and groups registered after the call; it does not apply to routes or groups defined earlier.
 
+## Runtime Reload
+
+Ada supports replacing, disabling, and adding middlewares at runtime without restarting the server. See the [Runtime Reload](../runtime-reload) guide for details on `Slot` and `Pipeline`.
+
+```go
+// Single toggleable middleware
+auth := ada.NewSlot(forwardauth.Middleware(...))
+server.Use(auth.Middleware())
+
+// Replace at runtime
+auth.Replace(forwardauth.Middleware(newOpts...))
+auth.Disable()
+auth.Enable()
+```
+
 ## Creating Custom Middleware
 
 You can create your own middleware functions following the standard pattern:

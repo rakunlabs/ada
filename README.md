@@ -39,3 +39,30 @@ func SayHello(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Hello, " + r.PathValue("user")))
 }
 ```
+
+## Runtime Middleware Reload
+
+Replace, disable, or add middlewares at runtime without restarting:
+
+```go
+auth := ada.NewSlot(forwardauth.Middleware(
+    forwardauth.WithAddress("http://auth:8080/verify"),
+))
+server.Use(auth.Middleware())
+
+// Hot-swap at runtime
+auth.Replace(forwardauth.Middleware(forwardauth.WithAddress("http://auth-v2:8080")))
+auth.Disable()  // bypass
+auth.Enable()   // restore
+
+// Or manage multiple middlewares by key
+stack := ada.NewPipeline()
+stack.Set("cors", cors.Middleware(...))
+stack.Set("auth", forwardauth.Middleware(...))
+server.Use(stack.Middleware())
+
+stack.Set("ratelimit", ratelimit.Middleware(...))  // add at runtime
+stack.Remove("auth")                                // remove at runtime
+```
+
+See the [Runtime Reload guide](https://rakunlabs.github.io/ada/guide/middleware/runtime-reload) for full details.

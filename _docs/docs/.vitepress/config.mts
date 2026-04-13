@@ -102,8 +102,16 @@ export default defineConfig({
             ],
           },
           {
+            text: "Runtime Reload",
+            link: "/guide/runtime-reload.md",
+          },
+          {
             text: "Microservice",
             link: "/guide/microservice.md",
+          },
+          {
+            text: "Performance",
+            link: "/guide/performance.md",
           },
         ],
       },

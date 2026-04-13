@@ -124,6 +124,23 @@ server.HandleFunc("/health", healthCheck)
 server.Handle("/static", http.FileServer(http.Dir("./static")))
 ```
 
+## Automatic HEAD and OPTIONS
+
+Ada automatically handles HEAD and OPTIONS requests:
+
+- **HEAD**: If a GET handler is registered, HEAD requests are served by the same handler. Go's `http.ResponseWriter` automatically suppresses the response body. Explicit HEAD handlers take priority.
+- **OPTIONS**: Returns `204 No Content` with an `Allow` header listing available methods (e.g. `Allow: GET, HEAD, OPTIONS, POST`). Explicit OPTIONS handlers take priority.
+
+## 405 Method Not Allowed
+
+When a request matches a path but not any registered method, Ada returns `405 Method Not Allowed` with an `Allow` header listing the available methods:
+
+```
+GET /users         → 200 OK
+POST /users        → 405 Method Not Allowed (Allow: GET, HEAD, OPTIONS)
+GET /nonexistent   → 404 Not Found
+```
+
 ## Custom 404 Handler
 
 You can set a custom handler for routes that don't match:
@@ -133,5 +150,18 @@ server := ada.New()
 server.NotFound(func(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusNotFound)
     fmt.Fprintf(w, "Page not found: %s", r.URL.Path)
+})
+```
+
+## Custom 405 Handler
+
+You can set a custom handler for method-not-allowed responses. The `Allow` header is always set before the handler is called:
+
+```go
+server := ada.New()
+server.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusMethodNotAllowed)
+    w.Write([]byte(`{"error":"method not allowed","allow":"` + w.Header().Get("Allow") + `"}`))
 })
 ```
