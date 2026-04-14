@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #EDF2F4;
+  --card-bg: #ffffff;
+  --card-border: #c9d1d6;
+  --card-shadow: 0 1px 3px rgba(45, 52, 64, 0.07), 0 1px 2px rgba(45, 52, 64, 0.04);
+  --text-primary: #2B2D42;
+  --text-secondary: #525672;
+  --text-muted: #8D99AE;
+  --input-bg: #EDF2F4;
+  --input-border: #8D99AE;
+  --input-focus-border: #EF233C;
+  --input-focus-ring: rgba(239, 35, 60, 0.18);
+  --btn-bg: #EF233C;
+  --btn-bg-hover: #d81e35;
+  --btn-text: #ffffff;
+  --oauth-bg: #ffffff;
+  --oauth-border: #c9d1d6;
+  --oauth-hover: #EDF2F4;
+  --oauth-text: #2B2D42;
+  --divider: #c9d1d6;
+  --error-bg: #fef2f3;
+  --error-border: #EF233C;
+  --error-text: #9f1225;
+  --toggle-bg: transparent;
+  --toggle-text: #8D99AE;
+  --toggle-hover: #EDF2F4;
+}
+
+[data-theme="dark"] {
+  --bg: #252422;
+  --card-bg: #403D39;
+  --card-border: #554f49;
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --text-primary: #FFFCF2;
+  --text-secondary: #CCC5B9;
+  --text-muted: #8a8378;
+  --input-bg: #252422;
+  --input-border: #554f49;
+  --input-focus-border: #EF233C;
+  --input-focus-ring: rgba(239, 35, 60, 0.3);
+  --btn-bg: #EF233C;
+  --btn-bg-hover: #d81e35;
+  --btn-text: #FFFCF2;
+  --oauth-bg: #252422;
+  --oauth-border: #554f49;
+  --oauth-hover: #403D39;
+  --oauth-text: #CCC5B9;
+  --divider: #554f49;
+  --error-bg: #3d1c10;
+  --error-border: #EF233C;
+  --error-text: #f5a988;
+  --toggle-bg: transparent;
+  --toggle-text: #8a8378;
+  --toggle-hover: #252422;
+}
+
+html,
+body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-primary);
+  transition: background 0.2s, color 0.2s;
+}

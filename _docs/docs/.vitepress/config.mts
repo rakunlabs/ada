@@ -1,7 +1,8 @@
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 
 // https://vitepress.dev/reference/site-config
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: "> ada",
   description: "Go Web Framework",
   head: [["link", { rel: "icon", href: "/ada/assets/favicon.ico" }]],
@@ -81,6 +82,10 @@ export default defineConfig({
               {
                 text: "ForwardAuth",
                 link: "/guide/middleware/forwardauth.md",
+              },
+              {
+                text: "Auth",
+                link: "/guide/middleware/auth.md",
               }
             ],
           },
@@ -119,4 +124,10 @@ export default defineConfig({
 
     socialLinks: [{ icon: "github", link: "https://github.com/rakunlabs/ada" }],
   },
-});
+  mermaid: {},
+  vite: {
+    optimizeDeps: {
+      include: ["mermaid", "dayjs"],
+    },
+  },
+}));

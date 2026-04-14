@@ -1,4 +1,6 @@
 /__debug_*
 /.idea
+/docs
 /.vscode
 *.test
+.superpowers

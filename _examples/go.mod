@@ -8,9 +8,10 @@ require (
 	connectrpc.com/grpcreflect v1.3.0
 	connectrpc.com/otelconnect v0.7.2
 	github.com/rakunlabs/ada v0.0.0-00010101000000-000000000000
-	github.com/rakunlabs/ada/handler/folder v0.0.0-00010101000000-000000000000
+	github.com/rakunlabs/ada/handler/folder v0.0.0
 	github.com/rakunlabs/ada/handler/mcp v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/handler/swagger v0.0.0-00010101000000-000000000000
+	github.com/rakunlabs/ada/middleware/auth v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/cors v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/encoding v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/log v0.0.0-00010101000000-000000000000
@@ -23,6 +24,7 @@ require (
 	github.com/rakunlabs/tell v0.1.2
 	github.com/shopspring/decimal v1.4.0
 	github.com/swaggo/swag v1.16.6
+	golang.org/x/crypto v0.48.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -141,7 +143,6 @@ require (
 	go.uber.org/mock v0.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20250819193227-8b4c13bb791b // indirect
 	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
@@ -180,6 +181,8 @@ replace github.com/rakunlabs/ada/middleware/cors => ../middleware/cors
 replace github.com/rakunlabs/ada/middleware/telemetry => ../middleware/telemetry
 
 replace github.com/rakunlabs/ada/middleware/server => ../middleware/server
+
+replace github.com/rakunlabs/ada/middleware/auth => ../middleware/auth
 
 tool (
 	github.com/bufbuild/buf/cmd/buf

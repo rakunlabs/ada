@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+  </head>
+  <body>
+    <script type="module">
+      let oldState = "";
+      window.addEventListener("message", onMessage);
+
+      async function onMessage(event) {
+        // Filter out any events that do not match the expected format of a 2-part string split by a space.
+        if (typeof event.data !== "string") {
+          return;
+        }
+
+        const data = event.data.split(" ");
+
+        if (data.length !== 2) {
+          return;
+        }
+
+        // Extract data from event and verify status of session.
+        const [clientId, sessionState] = data;
+        const sessionStatus = await checkState(clientId, event.origin);
+
+        // Signal session status to the page embedding this iframe.
+        event.source.postMessage(sessionStatus, event.origin);
+      }
+
+      async function checkState(clientId, origin) {
+        // Check if the browser has granted us access to 3rd-party storage (such as cookies).
+        const hasAccess = await hasStorageAccess();
+
+        // If we don't have access, signal an error.
+        // As we cannot read cookies, we cannot verify the session state.
+        if (!hasAccess) {
+          return "error";
+        }
+
+        const cookie = getSessionCookie();
+        if (oldState == "") {
+          oldState = cookie;
+        }
+
+        if (oldState == "") {
+          return "changed";
+        }
+
+        if (oldState == cookie) {
+          return "unchanged";
+        } else {
+          oldState = cookie;
+          return "changed";
+        }
+      }
+
+      // See https://developer.mozilla.org/en-US/docs/Web/API/Storage_Access_API/Using#checking_and_requesting_storage_access
+      async function hasStorageAccess() {
+        // Check if the Storage Access API is supported, if not, pretend we have access.
+        // This is for older browsers, where support can be determined using the test cookie.
+        if (!("hasStorageAccess" in document)) {
+          return true;
+        }
+
+        // Check if we already have been granted storage access, if so, signal access.
+        if (await document.hasStorageAccess()) {
+          return true;
+        }
+
+        try {
+          // Attempt to request storage access without a user interaction.
+          // This might fail, and if it does an exception will be thrown.
+          await document.requestStorageAccess();
+
+          // If no exceptions are thrown, then signal access.
+          return true;
+        } catch (error) {
+          // If an exception is thrown, then signal no access.
+          return false;
+        }
+      }
+
+      function getSessionCookie() {
+        return getCookieByName("{{.cookie}}");
+      }
+
+      function getCookieByName(name) {
+        const cookies = new Map();
+
+        for (const cookie of document.cookie.split(";")) {
+          const [key, value] = cookie.split("=").map((value) => value.trim());
+          cookies.set(key, value);
+        }
+
+        return cookies.get(name) ?? null;
+      }
+    </script>
+  </body>
+</html>

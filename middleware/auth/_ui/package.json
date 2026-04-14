@@ -1,0 +1,28 @@
+{
+  "name": "_~ada-login~_",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
+    "@tailwindcss/vite": "^4.2.2",
+    "@tsconfig/svelte": "^5.0.8",
+    "lucide-svelte": "^1.0.1",
+    "oxlint": "^1.60.0",
+    "stylelint": "^17.7.0",
+    "stylelint-config-sass-guidelines": "^13.0.0",
+    "stylelint-config-standard": "^40.0.0",
+    "stylelint-scss": "7.0.0",
+    "svelte": "^5.55.3",
+    "svelte-check": "^4.4.6",
+    "svelte-spa-router": "^5.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8"
+  }
+}
