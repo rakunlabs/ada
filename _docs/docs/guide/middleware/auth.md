@@ -112,6 +112,77 @@ type Verifier func(ctx context.Context, username, password string) (*identity.Id
 
 Return `local.ErrInvalidCredentials` for bad credentials (produces 401). Any other error produces 500.
 
+#### Self-Service Sign-up
+
+The local strategy can also create accounts. Pass a `Registrar` with `local.WithRegistrar(...)` — its presence enables signup for that strategy and the login UI grows a "Sign up" toggle.
+
+```go
+authMW.Strategy(local.New("local",
+    LocalVerifier,
+    local.WithLabel("Username & password"),
+    local.WithRegistrar(func(ctx context.Context, req local.RegisterRequest) (*identity.Identity, error) {
+        if len(req.Password) < 6 {
+            return nil, fmt.Errorf("password must be at least 6 characters: %w", local.ErrInvalidInput)
+        }
+
+        user, err := db.CreateUser(ctx, req.Username, req.Password)
+        if errors.Is(err, db.ErrDuplicate) {
+            return nil, local.ErrUserExists
+        }
+        if err != nil {
+            return nil, err
+        }
+
+        return &identity.Identity{
+            Subject: user.ID,
+            Name:    user.Name,
+            Roles:   []string{"user"},
+        }, nil
+    }),
+    local.WithAutoLogin(true),  // optional: issue a session immediately on success
+))
+```
+
+The `Registrar` signature:
+
+```go
+type Registrar func(ctx context.Context, req local.RegisterRequest) (*identity.Identity, error)
+
+type RegisterRequest struct {
+    Username string
+    Password string
+    Extras   map[string]string  // any non-username/password fields from the form
+}
+```
+
+Error contract:
+
+| Return | HTTP | Use when |
+|---|---|---|
+| `nil` error | 200 | Account created |
+| `local.ErrUserExists` | 409 | Username already taken |
+| `local.ErrInvalidInput` (wrap with `fmt.Errorf("... : %w", local.ErrInvalidInput)`) | 400 | Validation failed; wrapped message is shown to the user |
+| any other error | 500 | Unexpected failure |
+
+**Customizing the sign-up form** — by default the form is `username`, `password`, `password_confirm` (all with matching labels). Override with `local.WithRegisterFields(...)`:
+
+```go
+local.WithRegisterFields(
+    strategy.Field{Name: "username", Label: "Email",        Type: "email",    Required: true},
+    strategy.Field{Name: "name",     Label: "Display name", Type: "text"},
+    strategy.Field{Name: "password", Label: "Password",     Type: "password", Required: true},
+    strategy.Field{Name: "password_confirm", Label: "Confirm password", Type: "password", Required: true},
+)
+```
+
+- Fields matching the strategy's username/password keys are forwarded to the `Registrar` as `req.Username` / `req.Password`.
+- `password_confirm` is matched client-side against `password` and stripped before the server sees it.
+- Any other field (e.g. `name`, `email`) lands in `req.Extras["field_name"]`.
+
+**Auto-login vs return to login** — `local.WithAutoLogin(true)` issues a session and redirects after a successful signup. Default (`false`) flips the UI back to the login form with an "Account created. Please sign in." notice.
+
+**First-run bootstrap** — for self-hosted apps that want to show the signup form on first visit (until a user exists), set `auth.UIConfig.SignupFirst = true`. The UI lands on the signup form directly; flip it back to `false` once bootstrapped (or derive it from whether your user store is empty).
+
 ### OAuth2 / OIDC Strategy
 
 The OAuth2 strategy supports the authorization code flow (with PKCE) and optional password flow.
@@ -416,6 +487,9 @@ The UI groups them: form-based strategies (local, LDAP, magic link, password-flo
 | `UI.Icon` | `string` | `""` | Logo URL, data URI, inline SVG, or filename in embedded FS |
 | `UI.Version` | `string` | `""` | Version text shown in header |
 | `UI.ExternalFolder` | `bool` | `false` | Use your own login page instead of embedded UI |
+| `UI.SignupFirst` | `bool` | `false` | Land on the signup form instead of login (first-run bootstrap) |
+| `UI.Theme` | `map[string]string` | `nil` | CSS variable overrides applied to `:root` at load (e.g. `{"btn-bg": "#3b82f6"}`) |
+| `UI.CustomCSSURL` | `string` | `""` | URL of a stylesheet appended to the login page for full restyling |
 | `CookieName` | `string` | `"auth_session"` | Session cookie name |
 | `Cookie.Path` | `string` | `"/"` | Cookie path |
 | `Cookie.MaxAge` | `int` | `0` | Cookie max-age in seconds |
@@ -454,6 +528,7 @@ With default `Base: "/"`:
 | GET | `/login/info` | JSON: title, subtitle, icon, version, strategies |
 | GET | `/login/me` | Current user's Identity as JSON |
 | GET/POST | `/login/pass/{strategy}` | Initiate or submit login |
+| POST | `/login/register/{strategy}` | Create an account (strategy must implement `Registerer`) |
 | GET | `/login/callback/{strategy}` | OAuth2 redirect callback |
 | POST | `/login/refresh` | Force-refresh access token |
 | POST | `/logout` | Revoke session and clear cookie |
@@ -521,8 +596,83 @@ The middleware ships an embedded Svelte login page that reads `/login/info` to d
 - Form inputs per strategy (username/password, email/token, etc.)
 - OAuth2 redirect buttons
 - Strategy tabs when multiple form strategies exist
+- Optional "Sign up" toggle (per-strategy — appears only when the strategy has a `Registrar`)
 - Light/dark theme toggle (persisted to `localStorage`, respects `prefers-color-scheme`)
+- Runtime theme overrides (`UIConfig.Theme`) and custom stylesheet (`UIConfig.CustomCSSURL`)
 - Configurable title, subtitle, icon, and version
+
+### Styling the Built-in UI
+
+Every color, radius, and surface in the login card reads a `--auth-*` CSS custom property. You can tune them without touching the Svelte source. Two knobs:
+
+#### Theme tokens (lightweight brand tweaks)
+
+Pass a map of CSS variable overrides. Keys may be bare (`primary`, `btn-bg`) or fully qualified (`--auth-btn-bg`); the UI normalizes them to `--auth-*` custom properties on `:root`.
+
+```go
+authMW := auth.New(auth.Config{
+    UI: auth.UIConfig{
+        Theme: map[string]string{
+            "btn-bg":              "#3b82f6",
+            "btn-bg-hover":        "#2563eb",
+            "input-focus-border":  "#3b82f6",
+            "input-focus-ring":    "rgba(59, 130, 246, 0.18)",
+        },
+    },
+})
+```
+
+**Radius scale** — three tokens cover every rounded corner, so you can make everything sharp, pill-shaped, or in between:
+
+```go
+Theme: map[string]string{
+    "radius-lg": "0",    // the card
+    "radius":    "0",    // inputs, primary button, OAuth buttons
+    "radius-sm": "0",    // tabs, banners, theme toggle
+}
+```
+
+**Full token list** (also documented at the top of `_ui/src/style/global.css`):
+
+| Category | Tokens |
+|---|---|
+| Surfaces | `--auth-bg`, `--auth-card-bg`, `--auth-card-border`, `--auth-card-shadow` |
+| Radii | `--auth-radius-sm`, `--auth-radius`, `--auth-radius-lg` |
+| Text | `--auth-text-primary`, `--auth-text-secondary`, `--auth-text-muted` |
+| Inputs | `--auth-input-bg`, `--auth-input-border`, `--auth-input-focus-border`, `--auth-input-focus-ring` |
+| Primary button | `--auth-btn-bg`, `--auth-btn-bg-hover`, `--auth-btn-text` |
+| OAuth buttons | `--auth-oauth-bg`, `--auth-oauth-border`, `--auth-oauth-hover`, `--auth-oauth-text` |
+| Misc | `--auth-divider`, `--auth-toggle-bg`, `--auth-toggle-text`, `--auth-toggle-hover` |
+| Error banner | `--auth-error-bg`, `--auth-error-border`, `--auth-error-text` |
+| Notice banner | `--auth-notice-bg`, `--auth-notice-border`, `--auth-notice-text` |
+
+Dark-mode overrides apply automatically from `[data-theme="dark"]`. If you need different values per mode, use the custom stylesheet escape hatch below.
+
+#### Custom stylesheet (full control)
+
+Point `CustomCSSURL` at a stylesheet your app serves; the UI appends it to `<head>` on load so your rules win the cascade.
+
+```go
+UI: auth.UIConfig{
+    CustomCSSURL: "/static/auth.css",
+}
+```
+
+Example `auth.css` — override dark-mode only:
+
+```css
+[data-theme="dark"] {
+  --auth-bg: #0b1220;
+  --auth-card-bg: #111a2c;
+  --auth-btn-bg: #22d3ee;
+}
+```
+
+You can also rewrite anything else — the custom CSS loads last and has full access to the card's class names (`.card`, `.btn-primary`, `.btn-oauth`, `.field`, `.strategy-tab`, `.notice-banner`, `.error-banner`, etc.).
+
+::: info
+The UI serves at `/login/` and its CSS loads before `/login/info` returns, so there's a brief flash of default styling before your `Theme` overrides apply. For fully flicker-free branding, use `CustomCSSURL` pointing at a file that hard-codes your values.
+:::
 
 ### Custom Login Page
 

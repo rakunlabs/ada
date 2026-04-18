@@ -1,59 +1,112 @@
 @import "tailwindcss";
 
+/*
+ * Auth UI design tokens.
+ *
+ * Every visual property in the login/signup card reads one of the
+ * variables below. To customize, programmers can either:
+ *   - set individual vars via auth.UIConfig.Theme (applied at runtime to :root)
+ *   - point auth.UIConfig.CustomCSSURL at a stylesheet for full control
+ *
+ * Prefixed with --auth- to avoid collision with the host page's own tokens.
+ *
+ * Full list:
+ *   --auth-bg                  page background
+ *   --auth-card-bg             card surface
+ *   --auth-card-border         card border
+ *   --auth-card-shadow         card drop shadow
+ *   --auth-radius-sm           small corner radius (tabs, banners, toggle)
+ *   --auth-radius              default corner radius (inputs, buttons)
+ *   --auth-radius-lg           large corner radius (the card itself)
+ *   --auth-text-primary        primary text (titles, input text)
+ *   --auth-text-secondary      labels, muted headings
+ *   --auth-text-muted          placeholders, hints
+ *   --auth-input-bg            input fill
+ *   --auth-input-border        input border (idle)
+ *   --auth-input-focus-border  input border on focus
+ *   --auth-input-focus-ring    input focus halo color
+ *   --auth-btn-bg              primary button background
+ *   --auth-btn-bg-hover        primary button hover
+ *   --auth-btn-text            primary button text
+ *   --auth-oauth-bg            oauth button background
+ *   --auth-oauth-border        oauth button border
+ *   --auth-oauth-hover         oauth button hover background
+ *   --auth-oauth-text          oauth button text
+ *   --auth-divider             horizontal divider color
+ *   --auth-toggle-bg           theme-toggle button background
+ *   --auth-toggle-text         theme-toggle button icon color
+ *   --auth-toggle-hover        theme-toggle hover background
+ *   --auth-error-bg            error banner background
+ *   --auth-error-border        error banner left-border
+ *   --auth-error-text          error banner text color
+ *   --auth-notice-bg           success-notice background
+ *   --auth-notice-border       success-notice left-border
+ *   --auth-notice-text         success-notice text color
+ */
+
 :root {
-  --bg: #EDF2F4;
-  --card-bg: #ffffff;
-  --card-border: #c9d1d6;
-  --card-shadow: 0 1px 3px rgba(45, 52, 64, 0.07), 0 1px 2px rgba(45, 52, 64, 0.04);
-  --text-primary: #2B2D42;
-  --text-secondary: #525672;
-  --text-muted: #8D99AE;
-  --input-bg: #EDF2F4;
-  --input-border: #8D99AE;
-  --input-focus-border: #EF233C;
-  --input-focus-ring: rgba(239, 35, 60, 0.18);
-  --btn-bg: #EF233C;
-  --btn-bg-hover: #d81e35;
-  --btn-text: #ffffff;
-  --oauth-bg: #ffffff;
-  --oauth-border: #c9d1d6;
-  --oauth-hover: #EDF2F4;
-  --oauth-text: #2B2D42;
-  --divider: #c9d1d6;
-  --error-bg: #fef2f3;
-  --error-border: #EF233C;
-  --error-text: #9f1225;
-  --toggle-bg: transparent;
-  --toggle-text: #8D99AE;
-  --toggle-hover: #EDF2F4;
+  --auth-bg: #EDF2F4;
+  --auth-card-bg: #ffffff;
+  --auth-card-border: #c9d1d6;
+  --auth-card-shadow: 0 1px 3px rgba(45, 52, 64, 0.07), 0 1px 2px rgba(45, 52, 64, 0.04);
+  --auth-radius-sm: 6px;
+  --auth-radius: 8px;
+  --auth-radius-lg: 12px;
+  --auth-text-primary: #2B2D42;
+  --auth-text-secondary: #525672;
+  --auth-text-muted: #8D99AE;
+  --auth-input-bg: #EDF2F4;
+  --auth-input-border: #8D99AE;
+  --auth-input-focus-border: #EF233C;
+  --auth-input-focus-ring: rgba(239, 35, 60, 0.18);
+  --auth-btn-bg: #EF233C;
+  --auth-btn-bg-hover: #d81e35;
+  --auth-btn-text: #ffffff;
+  --auth-oauth-bg: #ffffff;
+  --auth-oauth-border: #c9d1d6;
+  --auth-oauth-hover: #EDF2F4;
+  --auth-oauth-text: #2B2D42;
+  --auth-divider: #c9d1d6;
+  --auth-error-bg: #fef2f3;
+  --auth-error-border: #EF233C;
+  --auth-error-text: #9f1225;
+  --auth-notice-bg: #ecfdf5;
+  --auth-notice-border: #22c55e;
+  --auth-notice-text: #166534;
+  --auth-toggle-bg: transparent;
+  --auth-toggle-text: #8D99AE;
+  --auth-toggle-hover: #EDF2F4;
 }
 
 [data-theme="dark"] {
-  --bg: #252422;
-  --card-bg: #403D39;
-  --card-border: #554f49;
-  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
-  --text-primary: #FFFCF2;
-  --text-secondary: #CCC5B9;
-  --text-muted: #8a8378;
-  --input-bg: #252422;
-  --input-border: #554f49;
-  --input-focus-border: #EF233C;
-  --input-focus-ring: rgba(239, 35, 60, 0.3);
-  --btn-bg: #EF233C;
-  --btn-bg-hover: #d81e35;
-  --btn-text: #FFFCF2;
-  --oauth-bg: #252422;
-  --oauth-border: #554f49;
-  --oauth-hover: #403D39;
-  --oauth-text: #CCC5B9;
-  --divider: #554f49;
-  --error-bg: #3d1c10;
-  --error-border: #EF233C;
-  --error-text: #f5a988;
-  --toggle-bg: transparent;
-  --toggle-text: #8a8378;
-  --toggle-hover: #252422;
+  --auth-bg: #252422;
+  --auth-card-bg: #403D39;
+  --auth-card-border: #554f49;
+  --auth-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --auth-text-primary: #FFFCF2;
+  --auth-text-secondary: #CCC5B9;
+  --auth-text-muted: #8a8378;
+  --auth-input-bg: #252422;
+  --auth-input-border: #554f49;
+  --auth-input-focus-border: #EF233C;
+  --auth-input-focus-ring: rgba(239, 35, 60, 0.3);
+  --auth-btn-bg: #EF233C;
+  --auth-btn-bg-hover: #d81e35;
+  --auth-btn-text: #FFFCF2;
+  --auth-oauth-bg: #252422;
+  --auth-oauth-border: #554f49;
+  --auth-oauth-hover: #403D39;
+  --auth-oauth-text: #CCC5B9;
+  --auth-divider: #554f49;
+  --auth-error-bg: #3d1c10;
+  --auth-error-border: #EF233C;
+  --auth-error-text: #f5a988;
+  --auth-notice-bg: #0f2e1f;
+  --auth-notice-border: #22c55e;
+  --auth-notice-text: #a7f3d0;
+  --auth-toggle-bg: transparent;
+  --auth-toggle-text: #8a8378;
+  --auth-toggle-hover: #252422;
 }
 
 html,
@@ -61,7 +114,7 @@ body {
   height: 100%;
   width: 100%;
   margin: 0;
-  background: var(--bg);
-  color: var(--text-primary);
+  background: var(--auth-bg);
+  color: var(--auth-text-primary);
   transition: background 0.2s, color 0.2s;
 }

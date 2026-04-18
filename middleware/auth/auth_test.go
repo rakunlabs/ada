@@ -180,3 +180,189 @@ func TestInfoListsStrategies(t *testing.T) {
 		t.Errorf("url: got %q, want /login/pass/local", info.Strategies[0].URL)
 	}
 }
+
+func TestRegister_AutoLogin_IssuesSessionCookie(t *testing.T) {
+	a := auth.New(auth.Config{UI: auth.UIConfig{ExternalFolder: true}})
+
+	// Registrar that always succeeds and returns a new identity.
+	reg := func(_ context.Context, req local.RegisterRequest) (*identity.Identity, error) {
+		return &identity.Identity{Subject: req.Username, Email: req.Extras["email"]}, nil
+	}
+
+	a.Strategy(local.New("local",
+		func(_ context.Context, _, _ string) (*identity.Identity, error) {
+			return nil, local.ErrInvalidCredentials
+		},
+		local.WithRegistrar(reg),
+		local.WithAutoLogin(true),
+	))
+
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	mux := newFakeMux()
+	a.Mount(mux)
+
+	body := strings.NewReader(`{"username":"carol","password":"s3cret!","email":"carol@example.com"}`)
+	req := httptest.NewRequest("POST", "/login/register/local", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.SetPathValue("strategy", "local")
+
+	rec := httptest.NewRecorder()
+	mux.mu.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register: expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var sessionCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "auth_session" {
+			sessionCookie = c
+
+			break
+		}
+	}
+	if sessionCookie == nil || sessionCookie.Value == "" {
+		t.Fatalf("expected auth_session cookie after auto-login signup, got %+v", rec.Result().Cookies())
+	}
+}
+
+func TestRegister_NoAutoLogin_ReturnsFlag(t *testing.T) {
+	a := auth.New(auth.Config{UI: auth.UIConfig{ExternalFolder: true}})
+
+	reg := func(_ context.Context, req local.RegisterRequest) (*identity.Identity, error) {
+		return &identity.Identity{Subject: req.Username}, nil
+	}
+
+	a.Strategy(local.New("local",
+		func(_ context.Context, _, _ string) (*identity.Identity, error) {
+			return nil, local.ErrInvalidCredentials
+		},
+		local.WithRegistrar(reg),
+	))
+
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	mux := newFakeMux()
+	a.Mount(mux)
+
+	body := strings.NewReader(`{"username":"dan","password":"s3cret!"}`)
+	req := httptest.NewRequest("POST", "/login/register/local", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("strategy", "local")
+
+	rec := httptest.NewRecorder()
+	mux.mu.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "auth_session" {
+			t.Fatalf("did not expect session cookie without auto-login, got %+v", c)
+		}
+	}
+
+	var body2 map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body2); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body2["auto_login"] != false {
+		t.Errorf("expected auto_login=false, got %v", body2["auto_login"])
+	}
+}
+
+func TestRegister_StrategyWithoutRegistrar_Is404(t *testing.T) {
+	a := auth.New(auth.Config{UI: auth.UIConfig{ExternalFolder: true}})
+
+	a.Strategy(local.New("local", func(_ context.Context, _, _ string) (*identity.Identity, error) {
+		return nil, local.ErrInvalidCredentials
+	}))
+
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	mux := newFakeMux()
+	a.Mount(mux)
+
+	body := strings.NewReader(`{"username":"x","password":"y"}`)
+	req := httptest.NewRequest("POST", "/login/register/local", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("strategy", "local")
+
+	rec := httptest.NewRecorder()
+	mux.mu.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for strategy without registrar, got %d", rec.Code)
+	}
+}
+
+func TestInfo_IncludesRegisterAndSignupFirst(t *testing.T) {
+	a := auth.New(auth.Config{UI: auth.UIConfig{
+		ExternalFolder: true,
+		Title:          "Hello",
+		SignupFirst:    true,
+	}})
+
+	reg := func(_ context.Context, _ local.RegisterRequest) (*identity.Identity, error) {
+		return nil, nil
+	}
+
+	a.Strategy(local.New("local",
+		func(_ context.Context, _, _ string) (*identity.Identity, error) {
+			return nil, local.ErrInvalidCredentials
+		},
+		local.WithRegistrar(reg),
+	))
+
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	mux := newFakeMux()
+	a.Mount(mux)
+
+	req := httptest.NewRequest("GET", "/login/info", nil)
+	rec := httptest.NewRecorder()
+	mux.mu.ServeHTTP(rec, req)
+
+	var info struct {
+		SignupFirst bool `json:"signup_first"`
+		Strategies  []struct {
+			Name     string `json:"name"`
+			Register *struct {
+				URL    string `json:"url"`
+				Fields []struct {
+					Name string `json:"name"`
+				} `json:"fields"`
+			} `json:"register"`
+		} `json:"strategies"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !info.SignupFirst {
+		t.Error("expected signup_first=true in info response")
+	}
+	if len(info.Strategies) != 1 {
+		t.Fatalf("expected 1 strategy, got %d", len(info.Strategies))
+	}
+	if info.Strategies[0].Register == nil {
+		t.Fatal("expected register block on strategy")
+	}
+	if info.Strategies[0].Register.URL != "/login/register/local" {
+		t.Errorf("register url: got %q, want /login/register/local", info.Strategies[0].Register.URL)
+	}
+	if len(info.Strategies[0].Register.Fields) != 3 {
+		t.Errorf("expected 3 default register fields, got %d", len(info.Strategies[0].Register.Fields))
+	}
+}

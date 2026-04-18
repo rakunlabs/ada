@@ -41,18 +41,44 @@ func Run(ctx context.Context) error {
 			Subtitle: "Sign in to access the dashboard",
 			Icon:     `data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%0A%20%20%3Cpolygon%20points%3D%2222.39%2C6.00%2022.39%2C18.00%2012.00%2C24.00%201.61%2C18.00%201.61%2C6.00%2012.00%2C0.00%22%20fill%3D%22%233b82f6%22%2F%3E%0A%20%20%3Csvg%20x%3D%224.199999999999999%22%20y%3D%224.199999999999999%22%20width%3D%2215.600000000000001%22%20height%3D%2215.600000000000001%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M2%209.5a5.5%205.5%200%200%201%209.591-3.676.56.56%200%200%200%20.818%200A5.49%205.49%200%200%201%2022%209.5c0%202.29-1.5%204-3%205.5l-5.492%205.313a2%202%200%200%201-3%20.019L5%2015c-1.5-1.5-3-3.2-3-5.5%22%2F%3E%3C%2Fsvg%3E%0A%3C%2Fsvg%3E`,
 			Version:  "v0.1.0",
+			// Set SIGNUP_FIRST=true to land on the signup form (first-run bootstrap style).
+			SignupFirst: os.Getenv("SIGNUP_FIRST") == "true",
+			// Theme demo: override the primary button color via a token.
+			// Keys can be bare ("btn-bg") or prefixed ("--auth-btn-bg").
+			Theme: map[string]string{
+				"btn-bg":              "#3b82f6",
+				"btn-bg-hover":        "#2563eb",
+				"input-focus-border":  "#3b82f6",
+				"input-focus-ring":    "rgba(59, 130, 246, 0.18)",
+			},
+			// Escape-hatch: serve your own stylesheet and point at it. Empty
+			// by default; set AUTH_CUSTOM_CSS_URL=/static/auth.css to try it.
+			CustomCSSURL: os.Getenv("AUTH_CUSTOM_CSS_URL"),
 		},
 		Cookie: sessionCookieDefaults(),
 	})
 
+	// "local" has signup enabled. The default register fields are
+	// username/password/password_confirm (labels: "Username", "Password",
+	// "Confirm password"). Use local.WithRegisterFields(...) to override names,
+	// labels, types, and required flags, or to add extras (collected into
+	// RegisterRequest.Extras and visible to your Registrar).
+	//
+	// Set SIGNUP_AUTOLOGIN=true to auto-issue a session on successful
+	// registration; otherwise the UI flips back to the login form with a
+	// notice.
 	authMW.Strategy(local.New("local",
 		LocalVerifier,
-		local.WithLabel("Email & password"),
+		local.WithLabel("Username & password"),
+		local.WithRegistrar(LocalRegistrar),
+		local.WithAutoLogin(os.Getenv("SIGNUP_AUTOLOGIN") == "true"),
 	))
 
+	// "local2" intentionally does NOT register a Registrar, so the UI shows
+	// the "Sign up" link only when this tab isn't selected.
 	authMW.Strategy(local.New("local2",
 		LocalVerifier,
-		local.WithLabel("Email & password"),
+		local.WithLabel("Email & password (no signup)"),
 	))
 
 	if oauth2Strategy := buildOAuth2FromEnv(); oauth2Strategy != nil {

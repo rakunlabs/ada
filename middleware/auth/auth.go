@@ -58,16 +58,34 @@ type Config struct {
 
 // UIConfig controls the login UI.
 type UIConfig struct {
-	Title          string `cfg:"title"`
-	Subtitle       string `cfg:"subtitle"`
+	Title    string `cfg:"title"`
+	Subtitle string `cfg:"subtitle"`
 	// Icon is a URL or inline SVG data URI for the logo shown above the title.
 	// Example: "/static/logo.svg" or "data:image/svg+xml,...".
 	// Empty means no icon.
-	Icon           string `cfg:"icon"`
+	Icon string `cfg:"icon"`
 	// Version is shown at the bottom of the login card (e.g. "v1.2.0").
 	// Empty means hidden.
 	Version        string `cfg:"version"`
 	ExternalFolder bool   `cfg:"external_folder"`
+	// SignupFirst, when true, tells the UI to render the signup form on load
+	// (for strategies that have a Registrar). Useful for first-run bootstrap
+	// flows — flip it back to false once users exist. Ignored when no
+	// registered strategy supports signup.
+	SignupFirst bool `cfg:"signup_first"`
+
+	// Theme maps CSS custom properties to values. Keys may be bare
+	// ("primary", "card-bg") or fully qualified ("--auth-primary"); the UI
+	// normalizes them to --auth-prefixed properties on :root. Use this for
+	// lightweight brand tweaks without shipping a stylesheet. See
+	// _ui/src/style/global.css for the full token list.
+	Theme map[string]string `cfg:"theme"`
+
+	// CustomCSSURL, when set, is appended to the login page as
+	// <link rel="stylesheet">. Use this for arbitrary restyling beyond the
+	// Theme token knobs. The URL is used verbatim (make sure your app serves
+	// it, e.g. behind a static-file handler).
+	CustomCSSURL string `cfg:"custom_css_url"`
 }
 
 // SuccessCookie is the post-login indicator cookie (read by the status iframe).
@@ -119,6 +137,7 @@ type paths struct {
 	Info     string // /login/info
 	Me       string // /login/me
 	Login    string // /login/pass/{strategy}
+	Register string // /login/register/{strategy}
 	Callback string // /login/callback/{strategy}
 	Refresh  string // /login/refresh
 	Logout   string // /logout
@@ -143,6 +162,7 @@ func New(cfg Config) *Auth {
 		Info:     cfg.Base + "login/info",
 		Me:       cfg.Base + "login/me",
 		Login:    cfg.Base + "login/pass/{strategy}",
+		Register: cfg.Base + "login/register/{strategy}",
 		Callback: cfg.Base + "login/callback/{strategy}",
 		Refresh:  cfg.Base + "login/refresh",
 		Logout:   cfg.Base + "logout",
@@ -255,6 +275,7 @@ func (a *Auth) Mount(mux Mux) {
 	mux.GET(p.Me, a.handleMe)
 	mux.GET(p.Login, a.handleLogin)
 	mux.POST(p.Login, a.handleLogin)
+	mux.POST(p.Register, a.handleRegister)
 	mux.GET(p.Callback, a.handleLogin)
 	mux.POST(p.Refresh, a.handleRefresh)
 	mux.POST(p.Logout, a.handleLogout)
@@ -288,28 +309,38 @@ func (a *Auth) Registry() *strategy.Registry { return a.registry }
 
 // infoResponse is the JSON returned by GET /auth/info.
 type infoResponse struct {
-	Title      string                `json:"title"`
-	Subtitle   string                `json:"subtitle,omitempty"`
-	Icon       string                `json:"icon,omitempty"`
-	Version    string                `json:"version,omitempty"`
-	Strategies []strategy.Descriptor `json:"strategies"`
+	Title        string                `json:"title"`
+	Subtitle     string                `json:"subtitle,omitempty"`
+	Icon         string                `json:"icon,omitempty"`
+	Version      string                `json:"version,omitempty"`
+	SignupFirst  bool                  `json:"signup_first,omitempty"`
+	Theme        map[string]string     `json:"theme,omitempty"`
+	CustomCSSURL string                `json:"custom_css_url,omitempty"`
+	Strategies   []strategy.Descriptor `json:"strategies"`
 }
 
 func (a *Auth) handleInfo(w http.ResponseWriter, _ *http.Request) {
 	resp := infoResponse{
-		Title:      a.cfg.UI.Title,
-		Subtitle:   a.cfg.UI.Subtitle,
-		Icon:       toIconSrc(a.cfg.UI.Icon),
-		Version:    a.cfg.UI.Version,
-		Strategies: a.registry.Descriptors(),
+		Title:        a.cfg.UI.Title,
+		Subtitle:     a.cfg.UI.Subtitle,
+		Icon:         toIconSrc(a.cfg.UI.Icon),
+		Version:      a.cfg.UI.Version,
+		SignupFirst:  a.cfg.UI.SignupFirst,
+		Theme:        a.cfg.UI.Theme,
+		CustomCSSURL: a.cfg.UI.CustomCSSURL,
+		Strategies:   a.registry.Descriptors(),
 	}
 	if resp.Title == "" {
 		resp.Title = "Sign in"
 	}
 
 	for i := range resp.Strategies {
-		// Apply Base prefix to the LoginURL.
+		// Apply Base prefix to the LoginURL and (if present) RegisterURL.
 		resp.Strategies[i].LoginURL = path.Join(a.cfg.Base, "login", "pass", resp.Strategies[i].Name)
+
+		if resp.Strategies[i].Register != nil {
+			resp.Strategies[i].Register.URL = path.Join(a.cfg.Base, "login", "register", resp.Strategies[i].Name)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -352,6 +383,67 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Strategy already wrote the response.
 		return
 
+	case strategy.OutcomeContinue:
+		// fall through to issue session
+	default:
+		writeError(w, http.StatusInternalServerError, "unknown_outcome", "strategy returned unknown outcome")
+
+		return
+	}
+
+	if id == nil {
+		writeError(w, http.StatusInternalServerError, "no_identity", "strategy returned no identity")
+
+		return
+	}
+
+	pair, err := a.issuer.Issue(r.Context(), id)
+	if err != nil {
+		slog.Error("auth: issue session", "error", err.Error())
+		writeError(w, http.StatusInternalServerError, "issue_failed", err.Error())
+
+		return
+	}
+
+	a.session.IssueCookie(w, r, pair.SessionID)
+	a.setSuccessCookie(w)
+
+	a.respondAfterLogin(w, r, name)
+}
+
+func (a *Auth) handleRegister(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("strategy")
+	if name == "" {
+		writeError(w, http.StatusNotFound, "unknown_strategy", "no strategy in path")
+
+		return
+	}
+
+	auth := a.registry.Get(name)
+	if auth == nil {
+		writeError(w, http.StatusNotFound, "unknown_strategy", "strategy not registered")
+
+		return
+	}
+
+	reg, ok := auth.(strategy.Registerer)
+	if !ok {
+		writeError(w, http.StatusNotFound, "signup_disabled", "strategy does not support signup")
+
+		return
+	}
+
+	id, outcome, err := reg.Register(w, r)
+	if err != nil {
+		slog.Error("auth: strategy register error", "strategy", name, "error", err.Error())
+		writeError(w, http.StatusInternalServerError, "register_failed", err.Error())
+
+		return
+	}
+
+	switch outcome {
+	case strategy.OutcomePending, strategy.OutcomeFailed:
+		return
 	case strategy.OutcomeContinue:
 		// fall through to issue session
 	default:

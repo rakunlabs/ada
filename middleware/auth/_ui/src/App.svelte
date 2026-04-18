@@ -1,16 +1,19 @@
 <script lang="ts">
   import { formToObject } from "./helper/form";
-  import { login, LoginError } from "./helper/login";
+  import { login, register, LoginError } from "./helper/login";
   import { getRedirectPath, isResponseTypeCode } from "./helper/query";
   import { initTheme, toggleTheme, getTheme } from "./helper/theme";
+  import { applyThemeVars, appendCustomStylesheet } from "./helper/customize";
   import type { AuthInfo, StrategyDescriptor } from "./helper/info";
   import { Sun, Moon, Eye, EyeOff, Loader2 } from "lucide-svelte";
 
   let error = $state("");
+  let notice = $state("");
   let working = $state(false);
   let mounted = $state(false);
   let showPassword = $state(false);
   let isDark = $state(false);
+  let mode = $state<"login" | "register">("login");
 
   let authInfo: AuthInfo = $state({
     title: "Sign in",
@@ -41,12 +44,40 @@
     formStrategies.find((s) => s.name === selectedFormStrategy),
   );
 
+  let anySignupAvailable = $derived(
+    formStrategies.some((s) => !!s.register),
+  );
+
+  let signupAvailableForActive = $derived(!!activeForm?.register);
+
+  let visibleFields = $derived(
+    mode === "register" && activeForm?.register?.fields?.length
+      ? activeForm.register.fields
+      : activeForm?.fields ?? [],
+  );
+
+  const switchMode = (next: "login" | "register") => {
+    if (mode === next) return;
+    mode = next;
+    error = "";
+    notice = "";
+  };
+
   const handleThemeToggle = () => {
     const next = toggleTheme();
     isDark = next === "dark";
   };
 
-  const signin = async (
+  const validateRegister = (data: Record<string, any>): string | null => {
+    const password = data["password"];
+    const confirm = data["password_confirm"];
+    if (password !== undefined && confirm !== undefined && password !== confirm) {
+      return "Passwords do not match";
+    }
+    return null;
+  };
+
+  const submit = async (
     e: SubmitEvent & { currentTarget: EventTarget & HTMLFormElement },
   ) => {
     e.preventDefault();
@@ -54,24 +85,56 @@
     if (working || !activeForm) return;
 
     error = "";
-    working = true;
+    notice = "";
     const data = formToObject(e.currentTarget);
 
-    try {
-      await login(activeForm.url, data);
+    if (mode === "register") {
+      const problem = validateRegister(data);
+      if (problem) {
+        error = problem;
+        return;
+      }
+      delete data["password_confirm"];
+    }
 
-      if (!isResponseTypeCode()) {
-        window.location.assign(getRedirectPath());
+    working = true;
+
+    try {
+      if (mode === "login") {
+        await login(activeForm.url, data);
+
+        if (!isResponseTypeCode()) {
+          window.location.assign(getRedirectPath());
+          return;
+        }
+        window.location.replace(window.location.href);
         return;
       }
 
-      window.location.replace(window.location.href);
+      if (!activeForm.register) return;
+      const result = await register(activeForm.register.url, data);
+
+      if (result.auto_login) {
+        if (!isResponseTypeCode()) {
+          window.location.assign(result.redirect_path || getRedirectPath());
+          return;
+        }
+        window.location.replace(window.location.href);
+        return;
+      }
+
+      notice = "Account created. Please sign in.";
+      e.currentTarget.reset();
+      mode = "login";
     } catch (reason: unknown) {
       if (reason instanceof LoginError) {
-        error =
-          reason.status === 401
-            ? "Invalid username or password"
-            : reason.message;
+        if (reason.status === 401) {
+          error = "Invalid username or password";
+        } else if (reason.status === 409) {
+          error = reason.message || "Username already taken";
+        } else {
+          error = reason.message;
+        }
       } else if (reason instanceof Error) {
         error = reason.message;
       } else {
@@ -123,10 +186,26 @@
     (async () => {
       await fetchInfo();
 
+      // Apply server-provided theme overrides + optional custom stylesheet
+      // before revealing the card to minimize FOUC.
+      if (authInfo.theme) applyThemeVars(authInfo.theme);
+      if (authInfo.custom_css_url) appendCustomStylesheet(authInfo.custom_css_url);
+
       const title = new URLSearchParams(window.location.search).get("title");
       if (title) authInfo.title = title;
 
       document.title = authInfo.title;
+
+      if (authInfo.signup_first) {
+        queueMicrotask(() => {
+          const first = formStrategies.find((s) => !!s.register);
+          if (first) {
+            selectedFormStrategy = first.name;
+            mode = "register";
+          }
+        });
+      }
+
       mounted = true;
     })();
   });
@@ -134,9 +213,7 @@
 
 <div class="page">
   <div class="container">
-    <!-- Card -->
     <div class="card">
-      <!-- Card header -->
       <div class="card-header">
         <div class="card-header-left">
           {#if authInfo.icon}
@@ -148,8 +225,10 @@
             />
           {/if}
           <div>
-            <h1 class="title" class:invisible={!mounted}>{authInfo.title}</h1>
-            {#if authInfo.subtitle}
+            <h1 class="title" class:invisible={!mounted}>
+              {mode === "register" ? "Create account" : authInfo.title}
+            </h1>
+            {#if authInfo.subtitle && mode === "login"}
               <p class="subtitle" class:invisible={!mounted}>
                 {authInfo.subtitle}
               </p>
@@ -174,7 +253,6 @@
           </button>
         </div>
       </div>
-      <!-- Form strategies -->
       {#if formStrategies.length}
         {#if formStrategies.length > 1}
           <div class="strategy-selector">
@@ -186,6 +264,8 @@
                 onclick={() => {
                   selectedFormStrategy = s.name;
                   error = "";
+                  notice = "";
+                  if (mode === "register" && !s.register) mode = "login";
                 }}
               >
                 {s.label}
@@ -195,8 +275,8 @@
         {/if}
 
         {#if activeForm}
-          <form onsubmit={signin}>
-            {#each activeForm.fields ?? [] as field (field.name)}
+          <form onsubmit={submit}>
+            {#each visibleFields as field (field.name)}
               <div class="field">
                 <label for={field.name}>{field.label}</label>
                 <div class="input-wrapper">
@@ -210,9 +290,11 @@
                       : field.type}
                     required={field.required}
                     placeholder={field.placeholder ?? ""}
-                    autocomplete={field.type === "password"
-                      ? "current-password"
-                      : field.name}
+                    autocomplete={(field.type === "password"
+                      ? mode === "register"
+                        ? "new-password"
+                        : "current-password"
+                      : field.name) as any}
                   />
                   {#if field.type === "password"}
                     <button
@@ -238,14 +320,29 @@
               {#if working}
                 <Loader2 size={16} class="spinner" />
               {/if}
-              Sign in
+              {mode === "register" ? "Create account" : "Sign in"}
             </button>
           </form>
+
+          {#if signupAvailableForActive || (mode === "register" && anySignupAvailable)}
+            <div class="mode-toggle">
+              {#if mode === "login"}
+                <span>Don't have an account?</span>
+                <button type="button" class="link" onclick={() => switchMode("register")}>
+                  Sign up
+                </button>
+              {:else}
+                <span>Already have an account?</span>
+                <button type="button" class="link" onclick={() => switchMode("login")}>
+                  Sign in
+                </button>
+              {/if}
+            </div>
+          {/if}
         {/if}
       {/if}
 
-      <!-- OAuth strategies -->
-      {#if redirectStrategies.length}
+      {#if redirectStrategies.length && mode === "login"}
         {#if formStrategies.length}
           <div class="divider">
             <span>or</span>
@@ -265,13 +362,17 @@
         </div>
       {/if}
 
-      <!-- Error -->
+      {#if notice}
+        <div class="notice-banner">
+          <span>{notice}</span>
+        </div>
+      {/if}
+
       {#if error}
         <div class="error-banner">
           <span>{error}</span>
         </div>
       {/if}
-
     </div>
   </div>
 </div>
@@ -319,14 +420,14 @@
   .title {
     font-size: 22px;
     font-weight: 700;
-    color: var(--text-primary);
+    color: var(--auth-text-primary);
     margin: 0 0 4px;
     transition: color 0.2s;
   }
 
   .subtitle {
     font-size: 14px;
-    color: var(--text-muted);
+    color: var(--auth-text-muted);
     margin: 0;
     transition: color 0.2s;
   }
@@ -335,10 +436,10 @@
     flex-shrink: 0;
     width: 32px;
     height: 32px;
-    border-radius: 6px;
-    border: 1px solid var(--card-border);
-    background: var(--toggle-bg);
-    color: var(--toggle-text);
+    border-radius: var(--auth-radius-sm);
+    border: 1px solid var(--auth-card-border);
+    background: var(--auth-toggle-bg);
+    color: var(--auth-toggle-text);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -347,7 +448,7 @@
     margin-top: 2px;
 
     &:hover {
-      background: var(--toggle-hover);
+      background: var(--auth-toggle-hover);
     }
   }
 
@@ -357,20 +458,19 @@
 
   .card {
     width: 100%;
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: 12px;
+    background: var(--auth-card-bg);
+    border: 1px solid var(--auth-card-border);
+    border-radius: var(--auth-radius-lg);
     padding: 28px;
-    box-shadow: var(--card-shadow);
+    box-shadow: var(--auth-card-shadow);
     transition: all 0.2s;
   }
 
-  /* Strategy tabs */
   .strategy-selector {
     display: flex;
     gap: 4px;
-    background: var(--bg);
-    border-radius: 8px;
+    background: var(--auth-bg);
+    border-radius: var(--auth-radius);
     padding: 3px;
     margin-bottom: 20px;
   }
@@ -379,26 +479,25 @@
     flex: 1;
     padding: 7px 12px;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--auth-radius-sm);
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.15s;
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--auth-text-secondary);
 
     &.active {
-      background: var(--card-bg);
-      color: var(--text-primary);
+      background: var(--auth-card-bg);
+      color: var(--auth-text-primary);
       box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
     }
 
     &:hover:not(.active) {
-      color: var(--text-primary);
+      color: var(--auth-text-primary);
     }
   }
 
-  /* Form fields */
   .field {
     margin-bottom: 16px;
   }
@@ -407,7 +506,7 @@
     display: block;
     font-size: 13px;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--auth-text-secondary);
     margin-bottom: 6px;
     transition: color 0.2s;
   }
@@ -419,23 +518,23 @@
   .input-wrapper input {
     width: 100%;
     padding: 10px 12px;
-    border: 1px solid var(--input-border);
-    border-radius: 8px;
+    border: 1px solid var(--auth-input-border);
+    border-radius: var(--auth-radius);
     font-size: 14px;
     font-family: inherit;
-    background: var(--input-bg);
-    color: var(--text-primary);
+    background: var(--auth-input-bg);
+    color: var(--auth-text-primary);
     outline: none;
     transition: all 0.15s;
     box-sizing: border-box;
 
     &::placeholder {
-      color: var(--text-muted);
+      color: var(--auth-text-muted);
     }
 
     &:focus {
-      border-color: var(--input-focus-border);
-      box-shadow: 0 0 0 3px var(--input-focus-ring);
+      border-color: var(--auth-input-focus-border);
+      box-shadow: 0 0 0 3px var(--auth-input-focus-ring);
     }
   }
 
@@ -446,7 +545,7 @@
     transform: translateY(-50%);
     background: none;
     border: none;
-    color: var(--text-muted);
+    color: var(--auth-text-muted);
     cursor: pointer;
     padding: 2px;
     display: flex;
@@ -455,21 +554,20 @@
     transition: color 0.15s;
 
     &:hover {
-      color: var(--text-secondary);
+      color: var(--auth-text-secondary);
     }
   }
 
-  /* Primary button */
   .btn-primary {
     width: 100%;
     padding: 10px 16px;
     border: none;
-    border-radius: 8px;
+    border-radius: var(--auth-radius);
     font-size: 14px;
     font-weight: 600;
     font-family: inherit;
-    background: var(--btn-bg);
-    color: var(--btn-text);
+    background: var(--auth-btn-bg);
+    color: var(--auth-btn-text);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -479,7 +577,7 @@
     margin-top: 4px;
 
     &:hover:not(:disabled) {
-      background: var(--btn-bg-hover);
+      background: var(--auth-btn-bg-hover);
     }
 
     &:disabled {
@@ -498,7 +596,6 @@
     }
   }
 
-  /* Divider */
   .divider {
     display: flex;
     align-items: center;
@@ -510,17 +607,16 @@
       content: "";
       flex: 1;
       height: 1px;
-      background: var(--divider);
+      background: var(--auth-divider);
     }
 
     span {
       font-size: 12px;
-      color: var(--text-muted);
+      color: var(--auth-text-muted);
       text-transform: lowercase;
     }
   }
 
-  /* OAuth buttons */
   .oauth-buttons {
     display: flex;
     flex-direction: column;
@@ -530,19 +626,19 @@
   .btn-oauth {
     width: 100%;
     padding: 10px 16px;
-    border: 1px solid var(--oauth-border);
-    border-radius: 8px;
+    border: 1px solid var(--auth-oauth-border);
+    border-radius: var(--auth-radius);
     font-size: 14px;
     font-weight: 500;
     font-family: inherit;
-    background: var(--oauth-bg);
-    color: var(--oauth-text);
+    background: var(--auth-oauth-bg);
+    color: var(--auth-oauth-text);
     cursor: pointer;
     transition: all 0.15s;
 
     &:hover {
-      background: var(--oauth-hover);
-      border-color: var(--input-focus-border);
+      background: var(--auth-oauth-hover);
+      border-color: var(--auth-input-focus-border);
     }
   }
 
@@ -555,20 +651,52 @@
 
   .version {
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--auth-text-muted);
     transition: color 0.2s;
     white-space: nowrap;
   }
 
-  /* Error banner */
+  .mode-toggle {
+    text-align: center;
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--auth-text-muted);
+  }
+
+  .link {
+    background: none;
+    border: none;
+    padding: 0 0 0 4px;
+    color: var(--auth-btn-bg);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+
+    &:hover {
+      color: var(--auth-btn-bg-hover);
+    }
+  }
+
+  .notice-banner {
+    margin-top: 16px;
+    padding: 10px 14px;
+    background: var(--auth-notice-bg);
+    border-left: 3px solid var(--auth-notice-border);
+    border-radius: var(--auth-radius-sm);
+    font-size: 13px;
+    color: var(--auth-notice-text);
+    word-break: break-word;
+    transition: all 0.2s;
+  }
+
   .error-banner {
     margin-top: 16px;
     padding: 10px 14px;
-    background: var(--error-bg);
-    border-left: 3px solid var(--error-border);
-    border-radius: 6px;
+    background: var(--auth-error-bg);
+    border-left: 3px solid var(--auth-error-border);
+    border-radius: var(--auth-radius-sm);
     font-size: 13px;
-    color: var(--error-text);
+    color: var(--auth-error-text);
     word-break: break-word;
     transition: all 0.2s;
   }

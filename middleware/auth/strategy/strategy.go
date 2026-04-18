@@ -59,13 +59,22 @@ const (
 // Descriptor is the UI-facing summary of a strategy. Returned from /auth/info
 // so the login page can render the right widget per strategy.
 type Descriptor struct {
-	Name     string  `json:"name"`
-	Kind     string  `json:"kind"`            // "oauth2" | "password" | "custom"
-	Label    string  `json:"label"`           // human-readable label
-	LoginURL string  `json:"url"`             // where the UI navigates/POSTs
-	Fields   []Field `json:"fields,omitempty"` // for password/custom forms
-	Priority int     `json:"-"`               // sort order, lower = earlier
-	Hidden   bool    `json:"-"`               // hide from /auth/info
+	Name     string        `json:"name"`
+	Kind     string        `json:"kind"`               // "oauth2" | "password" | "custom"
+	Label    string        `json:"label"`              // human-readable label
+	LoginURL string        `json:"url"`                // where the UI navigates/POSTs
+	Fields   []Field       `json:"fields,omitempty"`   // for password/custom forms
+	Register *RegisterInfo `json:"register,omitempty"` // set when the strategy supports signup
+	Priority int           `json:"-"`                  // sort order, lower = earlier
+	Hidden   bool          `json:"-"`                  // hide from /auth/info
+}
+
+// RegisterInfo is the UI-facing description of a strategy's signup endpoint.
+// A nil *RegisterInfo in a Descriptor means the strategy does not support
+// registration.
+type RegisterInfo struct {
+	URL    string  `json:"url"`              // POST target for signup
+	Fields []Field `json:"fields,omitempty"` // register-specific inputs
 }
 
 // Field describes one input on a strategy's login form.
@@ -75,6 +84,22 @@ type Field struct {
 	Type        string `json:"type"` // text | password | email
 	Placeholder string `json:"placeholder,omitempty"`
 	Required    bool   `json:"required,omitempty"`
+}
+
+// Registerer is an optional interface implemented by strategies that support
+// self-service account creation. The middleware routes POST
+// {base}/login/register/{name} to Register when a strategy satisfies this
+// interface; strategies that don't (e.g. OAuth2) are skipped.
+//
+// Register mirrors Authenticator.Login semantics:
+//   - (id, OutcomeContinue, nil): auto-login requested; middleware issues a
+//     session using id and writes the standard success response.
+//   - (nil, OutcomePending, nil): strategy already wrote the response (e.g.
+//     "account created, please sign in" when auto-login is disabled).
+//   - (nil, OutcomeFailed, nil): strategy already wrote a 4xx error response.
+//   - (*, *, err): unexpected error; middleware writes a 500.
+type Registerer interface {
+	Register(w http.ResponseWriter, r *http.Request) (*identity.Identity, Outcome, error)
 }
 
 // Registry holds the active strategies keyed by Name(). Safe for concurrent

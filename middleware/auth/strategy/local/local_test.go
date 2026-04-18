@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -132,5 +133,229 @@ func TestDescriptor(t *testing.T) {
 	}
 	if len(d.Fields) != 2 {
 		t.Errorf("expected 2 default fields, got %d", len(d.Fields))
+	}
+	if d.Register != nil {
+		t.Errorf("expected no register info without WithRegistrar, got %+v", d.Register)
+	}
+}
+
+func TestDescriptor_WithRegistrar_IncludesRegisterBlock(t *testing.T) {
+	reg := func(_ context.Context, _ RegisterRequest) (*identity.Identity, error) {
+		return &identity.Identity{Subject: "new"}, nil
+	}
+	s := New("local", aliceVerifier, WithRegistrar(reg))
+	d := s.Descriptor()
+
+	if d.Register == nil {
+		t.Fatal("expected Register info")
+	}
+	if len(d.Register.Fields) != 3 {
+		t.Errorf("expected 3 default register fields, got %d", len(d.Register.Fields))
+	}
+	if d.Register.Fields[2].Name != "password_confirm" {
+		t.Errorf("expected password_confirm as third field, got %q", d.Register.Fields[2].Name)
+	}
+}
+
+func TestRegister_NoRegistrar_Is404(t *testing.T) {
+	s := New("local", aliceVerifier)
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"s3cret!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	_, outcome, _ := s.Register(rec, req)
+	if outcome != strategy.OutcomeFailed {
+		t.Fatalf("expected OutcomeFailed, got %v", outcome)
+	}
+	if rec.Code != 404 {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestRegister_HappyPath_NoAutoLogin(t *testing.T) {
+	called := 0
+	reg := func(_ context.Context, req RegisterRequest) (*identity.Identity, error) {
+		called++
+		if req.Username != "bob" || req.Password != "s3cret!" {
+			t.Fatalf("unexpected register req: %+v", req)
+		}
+
+		return &identity.Identity{Subject: "bob"}, nil
+	}
+
+	s := New("local", aliceVerifier, WithRegistrar(reg))
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"s3cret!","password_confirm":"s3cret!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	id, outcome, err := s.Register(rec, req)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if outcome != strategy.OutcomePending {
+		t.Fatalf("expected OutcomePending without auto-login, got %v", outcome)
+	}
+	if id != nil {
+		t.Errorf("expected nil identity (no auto-login), got %+v", id)
+	}
+	if called != 1 {
+		t.Errorf("registrar called %d times, expected 1", called)
+	}
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["registered"] != true {
+		t.Errorf("expected registered=true, got %v", body["registered"])
+	}
+	if body["auto_login"] != false {
+		t.Errorf("expected auto_login=false, got %v", body["auto_login"])
+	}
+}
+
+func TestRegister_HappyPath_AutoLogin(t *testing.T) {
+	reg := func(_ context.Context, _ RegisterRequest) (*identity.Identity, error) {
+		return &identity.Identity{Subject: "bob"}, nil
+	}
+
+	s := New("local", aliceVerifier, WithRegistrar(reg), WithAutoLogin(true))
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"s3cret!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	id, outcome, err := s.Register(rec, req)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if outcome != strategy.OutcomeContinue {
+		t.Fatalf("expected OutcomeContinue with auto-login, got %v", outcome)
+	}
+	if id == nil || id.Subject != "bob" {
+		t.Fatalf("expected bob identity, got %+v", id)
+	}
+	if id.Provider != "local" {
+		t.Errorf("expected provider=local, got %q", id.Provider)
+	}
+}
+
+func TestRegister_UserExists_Is409(t *testing.T) {
+	reg := func(_ context.Context, _ RegisterRequest) (*identity.Identity, error) {
+		return nil, ErrUserExists
+	}
+
+	s := New("local", aliceVerifier, WithRegistrar(reg))
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"s3cret!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	_, outcome, _ := s.Register(rec, req)
+	if outcome != strategy.OutcomeFailed {
+		t.Fatalf("expected OutcomeFailed, got %v", outcome)
+	}
+	if rec.Code != 409 {
+		t.Fatalf("expected 409, got %d", rec.Code)
+	}
+
+	var body map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["error"] != "user_exists" {
+		t.Errorf("expected error=user_exists, got %q", body["error"])
+	}
+}
+
+func TestRegister_InvalidInput_Is400(t *testing.T) {
+	reg := func(_ context.Context, _ RegisterRequest) (*identity.Identity, error) {
+		return nil, fmt.Errorf("password too short: %w", ErrInvalidInput)
+	}
+
+	s := New("local", aliceVerifier, WithRegistrar(reg))
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	_, _, _ = s.Register(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+
+	var body map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["error"] != "invalid_input" {
+		t.Errorf("expected error=invalid_input, got %q", body["error"])
+	}
+}
+
+func TestRegister_MissingFields_Is400(t *testing.T) {
+	reg := func(_ context.Context, _ RegisterRequest) (*identity.Identity, error) {
+		t.Fatal("registrar should not be called with missing fields")
+
+		return nil, nil
+	}
+
+	s := New("local", aliceVerifier, WithRegistrar(reg))
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	_, outcome, _ := s.Register(rec, req)
+	if outcome != strategy.OutcomeFailed {
+		t.Fatalf("expected OutcomeFailed, got %v", outcome)
+	}
+	if rec.Code != 400 {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestRegister_ExtrasCollected(t *testing.T) {
+	var got RegisterRequest
+	reg := func(_ context.Context, req RegisterRequest) (*identity.Identity, error) {
+		got = req
+
+		return &identity.Identity{Subject: req.Username}, nil
+	}
+
+	s := New("local", aliceVerifier, WithRegistrar(reg))
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"s3cret!","email":"bob@example.com","password_confirm":"s3cret!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	_, _, _ = s.Register(rec, req)
+	if got.Extras["email"] != "bob@example.com" {
+		t.Errorf("expected extras.email=bob@example.com, got %q", got.Extras["email"])
+	}
+	if _, ok := got.Extras["password_confirm"]; ok {
+		t.Error("password_confirm should be stripped from Extras")
+	}
+}
+
+func TestRegister_GET_Is405(t *testing.T) {
+	s := New("local", aliceVerifier, WithRegistrar(func(_ context.Context, _ RegisterRequest) (*identity.Identity, error) {
+		return nil, nil
+	}))
+
+	req := httptest.NewRequest("GET", "/auth/login/register/local", nil)
+	rec := httptest.NewRecorder()
+
+	_, _, _ = s.Register(rec, req)
+	if rec.Code != 405 {
+		t.Fatalf("expected 405, got %d", rec.Code)
 	}
 }
