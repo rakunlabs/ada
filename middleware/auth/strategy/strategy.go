@@ -148,6 +148,66 @@ func (r *Registry) Get(name string) Authenticator {
 	return r.items[name]
 }
 
+// Remove deletes the strategy with the given name. Returns true if a strategy
+// was removed. Safe to call concurrently with Get/Descriptors — in-flight
+// lookups observe either the before- or after-state, never partial.
+func (r *Registry) Remove(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.items[name]; !exists {
+		return false
+	}
+
+	delete(r.items, name)
+	for i, n := range r.order {
+		if n == name {
+			r.order = append(r.order[:i], r.order[i+1:]...)
+			break
+		}
+	}
+
+	return true
+}
+
+// Replace atomically swaps the entire strategy set. Any strategies not in the
+// new list are removed; new ones are added in the given order. Useful for
+// settings-driven hot reload where strategies are rebuilt as a group.
+//
+// Nil entries or entries with empty Name() are skipped. Duplicate names within
+// the input keep the first occurrence.
+func (r *Registry) Replace(strategies ...Authenticator) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.items = make(map[string]Authenticator, len(strategies))
+	r.order = r.order[:0]
+
+	for _, s := range strategies {
+		if s == nil {
+			continue
+		}
+		name := s.Name()
+		if name == "" {
+			continue
+		}
+		if _, dup := r.items[name]; dup {
+			continue
+		}
+		r.items[name] = s
+		r.order = append(r.order, name)
+	}
+}
+
+// Clear removes every strategy. Equivalent to Replace() with no arguments.
+func (r *Registry) Clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.items = make(map[string]Authenticator)
+	r.order = r.order[:0]
+}
+
 // List returns all strategies in registration order.
 func (r *Registry) List() []Authenticator {
 	r.mu.RLock()

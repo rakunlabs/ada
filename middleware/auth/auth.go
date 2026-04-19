@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync/atomic"
 
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/issuer"
@@ -73,6 +74,11 @@ type UIConfig struct {
 	// flows — flip it back to false once users exist. Ignored when no
 	// registered strategy supports signup.
 	SignupFirst bool `cfg:"signup_first"`
+	// SignupFirstFn, when set, is consulted per request in place of the
+	// static SignupFirst field. Useful when the condition is dynamic (e.g.
+	// depends on a database query such as "user count == 0"). The function
+	// must be safe for concurrent invocation.
+	SignupFirstFn func() bool `cfg:"-" json:"-"`
 
 	// Theme maps CSS custom properties to values. Keys may be bare
 	// ("primary", "card-bg") or fully qualified ("--auth-primary"); the UI
@@ -121,6 +127,10 @@ func (sc SuccessCookie) withDefaults() SuccessCookie {
 type Auth struct {
 	cfg Config
 
+	// liveUI is the atomically-swappable UI config, read by handleInfo per
+	// request. Initialized from cfg.UI in New and replaced by SetUI.
+	liveUI atomic.Pointer[UIConfig]
+
 	registry *strategy.Registry
 	session  *session.Session
 	issuer   issuer.Issuer
@@ -155,6 +165,9 @@ func New(cfg Config) *Auth {
 		cfg:      cfg,
 		registry: strategy.NewRegistry(),
 	}
+
+	uiCopy := cfg.UI
+	a.liveUI.Store(&uiCopy)
 
 	a.resolvedPaths = paths{
 		Root:     cfg.Base,
@@ -303,6 +316,27 @@ func (a *Auth) Session() *session.Session { return a.session }
 // Registry exposes the strategy registry.
 func (a *Auth) Registry() *strategy.Registry { return a.registry }
 
+// SetUI replaces the UI configuration read by handleInfo. The update is
+// atomic: in-flight /login/info requests observe either the old or the new
+// value, never a partial mix. Intended for settings-driven hot reload.
+//
+// Note: ExternalFolder is excluded from the swap — it affects route mounting
+// and is fixed at Init time.
+func (a *Auth) SetUI(cfg UIConfig) {
+	// Preserve ExternalFolder from the original cfg — it drives mounting.
+	cfg.ExternalFolder = a.cfg.UI.ExternalFolder
+	uiCopy := cfg
+	a.liveUI.Store(&uiCopy)
+}
+
+// currentUI returns the live UI snapshot. Always non-nil after New.
+func (a *Auth) currentUI() UIConfig {
+	if p := a.liveUI.Load(); p != nil {
+		return *p
+	}
+	return a.cfg.UI
+}
+
 // /////////////////////////////////////////////////////////////////////////////
 // Handlers
 // /////////////////////////////////////////////////////////////////////////////
@@ -320,14 +354,19 @@ type infoResponse struct {
 }
 
 func (a *Auth) handleInfo(w http.ResponseWriter, _ *http.Request) {
+	ui := a.currentUI()
+	signupFirst := ui.SignupFirst
+	if ui.SignupFirstFn != nil {
+		signupFirst = ui.SignupFirstFn()
+	}
 	resp := infoResponse{
-		Title:        a.cfg.UI.Title,
-		Subtitle:     a.cfg.UI.Subtitle,
-		Icon:         toIconSrc(a.cfg.UI.Icon),
-		Version:      a.cfg.UI.Version,
-		SignupFirst:  a.cfg.UI.SignupFirst,
-		Theme:        a.cfg.UI.Theme,
-		CustomCSSURL: a.cfg.UI.CustomCSSURL,
+		Title:        ui.Title,
+		Subtitle:     ui.Subtitle,
+		Icon:         toIconSrc(ui.Icon),
+		Version:      ui.Version,
+		SignupFirst:  signupFirst,
+		Theme:        ui.Theme,
+		CustomCSSURL: ui.CustomCSSURL,
 		Strategies:   a.registry.Descriptors(),
 	}
 	if resp.Title == "" {
