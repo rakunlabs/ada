@@ -366,3 +366,81 @@ func TestInfo_IncludesRegisterAndSignupFirst(t *testing.T) {
 		t.Errorf("expected 3 default register fields, got %d", len(info.Strategies[0].Register.Fields))
 	}
 }
+
+// TestBasePath_NonRootMountsUnderPrefix verifies that a non-root Base such as
+// "/api/v1/" produces correctly-separated route paths (e.g. /api/v1/login/info)
+// rather than the concatenated form /api/v1login/info. It also exercises
+// inputs missing a trailing slash ("/api/v1") and a leading slash ("api/v1/")
+// to confirm the normalizer is robust.
+func TestBasePath_NonRootMountsUnderPrefix(t *testing.T) {
+	cases := []struct {
+		name string
+		base string
+	}{
+		{"with trailing slash", "/api/v1/"},
+		{"no trailing slash", "/api/v1"},
+		{"no leading slash", "api/v1/"},
+		{"bare", "api/v1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := auth.New(auth.Config{
+				Base: tc.base,
+				UI:   auth.UIConfig{ExternalFolder: true},
+			})
+			a.Strategy(local.New("local",
+				func(_ context.Context, _, _ string) (*identity.Identity, error) {
+					return nil, local.ErrInvalidCredentials
+				},
+			))
+			if err := a.Init(context.Background()); err != nil {
+				t.Fatalf("init: %v", err)
+			}
+
+			mux := newFakeMux()
+			a.Mount(mux)
+
+			wantRoutes := []string{
+				"GET /api/v1/login/info",
+				"GET /api/v1/login/me",
+				"POST /api/v1/logout",
+			}
+			for _, want := range wantRoutes {
+				found := false
+				for _, r := range mux.routes {
+					if r == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("route %q not registered; got %v", want, mux.routes)
+				}
+			}
+
+			// Hit /login/info and confirm the strategy login URL is also
+			// correctly rooted under the base.
+			req := httptest.NewRequest("GET", "/api/v1/login/info", nil)
+			rec := httptest.NewRecorder()
+			mux.mu.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /api/v1/login/info: got %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+			}
+			var info struct {
+				Strategies []struct {
+					LoginURL string `json:"url"`
+				} `json:"strategies"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+				t.Fatalf("decode info: %v", err)
+			}
+			if len(info.Strategies) != 1 {
+				t.Fatalf("expected 1 strategy, got %d", len(info.Strategies))
+			}
+			if got, want := info.Strategies[0].LoginURL, "/api/v1/login/pass/local"; got != want {
+				t.Errorf("login url: got %q, want %q", got, want)
+			}
+		})
+	}
+}

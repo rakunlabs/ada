@@ -159,7 +159,14 @@ type paths struct {
 func New(cfg Config) *Auth {
 	cfg.SuccessCookie = cfg.SuccessCookie.withDefaults()
 
+	// Normalize Base to always start and end with "/". The path builders
+	// below concatenate as `cfg.Base + "login/..."` and expect Base to
+	// carry a trailing slash; without this, a non-root Base like
+	// "/api/v1/" would yield "/api/v1login/info".
 	cfg.Base = "/" + strings.Trim(cfg.Base, "/")
+	if !strings.HasSuffix(cfg.Base, "/") {
+		cfg.Base += "/"
+	}
 
 	a := &Auth{
 		cfg:      cfg,
