@@ -1,7 +1,7 @@
 // Package apikey implements a strategy.Authenticator that validates API keys
-// from request headers. The strategy reads a token from the Authorization
-// (Bearer) header or a configurable custom header, calls a user-supplied
-// Validator, and returns the resulting Identity to the auth middleware.
+// from request headers. The strategy reads a token from one of a configured
+// list of headers, calls a user-supplied Validator, and returns the resulting
+// Identity to the auth middleware.
 package apikey
 
 import (
@@ -24,14 +24,19 @@ var ErrInvalidKey = errors.New("invalid_key")
 // a 401 response. Returning any other error produces a 500.
 type Validator func(ctx context.Context, key string) (*identity.Identity, error)
 
+// DefaultHeaders is the header lookup order used when the caller does not
+// configure its own. Authorization is checked first (Bearer-prefix-stripped
+// when enabled), then X-API-Key as a fallback.
+var DefaultHeaders = []string{"Authorization", "X-API-Key"}
+
 // Strategy implements strategy.Authenticator for API-key-based authentication.
 type Strategy struct {
-	name        string
-	label       string
-	validate    Validator
-	priority    int
-	hidden      bool
-	headerName  string
+	name         string
+	label        string
+	validate     Validator
+	priority     int
+	hidden       bool
+	headers      []string
 	bearerPrefix bool
 }
 
@@ -53,11 +58,47 @@ func WithHidden() Option {
 	return func(s *Strategy) { s.hidden = true }
 }
 
+// WithHeaders sets the exact list of headers the strategy reads, in priority
+// order. The first non-empty header wins. Calling this REPLACES the default
+// Authorization / X-API-Key fallback — callers that want strict single-header
+// behavior should use this. An empty list restores the default.
+//
+// Example: WithHeaders("Authorization") to accept only `Authorization: Bearer <key>`,
+// rejecting X-API-Key.
+func WithHeaders(headers ...string) Option {
+	return func(s *Strategy) {
+		if len(headers) == 0 {
+			s.headers = nil // restore default on next use
+			return
+		}
+		s.headers = append([]string(nil), headers...)
+	}
+}
+
+// WithAdditionalHeader appends a header to the lookup list, preserving the
+// defaults. Useful when you want "Authorization, X-API-Key, AND my custom
+// header" without having to restate the defaults.
+func WithAdditionalHeader(name string) Option {
+	return func(s *Strategy) {
+		if name == "" {
+			return
+		}
+		if len(s.headers) == 0 {
+			// Clone defaults so WithHeaders callers aren't surprised by
+			// shared-slice mutation.
+			s.headers = append([]string(nil), DefaultHeaders...)
+		}
+		s.headers = append(s.headers, name)
+	}
+}
+
 // WithHeaderName overrides the header that is checked for the API key.
-// The default behavior checks Authorization first, then X-API-Key. Setting a
-// custom header name causes the strategy to read only that header.
+// Equivalent to WithHeaders(name) — kept for backward compatibility. Setting
+// a single header disables the default Authorization / X-API-Key fallback.
+//
+// Deprecated: prefer WithHeaders (single or multiple headers) for clarity.
 func WithHeaderName(name string) Option {
-	return func(s *Strategy) { s.headerName = name }
+	return WithHeaders(name)
 }
 
 // WithBearerPrefix controls whether the strategy strips the "Bearer " prefix
@@ -90,10 +131,10 @@ func (s *Strategy) Name() string { return s.name }
 // Descriptor returns the UI-facing description of this strategy.
 func (s *Strategy) Descriptor() strategy.Descriptor {
 	return strategy.Descriptor{
-		Name:     s.name,
-		Kind:     "apikey",
-		Label:    s.label,
-		LoginURL: "/auth/login/" + s.name,
+		Name:  s.name,
+		Kind:  "apikey",
+		Label: s.label,
+		// LoginURL is resolved by the auth middleware from cfg.Base.
 		Priority: s.priority,
 		Hidden:   s.hidden,
 	}
@@ -143,19 +184,25 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 // Logout is a no-op for the API key strategy; keys are stateless.
 func (s *Strategy) Logout(_ context.Context, _ *identity.Identity) error { return nil }
 
-// extractKey reads the API key from the configured header(s).
+// effectiveHeaders returns the header lookup order, applying the default
+// when nothing was configured.
+func (s *Strategy) effectiveHeaders() []string {
+	if len(s.headers) == 0 {
+		return DefaultHeaders
+	}
+	return s.headers
+}
+
+// extractKey reads the API key from the configured headers in order. The
+// first non-empty header wins; its value is returned with the Bearer prefix
+// stripped when bearerPrefix is enabled.
 func (s *Strategy) extractKey(r *http.Request) string {
-	// Custom header takes precedence when explicitly set.
-	if s.headerName != "" {
-		return s.stripPrefix(r.Header.Get(s.headerName))
+	for _, h := range s.effectiveHeaders() {
+		if v := r.Header.Get(h); v != "" {
+			return s.stripPrefix(v)
+		}
 	}
-
-	// Default: try Authorization first, then X-API-Key.
-	if v := r.Header.Get("Authorization"); v != "" {
-		return s.stripPrefix(v)
-	}
-
-	return r.Header.Get("X-API-Key")
+	return ""
 }
 
 // stripPrefix removes the "Bearer " prefix when bearerPrefix is enabled.

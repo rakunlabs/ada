@@ -229,7 +229,7 @@ func TestRegister_HappyPath_AutoLogin(t *testing.T) {
 	s := New("local", aliceVerifier, WithRegistrar(reg), WithAutoLogin(true))
 
 	req := httptest.NewRequest("POST", "/auth/login/register/local",
-		strings.NewReader(`{"username":"bob","password":"s3cret!"}`))
+		strings.NewReader(`{"username":"bob","password":"s3cret!","password_confirm":"s3cret!"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -256,7 +256,7 @@ func TestRegister_UserExists_Is409(t *testing.T) {
 	s := New("local", aliceVerifier, WithRegistrar(reg))
 
 	req := httptest.NewRequest("POST", "/auth/login/register/local",
-		strings.NewReader(`{"username":"bob","password":"s3cret!"}`))
+		strings.NewReader(`{"username":"bob","password":"s3cret!","password_confirm":"s3cret!"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -283,7 +283,7 @@ func TestRegister_InvalidInput_Is400(t *testing.T) {
 	s := New("local", aliceVerifier, WithRegistrar(reg))
 
 	req := httptest.NewRequest("POST", "/auth/login/register/local",
-		strings.NewReader(`{"username":"bob","password":"x"}`))
+		strings.NewReader(`{"username":"bob","password":"x","password_confirm":"x"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -330,7 +330,16 @@ func TestRegister_ExtrasCollected(t *testing.T) {
 		return &identity.Identity{Subject: req.Username}, nil
 	}
 
-	s := New("local", aliceVerifier, WithRegistrar(reg))
+	// Declare `email` as a register field; undeclared keys are dropped.
+	s := New("local", aliceVerifier,
+		WithRegistrar(reg),
+		WithRegisterFields(
+			strategy.Field{Name: "username", Label: "Username", Type: "text", Required: true},
+			strategy.Field{Name: "password", Label: "Password", Type: "password", Required: true},
+			strategy.Field{Name: "password_confirm", Label: "Confirm password", Type: "password", Required: true},
+			strategy.Field{Name: "email", Label: "Email", Type: "email", Required: false},
+		),
+	)
 
 	req := httptest.NewRequest("POST", "/auth/login/register/local",
 		strings.NewReader(`{"username":"bob","password":"s3cret!","email":"bob@example.com","password_confirm":"s3cret!"}`))
@@ -343,6 +352,109 @@ func TestRegister_ExtrasCollected(t *testing.T) {
 	}
 	if _, ok := got.Extras["password_confirm"]; ok {
 		t.Error("password_confirm should be stripped from Extras")
+	}
+}
+
+// TestRegister_PasswordMismatch_Is400 verifies that the backend rejects a
+// signup where password and password_confirm differ, yielding 400 with
+// error=password_mismatch. This is defense-in-depth: the UI should also
+// validate, but a UI bug or malicious client must never create an account
+// whose password the user can't reproduce.
+func TestRegister_PasswordMismatch_Is400(t *testing.T) {
+	called := false
+	reg := func(_ context.Context, _ RegisterRequest) (*identity.Identity, error) {
+		called = true
+
+		return &identity.Identity{Subject: "bob"}, nil
+	}
+
+	s := New("local", aliceVerifier, WithRegistrar(reg))
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"s3cret!","password_confirm":"typo"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	_, outcome, _ := s.Register(rec, req)
+	if outcome != strategy.OutcomeFailed {
+		t.Fatalf("expected OutcomeFailed, got %v", outcome)
+	}
+	if rec.Code != 400 {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if called {
+		t.Error("registrar must not be called when passwords mismatch")
+	}
+
+	var body map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["error"] != "password_mismatch" {
+		t.Errorf("expected error=password_mismatch, got %q", body["error"])
+	}
+}
+
+// TestRegister_MissingPasswordConfirm_Is400 verifies that omitting the
+// confirm field (when the strategy declares it) is also an error, not a
+// silent pass-through.
+func TestRegister_MissingPasswordConfirm_Is400(t *testing.T) {
+	reg := func(_ context.Context, _ RegisterRequest) (*identity.Identity, error) {
+		t.Fatal("registrar must not be called")
+
+		return nil, nil
+	}
+
+	s := New("local", aliceVerifier, WithRegistrar(reg))
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"s3cret!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	_, outcome, _ := s.Register(rec, req)
+	if outcome != strategy.OutcomeFailed {
+		t.Fatalf("expected OutcomeFailed, got %v", outcome)
+	}
+	if rec.Code != 400 {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+
+	var body map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["error"] != "password_mismatch" {
+		t.Errorf("expected error=password_mismatch, got %q", body["error"])
+	}
+}
+
+// TestRegister_WithoutConfirmField_NoConfirmRequired verifies that machine
+// clients that override register fields to omit password_confirm are not
+// forced to send it. This preserves backward-compat for programmatic signup.
+func TestRegister_WithoutConfirmField_NoConfirmRequired(t *testing.T) {
+	var got RegisterRequest
+	reg := func(_ context.Context, req RegisterRequest) (*identity.Identity, error) {
+		got = req
+
+		return &identity.Identity{Subject: req.Username}, nil
+	}
+
+	s := New("local", aliceVerifier,
+		WithRegistrar(reg),
+		WithRegisterFields(
+			strategy.Field{Name: "username", Label: "Username", Type: "text", Required: true},
+			strategy.Field{Name: "password", Label: "Password", Type: "password", Required: true},
+		),
+	)
+
+	req := httptest.NewRequest("POST", "/auth/login/register/local",
+		strings.NewReader(`{"username":"bob","password":"s3cret!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	_, outcome, _ := s.Register(rec, req)
+	if outcome == strategy.OutcomeFailed {
+		t.Fatalf("expected success, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got.Username != "bob" || got.Password != "s3cret!" {
+		t.Errorf("unexpected registrar call: %+v", got)
 	}
 }
 

@@ -83,10 +83,10 @@ func (s *Strategy) Name() string { return s.name }
 // Descriptor returns the UI-facing description of this strategy.
 func (s *Strategy) Descriptor() strategy.Descriptor {
 	return strategy.Descriptor{
-		Name:     s.name,
-		Kind:     "basic",
-		Label:    s.label,
-		LoginURL: "/auth/login/" + s.name,
+		Name:  s.name,
+		Kind:  "basic",
+		Label: s.label,
+		// LoginURL is resolved by the auth middleware from cfg.Base.
 		Priority: s.priority,
 		Hidden:   s.hidden,
 	}

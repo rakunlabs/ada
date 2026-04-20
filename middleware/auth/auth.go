@@ -251,7 +251,9 @@ func (a *Auth) Init(_ context.Context) error {
 		CookieName:      a.cfg.CookieName,
 		CookieNameHosts: a.cfg.CookieNameHosts,
 		Cookie:          a.cfg.Cookie,
-		LoginPath:       a.resolvedPaths.Root,
+		// Unauthenticated callers are redirected to the login UI, not the
+		// bare base prefix.
+		LoginPath: a.resolvedPaths.UI,
 	}
 
 	if err := a.session.Init(); err != nil {
@@ -290,6 +292,16 @@ func (a *Auth) Mount(mux Mux) {
 	}
 
 	p := a.resolvedPaths
+
+	// Propagate the resolved callback base to every strategy that needs it
+	// (e.g. OAuth2 to construct redirect_uri). Strategies with an explicit
+	// override keep their value; see strategy.CallbackBinder for the contract.
+	callbackBase := strings.TrimSuffix(a.cfg.Base, "/") + "/login/callback"
+	for _, s := range a.registry.List() {
+		if b, ok := s.(strategy.CallbackBinder); ok {
+			b.SetCallbackBasePath(callbackBase)
+		}
+	}
 
 	mux.GET(p.Info, a.handleInfo)
 	mux.GET(p.Me, a.handleMe)

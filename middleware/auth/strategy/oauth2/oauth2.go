@@ -206,13 +206,28 @@ func New(name string, cfg Config, opts Options) *Strategy {
 // Name returns the strategy's URL key.
 func (s *Strategy) Name() string { return s.name }
 
+// SetCallbackBasePath implements strategy.CallbackBinder. It lets the auth
+// middleware push its resolved callback base (typically
+// "{cfg.Base}login/callback") so the OAuth2 strategy builds redirect_uri
+// values that match the mounted routes. An explicit Options.CallbackBasePath
+// set by the caller always wins.
+//
+// This is expected to be called once at Mount time, before any requests are
+// served; no synchronization is used.
+func (s *Strategy) SetCallbackBasePath(p string) {
+	if s.opts.CallbackBasePath != "" {
+		return
+	}
+	s.opts.CallbackBasePath = p
+}
+
 // Descriptor returns the UI-facing description.
 func (s *Strategy) Descriptor() strategy.Descriptor {
 	d := strategy.Descriptor{
-		Name:     s.name,
-		Kind:     "oauth2",
-		Label:    s.opts.Label,
-		LoginURL: "/auth/login/" + s.name,
+		Name:  s.name,
+		Kind:  "oauth2",
+		Label: s.opts.Label,
+		// LoginURL is resolved by the auth middleware from cfg.Base.
 		Priority: s.opts.Priority,
 		Hidden:   s.opts.Hidden,
 	}

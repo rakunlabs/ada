@@ -31,6 +31,18 @@ var ErrUserExists = errors.New("user_exists")
 // error's message as the user-facing detail.
 var ErrInvalidInput = errors.New("invalid_input")
 
+// ErrPasswordMismatch is returned when password and password_confirm do not
+// match during signup. It surfaces as 400 password_mismatch. The check runs
+// before the Registrar is invoked — Registrar never sees the mismatched
+// request.
+var ErrPasswordMismatch = errors.New("password_mismatch")
+
+// confirmFieldName is the reserved register-field name used for the
+// client-side confirmation check. When present in the request body, it is
+// compared against the password field and stripped before the request reaches
+// the Registrar.
+const confirmFieldName = "password_confirm"
+
 // Verifier is the user-supplied credential check. Returning ErrInvalidCredentials
 // produces a 401 response. Returning any other error produces a 500.
 type Verifier func(ctx context.Context, username, password string) (*identity.Identity, error)
@@ -114,11 +126,13 @@ func WithRegistrar(fn Registrar) Option {
 }
 
 // WithRegisterFields overrides the default signup form fields. Defaults to
-// username, password, and password_confirm (client-side confirmation).
+// username, password, and password_confirm (the latter enforces a
+// confirmation match server-side).
 // Fields named the same as the login username/password fields are parsed as
 // credentials; anything else is collected into RegisterRequest.Extras.
-// The "password_confirm" field, if present, is consumed by the UI and never
-// sent to the server.
+// The "password_confirm" field, if present in the request, is compared to
+// the password field and a mismatch yields 400 password_mismatch; the value
+// is never forwarded to the Registrar.
 func WithRegisterFields(fields ...strategy.Field) Option {
 	return func(s *Strategy) { s.registerFields = fields }
 }
@@ -157,10 +171,11 @@ func (s *Strategy) Name() string { return s.name }
 // Descriptor returns the UI-facing description of this strategy.
 func (s *Strategy) Descriptor() strategy.Descriptor {
 	d := strategy.Descriptor{
-		Name:     s.name,
-		Kind:     "password",
-		Label:    s.label,
-		LoginURL: "/auth/login/" + s.name,
+		Name:  s.name,
+		Kind:  "password",
+		Label: s.label,
+		// LoginURL is resolved by the auth middleware from cfg.Base; leave
+		// it empty here so there is a single source of truth.
 		Fields:   s.fields,
 		Priority: s.priority,
 		Hidden:   s.hidden,
@@ -168,7 +183,7 @@ func (s *Strategy) Descriptor() strategy.Descriptor {
 
 	if s.register != nil {
 		d.Register = &strategy.RegisterInfo{
-			URL:    "/auth/login/register/" + s.name,
+			// URL is resolved by the auth middleware from cfg.Base.
 			Fields: s.effectiveRegisterFields(),
 		}
 	}
@@ -186,8 +201,33 @@ func (s *Strategy) effectiveRegisterFields() []strategy.Field {
 	return []strategy.Field{
 		{Name: s.usernameField, Label: "Username", Type: "text", Required: true},
 		{Name: s.passwordField, Label: "Password", Type: "password", Required: true},
-		{Name: "password_confirm", Label: "Confirm password", Type: "password", Required: true},
+		{Name: confirmFieldName, Label: "Confirm password", Type: "password", Required: true},
 	}
+}
+
+// registerFieldNameSet returns the set of register field names (effective,
+// including defaults). Used to decide whether a given payload key is a known
+// register field or should be treated as an extra.
+func (s *Strategy) registerFieldNameSet() map[string]struct{} {
+	fields := s.effectiveRegisterFields()
+	set := make(map[string]struct{}, len(fields))
+	for _, f := range fields {
+		set[f.Name] = struct{}{}
+	}
+	return set
+}
+
+// requiresConfirm reports whether the current register fields include the
+// reserved password_confirm field. Callers who override WithRegisterFields
+// can drop this field to disable the match check (useful for machine
+// clients); callers relying on the default form get the check.
+func (s *Strategy) requiresConfirm() bool {
+	for _, f := range s.effectiveRegisterFields() {
+		if f.Name == confirmFieldName {
+			return true
+		}
+	}
+	return false
 }
 
 // Login parses credentials from the request body, calls the verifier, and
@@ -259,7 +299,12 @@ func (s *Strategy) Register(w http.ResponseWriter, r *http.Request) (*identity.I
 
 	req, err := s.readRegister(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		switch {
+		case errors.Is(err, ErrPasswordMismatch):
+			writeError(w, http.StatusBadRequest, "password_mismatch", "passwords do not match")
+		default:
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		}
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -310,10 +355,14 @@ func (s *Strategy) Register(w http.ResponseWriter, r *http.Request) (*identity.I
 	return nil, strategy.OutcomePending, nil
 }
 
-// readRegister parses the signup body. It returns a populated RegisterRequest
-// with username, password, and any additional register-only fields collected
-// into Extras. The "password_confirm" field is never forwarded to the
-// Registrar — it's a UI-side concern.
+// readRegister parses the signup body and enforces the password_confirm
+// match when the strategy's register fields declare that field.
+//
+// Returns a populated RegisterRequest with username, password, and any
+// additional register-only fields collected into Extras. The
+// "password_confirm" field is never forwarded to the Registrar; when declared
+// in the register fields, a missing or mismatched value yields
+// ErrPasswordMismatch.
 func (s *Strategy) readRegister(r *http.Request) (RegisterRequest, error) {
 	contentType := r.Header.Get("Content-Type")
 
@@ -338,15 +387,36 @@ func (s *Strategy) readRegister(r *http.Request) (RegisterRequest, error) {
 		return RegisterRequest{}, fmt.Errorf("unsupported content type %q", contentType)
 	}
 
+	// Enforce password confirmation when the register form declares it.
+	// This is a defense-in-depth check: the UI should also validate, but
+	// relying on the UI alone would let a typo through to the Registrar
+	// and leave the user with an account they can't log into. Unknown
+	// password means the user can't use their new account at all, so
+	// silently accepting a mismatch is strictly worse than rejecting it.
+	if s.requiresConfirm() {
+		pw := raw[s.passwordField]
+		confirm, hasConfirm := raw[confirmFieldName]
+		if !hasConfirm || pw != confirm {
+			return RegisterRequest{}, ErrPasswordMismatch
+		}
+	}
+
 	req := RegisterRequest{
 		Username: raw[s.usernameField],
 		Password: raw[s.passwordField],
 	}
 
+	// Extras carries any register-only fields declared via WithRegisterFields
+	// beyond username/password/password_confirm. Unknown keys (not declared
+	// as register fields) are dropped rather than blindly forwarded, to
+	// avoid smuggling arbitrary data into the Registrar.
+	known := s.registerFieldNameSet()
 	extras := make(map[string]string)
 	for k, v := range raw {
-		switch k {
-		case s.usernameField, s.passwordField, "password_confirm":
+		if k == s.usernameField || k == s.passwordField || k == confirmFieldName {
+			continue
+		}
+		if _, declared := known[k]; !declared {
 			continue
 		}
 		extras[k] = v

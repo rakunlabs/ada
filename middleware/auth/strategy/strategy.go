@@ -86,6 +86,16 @@ type Field struct {
 	Required    bool   `json:"required,omitempty"`
 }
 
+// CallbackBinder is an optional interface implemented by strategies that need
+// to know the auth middleware's callback base path (e.g. OAuth2 to build the
+// redirect_uri query parameter). The auth middleware calls SetCallbackBasePath
+// once at Mount time with the resolved prefix — typically
+// "{cfg.Base}login/callback" — so strategies don't have to mirror cfg.Base by
+// hand. Implementations MUST NOT overwrite an explicit, user-supplied value.
+type CallbackBinder interface {
+	SetCallbackBasePath(p string)
+}
+
 // Registerer is an optional interface implemented by strategies that support
 // self-service account creation. The middleware routes POST
 // {base}/login/register/{name} to Register when a strategy satisfies this

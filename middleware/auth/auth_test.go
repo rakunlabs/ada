@@ -11,6 +11,7 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy/local"
+	"github.com/rakunlabs/ada/middleware/auth/strategy/oauth2"
 )
 
 // fakeMux is a minimal in-memory mux that satisfies auth.Mux for tests.
@@ -204,7 +205,7 @@ func TestRegister_AutoLogin_IssuesSessionCookie(t *testing.T) {
 	mux := newFakeMux()
 	a.Mount(mux)
 
-	body := strings.NewReader(`{"username":"carol","password":"s3cret!","email":"carol@example.com"}`)
+	body := strings.NewReader(`{"username":"carol","password":"s3cret!","password_confirm":"s3cret!","email":"carol@example.com"}`)
 	req := httptest.NewRequest("POST", "/login/register/local", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -251,7 +252,7 @@ func TestRegister_NoAutoLogin_ReturnsFlag(t *testing.T) {
 	mux := newFakeMux()
 	a.Mount(mux)
 
-	body := strings.NewReader(`{"username":"dan","password":"s3cret!"}`)
+	body := strings.NewReader(`{"username":"dan","password":"s3cret!","password_confirm":"s3cret!"}`)
 	req := httptest.NewRequest("POST", "/login/register/local", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.SetPathValue("strategy", "local")
@@ -442,5 +443,94 @@ func TestBasePath_NonRootMountsUnderPrefix(t *testing.T) {
 				t.Errorf("login url: got %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// TestRequire_UnauthenticatedRedirectsToLoginUI verifies that session.Require
+// on a guarded route redirects to {Base}login (the login UI), not the bare
+// base prefix.
+func TestRequire_UnauthenticatedRedirectsToLoginUI(t *testing.T) {
+	cases := []struct {
+		name     string
+		base     string
+		wantPath string
+	}{
+		{"root base", "/", "/login"},
+		{"nested base", "/api/v1/", "/api/v1/login"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := auth.New(auth.Config{
+				Base: tc.base,
+				UI:   auth.UIConfig{ExternalFolder: true},
+			})
+			a.Strategy(local.New("local",
+				func(_ context.Context, _, _ string) (*identity.Identity, error) {
+					return nil, local.ErrInvalidCredentials
+				},
+			))
+			if err := a.Init(context.Background()); err != nil {
+				t.Fatalf("init: %v", err)
+			}
+
+			guarded := a.Require()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest("GET", "/whatever", nil)
+			rec := httptest.NewRecorder()
+			guarded.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusTemporaryRedirect {
+				t.Fatalf("expected 307, got %d body=%s", rec.Code, rec.Body.String())
+			}
+
+			loc := rec.Header().Get("Location")
+			if !strings.HasPrefix(loc, tc.wantPath) {
+				t.Errorf("redirect target: got %q, want prefix %q", loc, tc.wantPath)
+			}
+		})
+	}
+}
+
+// TestMount_AutoWiresOAuth2CallbackBasePath verifies that Auth.Mount pushes
+// the resolved callback base path ({cfg.Base}login/callback) into any
+// registered OAuth2 strategy that left CallbackBasePath empty.
+func TestMount_AutoWiresOAuth2CallbackBasePath(t *testing.T) {
+	a := auth.New(auth.Config{
+		Base: "/api/v1/",
+		UI:   auth.UIConfig{ExternalFolder: true},
+	})
+
+	oa := oauth2.New("google", oauth2.Config{
+		ClientID: "client",
+		AuthURL:  "https://idp.example.com/authorize",
+	}, oauth2.Options{
+		CallbackBaseURL: "https://app.example.com",
+		// CallbackBasePath intentionally empty so Mount auto-wires it.
+	})
+	a.Strategy(oa)
+
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	mux := newFakeMux()
+	a.Mount(mux)
+
+	// Initiate OAuth2: GET /api/v1/login/pass/google without ?code= → 307 to AuthURL.
+	req := httptest.NewRequest("GET", "/api/v1/login/pass/google", nil)
+	rec := httptest.NewRecorder()
+	mux.mu.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	loc := rec.Header().Get("Location")
+	wantSub := "redirect_uri=https%3A%2F%2Fapp.example.com%2Fapi%2Fv1%2Flogin%2Fcallback%2Fgoogle"
+	if !strings.Contains(loc, wantSub) {
+		t.Errorf("redirect Location should contain %q, got %q", wantSub, loc)
 	}
 }
