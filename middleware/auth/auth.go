@@ -527,7 +527,30 @@ func (a *Auth) handleRegister(w http.ResponseWriter, r *http.Request) {
 	a.session.IssueCookie(w, r, pair.SessionID)
 	a.setSuccessCookie(w)
 
-	a.respondAfterLogin(w, r, name)
+	a.respondAfterRegister(w, r, name)
+}
+
+// respondAfterRegister writes the JSON response for a successful register
+// with auto-login. Includes auto_login: true so the UI knows to redirect
+// rather than showing a "please sign in" message.
+func (a *Auth) respondAfterRegister(w http.ResponseWriter, r *http.Request, strategyName string) {
+	redirectPath := r.URL.Query().Get("redirect_path")
+
+	if r.Method == http.MethodPost && wantsJSON(r) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"strategy":      strategyName,
+			"registered":    true,
+			"auto_login":    true,
+			"redirect_path": redirectPath,
+		})
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if _, err := w.Write([]byte("<script>window.close();</script>")); err != nil {
+		slog.Debug("auth: write close-popup", "error", err.Error())
+	}
 }
 
 func (a *Auth) handleRefresh(w http.ResponseWriter, r *http.Request) {

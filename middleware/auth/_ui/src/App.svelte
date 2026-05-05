@@ -11,7 +11,7 @@
   let notice = $state("");
   let working = $state(false);
   let mounted = $state(false);
-  let showPassword = $state(false);
+  let showPasswordFields: Record<string, boolean> = $state({});
   let isDark = $state(false);
   let mode = $state<"login" | "register">("login");
 
@@ -84,9 +84,10 @@
     e.stopPropagation();
     if (working || !activeForm) return;
 
+    const form = e.currentTarget;
     error = "";
     notice = "";
-    const data = formToObject(e.currentTarget);
+    const data = formToObject(form);
 
     if (mode === "register") {
       const problem = validateRegister(data);
@@ -94,7 +95,6 @@
         error = problem;
         return;
       }
-      delete data["password_confirm"];
     }
 
     working = true;
@@ -124,14 +124,17 @@
       }
 
       notice = "Account created. Please sign in.";
-      e.currentTarget.reset();
+      form.reset();
       mode = "login";
     } catch (reason: unknown) {
       if (reason instanceof LoginError) {
         if (reason.status === 401) {
           error = "Invalid username or password";
         } else if (reason.status === 409) {
-          error = reason.message || "Username already taken";
+          // First user already created — reload to get updated info
+          // (signup_first will be false now, showing the login form).
+          window.location.reload();
+          return;
         } else {
           error = reason.message;
         }
@@ -284,7 +287,7 @@
                     id={field.name}
                     name={field.name}
                     type={field.type === "password"
-                      ? showPassword
+                      ? showPasswordFields[field.name]
                         ? "text"
                         : "password"
                       : field.type}
@@ -300,12 +303,12 @@
                     <button
                       type="button"
                       class="eye-toggle"
-                      onclick={() => (showPassword = !showPassword)}
-                      aria-label={showPassword
+                      onclick={() => (showPasswordFields[field.name] = !showPasswordFields[field.name])}
+                      aria-label={showPasswordFields[field.name]
                         ? "Hide password"
                         : "Show password"}
                     >
-                      {#if showPassword}
+                      {#if showPasswordFields[field.name]}
                         <EyeOff size={16} />
                       {:else}
                         <Eye size={16} />

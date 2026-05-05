@@ -31,7 +31,21 @@ func Run(ctx context.Context) error {
 			mtelemetry.Middleware(),
 			mencoding.Middleware(),
 		)
-		mux.POST("/hello", helloHandler.SayHello)
+		mux.POST("/hello", helloHandler.SayHello, func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				logi.Ctx(r.Context()).Info("before saying hello 1")
+				next.ServeHTTP(w, r)
+				logi.Ctx(r.Context()).Info("after saying hello 1")
+			})
+		},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					logi.Ctx(r.Context()).Info("before saying hello 2")
+					next.ServeHTTP(w, r)
+					logi.Ctx(r.Context()).Info("after saying hello 2")
+				})
+			},
+		)
 		mux.GET("/", helloHandler.Main)
 		mux.GET("/hello/info", mux.Wrap(helloHandler.Info))
 		mux.GET("/hello/zip", mux.Wrap(helloHandler.Zip))
