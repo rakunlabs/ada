@@ -449,6 +449,18 @@ func (m Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http
 		m.prefix = ""
 	}
 
+	// Defensive copy: Mux is taken by value, so m.middlewares' slice
+	// header was duplicated, but it still points at the parent's backing
+	// array. Without copying here, sibling groups created from the same
+	// parent (`a := s.Group(); b := s.Group()`) would share that backing
+	// array — and a later `b.Use(...)` could append-in-place into a slot
+	// that `a` already considers part of its chain (or vice versa),
+	// silently corrupting the middleware order on whichever group ran
+	// `Use` first. Allocating a fresh slice with len == cap pins this
+	// child group to its own storage and makes append always grow.
+	parent := m.middlewares
+	m.middlewares = make([]func(next http.Handler) http.Handler, len(parent), len(parent)+len(middlewares))
+	copy(m.middlewares, parent)
 	m.middlewares = append(m.middlewares, middlewares...)
 
 	return &m

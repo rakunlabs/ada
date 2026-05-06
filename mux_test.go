@@ -1080,3 +1080,78 @@ func TestMux_Prefix(t *testing.T) {
 		t.Errorf("expected subgroup mux prefix to be '/api/v1/users', got '%s'", subGroup.Prefix())
 	}
 }
+
+// TestGroup_SiblingMiddlewareIsolation guards against a slice-aliasing bug
+// where two sibling groups created from the same parent would share the
+// parent's middleware backing array, so a Use() on one sibling could
+// silently overwrite a Use() entry on another sibling whenever the shared
+// backing array still had spare capacity.
+//
+// Reproduction shape (matches a real bug observed in pika):
+//
+//	parent := root.Group("")
+//	a := parent.Group("")
+//	b := parent.Group("")
+//	a.Use(mwA) // appends at index N of the shared backing array
+//	b.Use(mwB) // append into b (still len N) overwrites index N in place
+//
+// After the buggy sequence, a request handled by `a` ran mwB instead of mwA.
+func TestGroup_SiblingMiddlewareIsolation(t *testing.T) {
+	mux := NewMux()
+
+	// Force the parent's middleware backing array to have spare capacity
+	// before children are derived. Without spare capacity, append() in
+	// each child reallocates onto a fresh array and the aliasing bug
+	// stays hidden behind the allocator's whim. With spare capacity,
+	// an in-place append on one sibling writes into a slot another
+	// sibling already considers part of its own chain — that's exactly
+	// the pika regression this test guards against.
+	noop := func(next http.Handler) http.Handler { return next }
+	mux.middlewares = make([]func(next http.Handler) http.Handler, 1, 8)
+	mux.middlewares[0] = noop
+
+	a := mux.Group("/a")
+	b := mux.Group("/b")
+
+	// Sibling A registers a middleware that writes "A" before delegating.
+	a.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("A:"))
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// Sibling B then registers its own middleware that writes "B".
+	// With the aliasing bug, this append-in-place stomps over A's entry
+	// in the shared backing array, so requests routed to A will run B's
+	// middleware instead of A's.
+	b.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("B:"))
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	a.GET("/ping", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("a-handler"))
+	})
+	b.GET("/ping", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("b-handler"))
+	})
+
+	for _, tc := range []struct {
+		name, path, want string
+	}{
+		{"sibling A keeps its own middleware", "/a/ping", "A:a-handler"},
+		{"sibling B keeps its own middleware", "/b/ping", "B:b-handler"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if got := rec.Body.String(); got != tc.want {
+				t.Errorf("path %s: got %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
