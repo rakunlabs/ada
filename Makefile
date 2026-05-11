@@ -18,10 +18,14 @@ tag: ## Tags the repo with new version and tag all sub modules same time than pu
 	echo "All go.mod files are up to date"; \
 	echo "########################################################"; \
 	echo "Use git tag to add new version"; \
+	tags=""; \
 	for dir in $$(find . -type f -name 'go.mod' -not -path "*/_examples/*" -exec dirname {} \; | sed 's|^\./||'); do \
-		[ "$$dir" = "." ] && echo "git tag $$version" && continue; \
-		echo "git tag $$dir/$$version"; \
-	done
+		if [ "$$dir" = "." ]; then tag="$$version"; else tag="$$dir/$$version"; fi; \
+		echo "git tag $$tag"; \
+		tags="$$tags $$tag"; \
+	done; \
+	echo "########################################################"; \
+	echo "git push origin$$tags"
 
 .PHONY: docs
 docs: ## Serve documentation
