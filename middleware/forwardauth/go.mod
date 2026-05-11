@@ -4,4 +4,4 @@ go 1.24
 
 replace github.com/rakunlabs/ada/middleware/auth => ../auth
 
-require github.com/rakunlabs/ada/middleware/auth v0.1.5
+require github.com/rakunlabs/ada/middleware/auth v0.4.0
