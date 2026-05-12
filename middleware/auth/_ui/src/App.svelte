@@ -4,8 +4,15 @@
   import { getRedirectPath, isResponseTypeCode } from "./helper/query";
   import { initTheme, toggleTheme, getTheme } from "./helper/theme";
   import { applyThemeVars, appendCustomStylesheet } from "./helper/customize";
+  import {
+    isWebAuthnSupported,
+    isConditionalMediationAvailable,
+    startAuthentication,
+    type ServerRequestOptions,
+  } from "./helper/webauthn";
   import type { AuthInfo, StrategyDescriptor } from "./helper/info";
-  import { Sun, Moon, Eye, EyeOff, Loader2 } from "lucide-svelte";
+  import { Sun, Moon, Eye, EyeOff, Loader2, KeyRound } from "lucide-svelte";
+  import { onDestroy } from "svelte";
 
   let error = $state("");
   let notice = $state("");
@@ -26,11 +33,32 @@
     ),
   );
 
+  // Passkey strategies live in their own bucket because they neither
+  // render a form (no fields) nor follow the OAuth popup flow. Their
+  // login URL points at the same /login/pass/<name> endpoint password
+  // strategies use, but the wire shape is two POSTs sandwiching a
+  // navigator.credentials.get() call.
+  let passkeyStrategies = $derived(
+    authInfo.strategies.filter((s) => s.kind === "passkey"),
+  );
+
   let redirectStrategies = $derived(
     authInfo.strategies.filter(
-      (s) => (s.fields?.length ?? 0) === 0 && s.kind !== "password",
+      (s) =>
+        (s.fields?.length ?? 0) === 0
+        && s.kind !== "password"
+        && s.kind !== "passkey",
     ),
   );
+
+  // Feature flags for the passkey affordance. webauthnSupported is a
+  // one-shot detection done at mount; conditionalSupported is the
+  // separate, async check for the autofill UI. We only kick off the
+  // conditional ceremony when both are true and the server advertises
+  // at least one passkey strategy.
+  let webauthnSupported = $state(false);
+  let conditionalSupported = $state(false);
+  let conditionalController: AbortController | null = null;
 
   let selectedFormStrategy: string = $state("");
 
@@ -83,6 +111,12 @@
     e.preventDefault();
     e.stopPropagation();
     if (working || !activeForm) return;
+
+    // Tearing down the conditional passkey ceremony here means that
+    // submitting the password form (or any non-passkey login) doesn't
+    // race a stale autofill resolve.
+    conditionalController?.abort();
+    conditionalController = null;
 
     const form = e.currentTarget;
     error = "";
@@ -182,9 +216,109 @@
     }, 500);
   };
 
+  // Passkey login: two-step ceremony against the same /login/pass/<name>
+  // endpoint password strategies use. The first POST sends an empty
+  // body and gets back { phase: "begin", session_id, options }; the
+  // browser ceremony produces an assertion; the second POST sends
+  // { session_id, assertion } which the strategy dispatches to its
+  // finish handler. We never POST a form to that URL ourselves.
+  const handlePasskeyLogin = async (strategy: StrategyDescriptor) => {
+    if (!webauthnSupported) {
+      error = "Your browser does not support passkeys.";
+      return;
+    }
+    // A click on the manual button overrides any in-flight conditional
+    // ceremony — letting both run would race in some browsers.
+    conditionalController?.abort();
+    conditionalController = null;
+
+    error = "";
+    notice = "";
+    working = true;
+    try {
+      const begin = await login(strategy.url, {});
+      const sessionID: string = begin.session_id;
+      const options: ServerRequestOptions = begin.options;
+
+      const assertion = await startAuthentication(options);
+      if (!assertion) {
+        // User dismissed the picker. Silent — no error banner.
+        return;
+      }
+
+      await login(strategy.url, { session_id: sessionID, assertion });
+
+      if (!isResponseTypeCode()) {
+        window.location.assign(getRedirectPath());
+        return;
+      }
+      window.location.replace(window.location.href);
+    } catch (reason: unknown) {
+      if (reason && typeof reason === "object" && (reason as { name?: string }).name === "NotAllowedError") {
+        // User cancelled the platform prompt — silent.
+        return;
+      }
+      if (reason instanceof LoginError) {
+        error = reason.message;
+      } else if (reason instanceof Error) {
+        error = reason.message;
+      } else {
+        error = String(reason);
+      }
+    } finally {
+      working = false;
+    }
+  };
+
+  // Conditional ("autofill") passkey login. Kicks off in the
+  // background once mount completes, hangs on a get() promise the
+  // browser surfaces via the username autofill dropdown. Picking a
+  // passkey resolves it; typing a password and submitting the form
+  // aborts it via conditionalController.
+  //
+  // Every failure path is silent: conditional UI is a progressive
+  // enhancement and must never block the manual flows on the page.
+  const tryConditionalAuth = async (strategy: StrategyDescriptor) => {
+    if (!webauthnSupported) return;
+    if (!(await isConditionalMediationAvailable())) return;
+    conditionalSupported = true;
+
+    conditionalController?.abort();
+    conditionalController = new AbortController();
+    const signal = conditionalController.signal;
+
+    try {
+      const begin = await login(strategy.url, {});
+      if (signal.aborted) return;
+
+      const sessionID: string = begin.session_id;
+      const options: ServerRequestOptions = begin.options;
+      const assertion = await startAuthentication(options, {
+        mediation: "conditional",
+        signal,
+      });
+      if (!assertion || signal.aborted) return;
+
+      await login(strategy.url, { session_id: sessionID, assertion });
+      if (!isResponseTypeCode()) {
+        window.location.assign(getRedirectPath());
+        return;
+      }
+      window.location.replace(window.location.href);
+    } catch {
+      // Conditional UI must never pre-empt the manual paths.
+    }
+  };
+
+  onDestroy(() => {
+    conditionalController?.abort();
+    conditionalController = null;
+  });
+
   $effect(() => {
     initTheme();
     isDark = getTheme() === "dark";
+    webauthnSupported = isWebAuthnSupported();
 
     (async () => {
       await fetchInfo();
@@ -210,6 +344,17 @@
       }
 
       mounted = true;
+
+      // Fire-and-forget the conditional passkey ceremony so the
+      // browser's autofill dropdown can surface enrolled passkeys
+      // as soon as the user focuses the username field. We pick
+      // the first passkey strategy when several are advertised;
+      // simultaneously running more than one conditional get()
+      // is undefined-behavior across browsers.
+      const passkey = passkeyStrategies[0];
+      if (passkey) {
+        void tryConditionalAuth(passkey);
+      }
     })();
   });
 </script>
@@ -293,11 +438,24 @@
                       : field.type}
                     required={field.required}
                     placeholder={field.placeholder ?? ""}
-                    autocomplete={(field.type === "password"
-                      ? mode === "register"
-                        ? "new-password"
-                        : "current-password"
-                      : field.name) as any}
+                    autocomplete={
+                      // Append "webauthn" to the username/email hint
+                      // when a passkey strategy is present and the
+                      // browser supports conditional UI — this is
+                      // what makes enrolled passkeys appear in the
+                      // username field's autofill dropdown.
+                      (field.type === "password"
+                        ? mode === "register"
+                          ? "new-password"
+                          : "current-password"
+                        : passkeyStrategies.length > 0
+                          && conditionalSupported
+                          && (field.name === "username"
+                            || field.name === "email"
+                            || field.name === "user")
+                          ? "username webauthn"
+                          : field.name) as any
+                    }
                   />
                   {#if field.type === "password"}
                     <button
@@ -345,7 +503,7 @@
         {/if}
       {/if}
 
-      {#if redirectStrategies.length && mode === "login"}
+      {#if (redirectStrategies.length || passkeyStrategies.length) && mode === "login"}
         {#if formStrategies.length}
           <div class="divider">
             <span>or</span>
@@ -360,6 +518,21 @@
               onclick={() => openOAuthPopup(s.url)}
             >
               {s.label}
+            </button>
+          {/each}
+
+          {#each passkeyStrategies as s}
+            <button
+              type="button"
+              class="btn-passkey"
+              onclick={() => handlePasskeyLogin(s)}
+              disabled={working || !webauthnSupported}
+              title={webauthnSupported
+                ? undefined
+                : "Your browser does not support passkeys"}
+            >
+              <KeyRound size={16} />
+              <span>{s.label}</span>
             </button>
           {/each}
         </div>
@@ -642,6 +815,38 @@
     &:hover {
       background: var(--auth-oauth-hover);
       border-color: var(--auth-input-focus-border);
+    }
+  }
+
+  /* Passkey button: shares the OAuth row's chrome so the visual
+     rhythm of the "or" column stays uniform, but its icon makes
+     the kind of credential explicit. Disabled state covers the
+     "browser does not support WebAuthn" fallback. */
+  .btn-passkey {
+    width: 100%;
+    padding: 10px 16px;
+    border: 1px solid var(--auth-oauth-border);
+    border-radius: var(--auth-radius);
+    font-size: 14px;
+    font-weight: 500;
+    font-family: inherit;
+    background: var(--auth-oauth-bg);
+    color: var(--auth-oauth-text);
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+
+    &:hover:not(:disabled) {
+      background: var(--auth-oauth-hover);
+      border-color: var(--auth-input-focus-border);
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
   }
 

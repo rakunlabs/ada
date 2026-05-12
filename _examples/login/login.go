@@ -97,6 +97,15 @@ func Run(ctx context.Context) error {
 		authMW.Mount(mux)
 		// mux.GET("/auth/", serveLoginPage)
 
+		// Passkey demo wiring. No-op unless PASSKEY_RPID and
+		// PASSKEY_ORIGINS are set in the environment — see
+		// passkey.go for the full env contract. Adds:
+		//
+		//   POST /passkey/register/begin  → enroll, step 1
+		//   POST /passkey/register/finish → enroll, step 2
+		//   POST /login/pass/<name>       → login (mounted by ada)
+		wireDemoPasskey(ctx, authMW, mux)
+
 		// Public landing.
 		mux.GET("/", landingHandler)
 

@@ -459,6 +459,122 @@ If the User header is missing from the request, the strategy returns 401.
 Only use this behind a trusted reverse proxy that sets these headers. An attacker can forge them if the proxy is bypassed. Make sure your infrastructure strips these headers from external requests.
 :::
 
+### Passkey Strategy
+
+WebAuthn / FIDO2 passwordless login using device biometrics (Touch ID, Windows Hello) or a roaming security key. The implementation is **stdlib-only** — CBOR/COSE/attestation parsing is hand-rolled, no third-party dependency.
+
+```go
+import "github.com/rakunlabs/ada/middleware/auth/strategy/passkey"
+
+engine, err := passkey.New(&passkey.Config{
+    RPID:             "example.com",                        // bare host, no scheme
+    RPDisplayName:    "Example",                            // shown in the platform UI
+    RPOrigins:        []string{"https://example.com"},      // exact origins to accept
+    UserVerification: passkey.UVPreferred,                  // ask for biometric/PIN when possible
+    ChallengeTTL:     5 * time.Minute,
+})
+if err != nil { return err }
+
+strategy, err := passkey.NewStrategy("passkey", engine,
+    func(ctx context.Context, credentialID []byte) (*passkey.Credential, *identity.Identity, error) {
+        // Look up the credential in your store. Return passkey.ErrCredentialNotFound
+        // for any unresolved input (unknown id, disabled user, etc.) so the strategy
+        // emits a uniform 401 — never leak which credential ids you've seen.
+        row, err := db.PasskeyByCredentialID(ctx, credentialID)
+        if err != nil {
+            return nil, nil, passkey.ErrCredentialNotFound
+        }
+        return &passkey.Credential{
+                ID:         row.CredentialID,
+                UserHandle: row.UserHandle,
+                PublicKey:  row.PublicKey,        // raw COSE_Key bytes
+                AAGUID:     row.AAGUID,
+                SignCount:  row.SignCount,
+                Transports: row.Transports,
+            },
+            &identity.Identity{Subject: row.Username, Provider: "passkey"},
+            nil
+    },
+    passkey.WithLabel("Sign in with a passkey"),
+    passkey.WithSignCountUpdater(func(ctx context.Context, credentialID []byte, newCount uint32) error {
+        return db.UpdatePasskeySignCount(ctx, credentialID, newCount)
+    }),
+)
+if err != nil { return err }
+
+authMW.Strategy(strategy)
+```
+
+#### Registration endpoints
+
+ada **does not** mount registration endpoints — the RP owns persistence and policy, and a registration ceremony is almost always gated on an already-authenticated session. You mount them yourself:
+
+```go
+mux.POST("/passkey/register/begin", mux.Wrap(func(c *ada.Context) error {
+    user := identity.FromContext(c.Request.Context()) // current signed-in user
+    opts, session, err := engine.BeginRegistration(passkey.User{
+        Handle:      []byte(user.Subject),            // ≤64 bytes, stable per user
+        Name:        user.Subject,
+        DisplayName: user.Name,
+    }, db.ExcludeCredentialsFor(user.Subject))
+    if err != nil { return err }
+    sid := db.SaveRegSession(user.ID, session)       // short-TTL store, your storage
+    return c.SetStatus(200).SendJSON(map[string]any{"session_id": sid, "options": opts})
+}))
+
+mux.POST("/passkey/register/finish", mux.Wrap(func(c *ada.Context) error {
+    var req struct {
+        SessionID string          `json:"session_id"`
+        Response  json.RawMessage `json:"response"`
+    }
+    if err := c.Bind(&req); err != nil { return err }
+    session, ok := db.TakeRegSession(req.SessionID)
+    if !ok { return c.SetStatus(401).SendJSON(map[string]string{"error": "invalid_session"}) }
+    cred, _, err := engine.FinishRegistration(session, req.Response)
+    if err != nil { return err }
+    return db.SaveCredential(user.Subject, cred)      // persist for future logins
+}))
+```
+
+The login endpoint is mounted automatically at `POST /login/pass/{name}` — the SPA dispatches between begin/finish by including or omitting the `assertion` field in the JSON body.
+
+#### Username-first vs discoverable flow
+
+By default the ceremony is **discoverable** — the SPA posts an empty body and the authenticator picks any resident credential. Add `WithUserCredentialsLookup` for the **username-first** flow:
+
+```go
+strategy, _ := passkey.NewStrategy("passkey", engine, lookup,
+    passkey.WithUserCredentialsLookup(func(ctx context.Context, hint passkey.UserHint) ([][]byte, error) {
+        // hint.Username is the typed identifier; hint.Handle is the cached user handle.
+        // Returning a non-empty slice scopes allowCredentials; returning (nil, nil) for
+        // unresolvable hints lets the ceremony fall back to discoverable without leaking
+        // which usernames exist.
+        if hint.Username == "" { return nil, nil }
+        return db.CredentialIDsByUsername(ctx, hint.Username)
+    }),
+)
+```
+
+The SPA then posts `{ "username": "alice" }` to the begin step instead of an empty body.
+
+#### Conditional UI (autofill)
+
+Browsers that support [Conditional Mediation](https://w3c.github.io/webauthn/#sctn-conditional-ui) (Safari 16+, Chrome 108+) surface enrolled passkeys inline with the username field's autocomplete dropdown — no button click required. The built-in ada login UI activates this automatically when a passkey strategy is advertised; custom SPAs opt in with `autocomplete="username webauthn"` on the username input plus `mediation: "conditional"` on `navigator.credentials.get`.
+
+#### Algorithms
+
+`passkey.DefaultAlgorithms` advertises ES256 → EdDSA → RS256 in that order. The verification path additionally accepts ES384/ES512 and PS256/PS384/PS512. EdDSA (Ed25519, COSE alg -8) is supported as of v0.5.
+
+Attestation formats: **`"none"`** (the default — what platform authenticators emit) and **`"packed"`** with self or x5c-basic. Other formats (`tpm`, `android-key`, `android-safetynet`, `apple`, `fido-u2f`) are deliberately unsupported.
+
+#### Clustered deployments
+
+The default `ChallengeStore` is in-memory and won't survive a load-balancer that routes begin/finish to different instances. Inject your own backend with `WithChallengeStore` — any type that satisfies the three-method `ChallengeStore` interface works (Redis is a typical choice).
+
+#### Sign-count replay defense
+
+`WithSignCountUpdater` persists the new sign counter after every successful login. Hardware keys advance the counter on each use; if a stored value is non-zero and the next assertion presents a smaller value, the strategy rejects the login (cloned-authenticator defense). Platform authenticators always report 0 — that's not a regression and is accepted.
+
 ### Multiple Strategies
 
 Register multiple strategies — the login UI renders all of them automatically:
