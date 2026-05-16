@@ -10,10 +10,11 @@ import (
 type typeNode int
 
 const (
-	typeNodeSelf     typeNode = iota // Self node, e.g., /
-	typeNodeStatic                   // Static node, e.g., /users
-	typeNodeWildcard                 // Wildcard node, e.g., /users/*
-	typeNodeParam                    // Parameterized node, e.g., /users/{id}
+	typeNodeSelf          typeNode = iota // Self node, e.g., /
+	typeNodeStatic                        // Static node, e.g., /users
+	typeNodeWildcard                      // Bare wildcard, single segment when middle, greedy when trailing: /users/*
+	typeNodeParam                         // Single-segment named param, e.g., /users/{id}
+	typeNodeWildcardParam                 // Greedy NAMED wildcard, trailing only, e.g., /files/{path...}
 )
 
 type paramInfo struct {
@@ -191,6 +192,57 @@ func (n *node) SetHandler(method, path string, handler http.HandlerFunc, params 
 func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 	pathSegments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 
+	// ── Validation phase ─────────────────────────────────────────────
+	// Reject ambiguous patterns at register time, with a clear message
+	// telling the operator how to express their intent unambiguously.
+	// The check is O(segments), done once, never on the request path.
+	//
+	// Rules:
+	//   1. At most ONE `*` segment in a route. If you need multiple
+	//      captures, use `{name}` for the middle ones; if you need
+	//      multiple greedy captures, you've structurally misunderstood
+	//      greedy semantics (it consumes the rest of the path).
+	//   2. At most ONE `{name...}` segment, and it must be the trailing
+	//      segment. A greedy in the middle would have nothing to
+	//      backtrack against — there'd be no way for the matcher to
+	//      know where to stop.
+	//
+	// We panic rather than return an error because Insert's signature
+	// is `void` and routes are registered at startup: a bad pattern
+	// here means the program is misconfigured. Failing loud at boot is
+	// strictly better than silent runtime surprises (which is exactly
+	// the failure mode that prompted this whole refactor in the first
+	// place — see history of middle-`*` returning empty strings).
+	var (
+		starCount       int
+		greedyCount     int
+		greedyIndex     = -1
+		lastNonEmptyIdx = -1
+	)
+	for i, seg := range pathSegments {
+		if seg == "" {
+			continue
+		}
+		lastNonEmptyIdx = i
+		switch {
+		case seg == "*":
+			starCount++
+		case isGreedyParam(seg):
+			greedyCount++
+			greedyIndex = i
+		}
+	}
+	if starCount > 1 {
+		panic("ada: pattern has more than one '*' segment; use '{name}' for middle captures: " + path)
+	}
+	if greedyCount > 1 {
+		panic("ada: pattern has more than one greedy '{name...}' segment: " + path)
+	}
+	if greedyIndex >= 0 && greedyIndex != lastNonEmptyIdx {
+		panic("ada: greedy '{name...}' must be the trailing segment: " + path)
+	}
+
+	// ── Insert phase ─────────────────────────────────────────────────
 	var typeNodeSegment typeNode
 	var params []paramInfo
 	current := n
@@ -204,6 +256,21 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 		case typeNodeStatic:
 			current = current.insertNodeTypeStatic(segment)
 		case typeNodeWildcard:
+			// Bare `*`: exposed under PathValue("*") regardless of
+			// whether it's middle or trailing. Middle `*` captures one
+			// segment via the params slice; trailing `*` is greedy and
+			// is reconstructed from the original URL string in
+			// ServeHTTP — but both share this one paramInfo entry.
+			params = append(params, paramInfo{Index: i, Name: "*"})
+			current = current.insertNodeTypeWildcard()
+		case typeNodeWildcardParam:
+			// `{name...}`: greedy NAMED trailing wildcard. Validation
+			// above guarantees this only appears at the trailing
+			// position. Tree shape is identical to a bare trailing
+			// `*` — we reuse `insertNodeTypeWildcard` — only the
+			// PathValue key differs.
+			name := segment[1 : len(segment)-4] // strip '{' and '...}'
+			params = append(params, paramInfo{Index: i, Name: name})
 			current = current.insertNodeTypeWildcard()
 		case typeNodeParam:
 			params = append(params, paramInfo{
@@ -226,7 +293,13 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 	}
 
 	current.SetHandler(method, path, handler, params)
-	if typeNodeSegment == typeNodeWildcard {
+	// Possible marks "trailing wildcard reached" so ServeHTTP can apply
+	// the greedy/joined value reconstruction. This applies to both
+	// trailing `*` and trailing `{name...}` — they share the same
+	// greedy semantics. Middle `*` (the only other wildcard case left
+	// after validation) intentionally does NOT set Possible; its value
+	// is captured per-segment via the params slice instead.
+	if typeNodeSegment == typeNodeWildcard || typeNodeSegment == typeNodeWildcardParam {
 		current.Possible = true
 	}
 }
@@ -331,11 +404,34 @@ func findTypeNode(part string) typeNode {
 	switch {
 	case part == "*":
 		return typeNodeWildcard
+	case isGreedyParam(part):
+		// Must precede the generic '{' check below — every greedy
+		// param is also a `{...}` token, but it has its own semantics
+		// (match the remaining path, including slashes).
+		return typeNodeWildcardParam
 	case strings.Contains(part, "{"):
 		return typeNodeParam
 	default:
 		return typeNodeStatic
 	}
+}
+
+// isGreedyParam reports whether `seg` is a `{name...}` token. The
+// inner name must be non-empty so we don't accidentally accept the
+// degenerate `{...}` form, which would be ambiguous with a regular
+// `{}` param missing its name. Greedy params are also the named
+// counterpart of the trailing `*` wildcard: they always match the
+// remaining path, including embedded slashes, and they can only
+// appear as the last segment of a route (enforced in Insert).
+func isGreedyParam(seg string) bool {
+	if len(seg) < 6 { // "{x...}" is the shortest valid form
+		return false
+	}
+	if seg[0] != '{' || !strings.HasSuffix(seg, "...}") {
+		return false
+	}
+	// Name between '{' and '...}' must be non-empty.
+	return len(seg) > 5
 }
 
 // //////////////////////////////////////////////////////////
@@ -597,7 +693,19 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		if nodeType == typeNodeParam {
+		// Capture this segment's value for the binding loop at the
+		// end of ServeHTTP. Both single-segment params (`{id}`) and
+		// wildcards (bare `*`) record a single-segment value here.
+		// Trailing wildcards also flow through this branch but their
+		// per-segment value is later superseded by the greedy joined
+		// reconstruction (see `current.Possible` block at the bottom)
+		// — the pathPattern entry is skipped by the `possibleIndex`
+		// guard in the binding loop, so this isn't a double write.
+		//
+		// Greedy named wildcards (`{name...}`) are matched as
+		// `typeNodeWildcard` here too because they share the same
+		// trie branch; the name distinction lives in the params slice.
+		if nodeType == typeNodeParam || nodeType == typeNodeWildcard {
 			pathPattern = append(pathPattern, indexValue{
 				index: segmentIndex,
 				value: segment,
@@ -691,34 +799,64 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if current.Possible {
-		// Reconstruct the wildcard value from the original path string
-		// without allocating via strings.Join.
-		wildcard := urlPath[possibleOffset:]
-		if len(wildcard) > 0 && wildcard[0] == '/' {
-			wildcard = wildcard[1:]
-		}
-		r.SetPathValue("*", wildcard)
-	}
-
-	if len(pathPattern) > 0 {
-		// Look up the pre-computed param names for this method (or catch-all "").
+	// Param/wildcard binding is only entered when we have something to
+	// bind: a trailing wildcard (current.Possible) or one or more
+	// captured param/wildcard segments (len(pathPattern) > 0). Pure
+	// static routes skip the entire block — including the params-map
+	// lookup — so they pay zero binding cost. Static routes are the
+	// dominant case for most APIs, and the original code already
+	// relied on this short-circuit; we preserve it.
+	if current.Possible || len(pathPattern) > 0 {
+		// Look up the pre-computed param names for this method (or
+		// catch-all ""). Hoisted so both the trailing-wildcard
+		// reconstruction and the per-segment binding loop reuse it.
 		params := current.Params[method]
 		if params == nil {
 			params = current.Params[""]
 		}
 
+		if current.Possible {
+			// Trailing wildcard: reconstruct the greedy joined value
+			// from the original path string without allocating via
+			// strings.Join.
+			wildcard := urlPath[possibleOffset:]
+			if len(wildcard) > 0 && wildcard[0] == '/' {
+				wildcard = wildcard[1:]
+			}
+			// Write the greedy value under the trailing wildcard's
+			// registered name. Insert guarantees there's exactly one
+			// paramInfo at this index: `"*"` for bare `*` routes and
+			// the user-supplied identifier for `{name...}` routes.
+			// The defensive fallback catches the catch-all "" method
+			// case (no params slice for that method key).
+			wrote := false
+			for _, p := range params {
+				if p.Index == possibleIndex {
+					r.SetPathValue(p.Name, wildcard)
+					wrote = true
+				}
+			}
+			if !wrote {
+				r.SetPathValue("*", wildcard)
+			}
+		}
+
 		for _, v := range pathPattern {
 			if current.Possible && possibleIndex <= v.index {
+				// This segment is part of the trailing-wildcard's
+				// greedy capture; the reconstruction block above has
+				// already written it under its registered name.
 				continue
 			}
 
-			// Find the matching param name by segment index.
+			// Single-segment params and middle wildcards: write each
+			// captured value under its registered name. Insert keeps
+			// to one paramInfo per index, but we don't `break` after
+			// the first match so future hooks that register multiple
+			// aliases (e.g. compat shims) can still work.
 			for _, p := range params {
 				if p.Index == v.index {
 					r.SetPathValue(p.Name, v.value)
-
-					break
 				}
 			}
 		}

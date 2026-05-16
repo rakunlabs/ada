@@ -10,7 +10,7 @@ Routing system follows a specific priority order when matching routes:
 
 1. **Static routes** - Exact matches have highest priority
 2. **Parameterized routes** - Routes with path parameters
-3. **Wildcard routes** - Routes with `*` wildcards
+3. **Wildcard routes** - Routes with `*` or `{name...}` captures
 
 ```go
 server.GET("/users/new", newUserForm)      // Highest priority
@@ -32,7 +32,7 @@ server.GET("/api/v1/status", statusHandler)
 
 ### Parameterized Routes
 
-Parameterized routes capture path segments and make them available via `r.PathValue()`:
+Parameterized routes capture a **single** path segment and make it available via `r.PathValue()`:
 
 ```go
 server.GET("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -47,16 +47,67 @@ server.GET("/posts/{postID}/comments/{commentID}", func(w http.ResponseWriter, r
 })
 ```
 
+`{name}` matches exactly one segment. It does **not** cross `/` boundaries — use the greedy `{name...}` form below when you need that.
+
 ### Wildcard Routes
 
-Wildcard routes use `*` to match any segment at that position:
+Ada has two wildcard forms:
+
+| Form        | Position       | Matches                                                  | Access via            |
+| ----------- | -------------- | -------------------------------------------------------- | --------------------- |
+| `*`         | Middle or trailing (1 per route) | One segment if middle, rest of the path if trailing      | `r.PathValue("*")`    |
+| `{name...}` | Trailing only  | Rest of the path (incl. `/`)                             | `r.PathValue("name")` |
+
+`{name...}` is just a **named alias** for a trailing `*` — same matching, only the `PathValue` key differs. Use it when a descriptive name reads better than `"*"`, especially in routes that already have another capture.
 
 ```go
+// Trailing `*` — anonymous greedy capture.
 server.GET("/files/*", func(w http.ResponseWriter, r *http.Request) {
-    // requestedPath := r.PathValue("*") // "/files/anything/1881" -> "anything/1881"
-    // Matches /files/anything, /files/path/to/file, etc.
-    fmt.Fprintf(w, "File path requested")
+    rest := r.PathValue("*")
+    // GET /files/a/b/c.txt → rest == "a/b/c.txt"
 })
+
+// Middle `*` — exactly one segment, does not cross `/`.
+server.POST("/api/v1/external/*/test", func(w http.ResponseWriter, r *http.Request) {
+    name := r.PathValue("*")
+    // POST /api/v1/external/myname/test → name == "myname"
+    // POST /api/v1/external/a/b/test    → 404
+})
+
+// Trailing `{name...}` — named greedy capture.
+server.GET("/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+    path := r.PathValue("path")
+    // GET /files/a/b/c.txt → path == "a/b/c.txt"
+    // GET /files/          → path == ""
+    // GET /files           → 404 (separator required)
+})
+```
+
+#### Combining captures
+
+Stack any number of `{name}` params; the wildcard rules only apply to `*` and `{name...}`. Each capture lives under its own key.
+
+```go
+// Middle `{name}` + named greedy trailing.
+server.GET("/users/{name}/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+    name := r.PathValue("name") // e.g. "alice"
+    path := r.PathValue("path") // e.g. "docs/note.md"
+})
+
+// Multiple single-segment params + greedy trailing.
+server.GET("/orgs/{org}/users/{user}/files/{path...}", h)
+```
+
+#### Validation rules
+
+Ada panics at registration time on ambiguous patterns — bad routes fail loud at boot:
+
+1. **At most one `*` per route.** Both would map to `PathValue("*")`. Use `{name}` for the other capture.
+2. **At most one `{name...}`, and it must be trailing.** A greedy match consumes the rest of the path by definition, so it can't sit in the middle (the matcher would have nothing to stop against) and can't appear twice (the first one already ate everything).
+
+```go
+server.GET("/a/*/b/*", h)        // panics: more than one '*'
+server.GET("/a/{x...}/b", h)     // panics: greedy must be trailing
 ```
 
 

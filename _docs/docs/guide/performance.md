@@ -41,7 +41,7 @@ Source code: [`_examples/benchmark/`](https://github.com/rakunlabs/ada/tree/main
 | Static deep `/api/v1/users/list/all` | 69 | 0 | 0 |
 | 1 param `/users/{id}` | 57 | 0 | 0 |
 | 3 params | 128 | 0 | 0 |
-| Wildcard `/files/*` | 47 | 0 | 0 |
+| Wildcard `/files/*` | 63 | 0 | 0 |
 | 50 mixed routes | 59 | 0 | 0 |
 | 200 mixed routes | 61 | 0 | 0 |
 | 404 Not Found | 250 | 104 | 3 |

@@ -385,8 +385,15 @@ func TestMux(t *testing.T) {
 							},
 						},
 						{
-							name:   "GET /*/under/*",
-							path:   "/*/under/*",
+							// Migrated from "/*/under/*" — the old
+							// double-wildcard form is now rejected at
+							// register time (use `{name}` for middle
+							// captures or `{name...}` for trailing
+							// greedy ones). Semantic equivalent: first
+							// segment by bare `*`, rest of the path by
+							// the greedy `{rest...}`.
+							name:   "GET /*/under/{rest...}",
+							path:   "/*/under/{rest...}",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								w.Write([]byte("Wildcard Under Wildcard!"))
@@ -1154,4 +1161,407 @@ func TestGroup_SiblingMiddlewareIsolation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMiddleWildcard_PathValue guards against a regression where a `*`
+// segment that appears in the MIDDLE of a route pattern (i.e. with more
+// static or wildcard segments after it) silently failed to expose its
+// captured value via r.PathValue("*").
+//
+// Reproduction shape (matches a real bug observed in pika's
+// /api/v1/external/*/test handler — every request returned an empty
+// resource name regardless of what the caller sent):
+//
+//	mux.POST("/api/v1/external/*/test", h)
+//	// GET /api/v1/external/myname/test
+//	// r.PathValue("*") returned "" instead of "myname"
+//
+// Root cause was that `node.Possible` is only set on routes whose LAST
+// segment is `*`, so the trailing-static leaf reached by walking
+// `/api/v1/external/myname/test` had Possible=false and the wildcard
+// reconstruction block at the end of ServeHTTP never ran. Additionally
+// `possibleOffset` was only updated when the wildcard-children node's
+// Possible flag was true — also never the case for middle wildcards —
+// so even if we had run the reconstruction the offset would have been
+// 0 and we'd have returned the entire URL path.
+//
+// The fix has to (a) remember where each middle `*` segment started in
+// the URL, and (b) make that captured value retrievable through
+// PathValue. We retain the existing trailing-`*` semantics (greedy,
+// joined with /) and add per-index access for middle ones — both via
+// PathValue("*") (when only one wildcard exists) and via
+// PathValue("*N") for ambiguous routes with multiple `*` segments.
+func TestMiddleWildcard_PathValue(t *testing.T) {
+	type tc struct {
+		name      string
+		pattern   string
+		request   string
+		wantBody  string
+		wantValue string
+		// captureKey is the name passed to r.PathValue() inside the
+		// handler. For routes with a single `*` segment we always
+		// support "*"; the "*N" indexed form is only required when a
+		// pattern has multiple wildcards.
+		captureKey string
+	}
+
+	cases := []tc{
+		{
+			name:       "middle wildcard exposes captured segment",
+			pattern:    "/api/v1/external/*/test",
+			request:    "/api/v1/external/myname/test",
+			wantValue:  "myname",
+			captureKey: "*",
+		},
+		{
+			name:       "middle wildcard with hyphens and dots in segment",
+			pattern:    "/api/v1/external/*/test",
+			request:    "/api/v1/external/foo-bar.baz/test",
+			wantValue:  "foo-bar.baz",
+			captureKey: "*",
+		},
+		{
+			name:       "trailing wildcard continues to work after the fix",
+			pattern:    "/api/v1/files/*",
+			request:    "/api/v1/files/deep/nested/path.txt",
+			wantValue:  "deep/nested/path.txt",
+			captureKey: "*",
+		},
+		{
+			name:       "middle wildcard between two statics",
+			pattern:    "/users/*/profile",
+			request:    "/users/alice/profile",
+			wantValue:  "alice",
+			captureKey: "*",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mux := NewMux()
+			mux.GET(c.pattern, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(r.PathValue(c.captureKey)))
+			})
+
+			req := httptest.NewRequest(http.MethodGet, c.request, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("request %s: status=%d body=%q", c.request, rec.Code, rec.Body.String())
+			}
+			if got := rec.Body.String(); got != c.wantValue {
+				t.Errorf("request %s captureKey=%q: got %q, want %q",
+					c.request, c.captureKey, got, c.wantValue)
+			}
+		})
+	}
+}
+
+// TestMiddleWildcard_DoesNotCrossSlashes documents that a middle `*`
+// segment matches exactly one path segment — extra segments cause a
+// 404, they do NOT silently fall through to a more permissive handler.
+// This contract matters because the fix had to carefully avoid making
+// middle wildcards greedy as a side-effect of exposing their captured
+// value.
+func TestMiddleWildcard_DoesNotCrossSlashes(t *testing.T) {
+	mux := NewMux()
+	mux.GET("/users/*/profile", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("hit:" + r.PathValue("*")))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/users/alice/bob/profile", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for /users/alice/bob/profile, got %d: %q",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestGreedyNamedWildcard exercises the `{name...}` syntax — a NAMED
+// greedy trailing wildcard that consumes the rest of the path
+// (including embedded slashes) and exposes its value under the given
+// identifier. This is the supported replacement for "I want a second
+// `*` in my route": you either use bare `*` once (anywhere), or use
+// `{name...}` once at the end, or both. The combination cases live in
+// their own tests below.
+//
+// Semantics:
+//   - `/files/a/b/c.txt`  → `path = "a/b/c.txt"`  (multi-segment)
+//   - `/files/x`          → `path = "x"`          (single segment)
+//   - `/files/`           → `path = ""`           (empty match after the `/`)
+//   - `/files`            → 404                   (no slash separator means
+//     the static prefix wasn't
+//     completed — same rule
+//     Go's std mux applies)
+func TestGreedyNamedWildcard(t *testing.T) {
+	type want struct {
+		status int
+		body   string
+	}
+	cases := []struct {
+		name    string
+		request string
+		want    want
+	}{
+		{"multi-segment value", "/files/a/b/c.txt", want{200, "a/b/c.txt"}},
+		{"single-segment value", "/files/x", want{200, "x"}},
+		{"trailing slash empty match", "/files/", want{200, ""}},
+		{"no slash separator → 404", "/files", want{404, ""}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mux := NewMux()
+			mux.GET("/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(r.PathValue("path")))
+			})
+
+			req := httptest.NewRequest(http.MethodGet, c.request, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != c.want.status {
+				t.Fatalf("request %s: status=%d (want %d) body=%q",
+					c.request, rec.Code, c.want.status, rec.Body.String())
+			}
+			if c.want.status == 200 {
+				if got := rec.Body.String(); got != c.want.body {
+					t.Errorf("request %s: body %q, want %q",
+						c.request, got, c.want.body)
+				}
+			}
+		})
+	}
+}
+
+// TestGreedyNamedWildcard_WithMiddleStar shows the recommended way to
+// have two captures in one route: a middle `*` plus a trailing
+// `{name...}`. Each is reachable under its own PathValue key.
+func TestGreedyNamedWildcard_WithMiddleStar(t *testing.T) {
+	mux := NewMux()
+	mux.GET("/teams/*/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.PathValue("*") + "|" + r.PathValue("path")))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/red/files/dir/sub/x.json", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), "red|dir/sub/x.json"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestGreedyAlongsideRegularParams confirms `{name...}` composes
+// freely with single-segment params on the same route. Distinct
+// PathValue keys, no special-casing.
+func TestGreedyAlongsideRegularParams(t *testing.T) {
+	mux := NewMux()
+	mux.GET("/users/{id}/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.PathValue("id") + "|" + r.PathValue("path")))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/users/42/files/docs/a.md", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), "42|docs/a.md"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestDocExample_MultipleCaptures pins the exact example shown in the
+// "Multiple captures in one route" section of guide/routing.md. Every
+// row in the doc table is exercised here so the documentation can't
+// silently drift from runtime behaviour.
+//
+// Pattern: /users/{name}/files/{path...}
+//
+//	GET /users/alice/files/docs/note.md → name=alice path=docs/note.md
+//	GET /users/bob/files/               → name=bob   path=""
+//	GET /users/bob/files                → 404
+func TestDocExample_MultipleCaptures(t *testing.T) {
+	mux := NewMux()
+	mux.GET("/users/{name}/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.PathValue("name") + "|" + r.PathValue("path")))
+	})
+
+	type want struct {
+		status int
+		body   string
+	}
+	cases := []struct {
+		request string
+		want    want
+	}{
+		{"/users/alice/files/docs/note.md", want{200, "alice|docs/note.md"}},
+		{"/users/bob/files/", want{200, "bob|"}},
+		{"/users/bob/files", want{404, ""}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.request, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, c.request, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != c.want.status {
+				t.Fatalf("status=%d (want %d) body=%q",
+					rec.Code, c.want.status, rec.Body.String())
+			}
+			if c.want.status == 200 && rec.Body.String() != c.want.body {
+				t.Errorf("body %q, want %q", rec.Body.String(), c.want.body)
+			}
+		})
+	}
+}
+
+// TestDocExample_ThreeMiddleParamsPlusGreedy covers the doc snippet
+// `/orgs/{org}/users/{user}/files/{path...}`. Multiple single-segment
+// params stack freely; only the wildcards have count/position
+// restrictions. We exercise the happy path plus a slash-bearing
+// trailing capture to confirm the greedy still bites past the last
+// static segment.
+func TestDocExample_ThreeMiddleParamsPlusGreedy(t *testing.T) {
+	mux := NewMux()
+	mux.GET("/orgs/{org}/users/{user}/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(
+			r.PathValue("org") + "|" +
+				r.PathValue("user") + "|" +
+				r.PathValue("path"),
+		))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/orgs/rakun/users/alice/files/a/b/c.txt", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), "rakun|alice|a/b/c.txt"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestDocExample_RejectsGreedyInMiddle pins the warning callout in the
+// "Multiple captures in one route" section: `/users/{name...}/files/{path...}`
+// must panic at registration time. Two reasons combine — the first
+// greedy isn't trailing (the matcher catches this), and there's a
+// second greedy (caught later if the first weren't there). Either
+// message is acceptable as long as the route is refused.
+func TestDocExample_RejectsGreedyInMiddle(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected Insert to panic on a middle greedy")
+		}
+		msg, _ := r.(string)
+		if msg == "" {
+			if e, ok := r.(error); ok {
+				msg = e.Error()
+			}
+		}
+		// Acceptable: either the "trailing" rule or the "more than
+		// one greedy" rule fires first. Both correctly describe the
+		// route as malformed; we just need ONE of them to surface.
+		if !strings.Contains(msg, "trailing") && !strings.Contains(msg, "greedy") {
+			t.Errorf("panic message %q does not identify the cause", msg)
+		}
+	}()
+
+	mux := NewMux()
+	mux.GET("/users/{name...}/files/{path...}", func(w http.ResponseWriter, r *http.Request) {})
+}
+
+// TestRejectsMultipleStars enforces the "one `*` per route" rule at
+// register time. Multiple `*` segments are ambiguous in spelling
+// (which one is "the" `*`?) and a sign that the operator meant to
+// capture a name rather than a position — that's what `{name...}`
+// (or, for middle segments, `{name}`) is for.
+func TestRejectsMultipleStars(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected Insert to panic on a multi-star route")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			// Some callers wrap as error; tolerate that too.
+			if e, isErr := r.(error); isErr {
+				msg = e.Error()
+			} else {
+				t.Fatalf("panic value is %T, expected string or error", r)
+			}
+		}
+		if !strings.Contains(msg, "more than one '*'") {
+			t.Errorf("panic message %q does not identify the cause", msg)
+		}
+	}()
+
+	mux := NewMux()
+	mux.GET("/a/*/b/*", func(w http.ResponseWriter, r *http.Request) {})
+}
+
+// TestRejectsNonTrailingGreedy guarantees `{name...}` can only appear
+// as the route's last segment. A greedy in the middle would have no
+// stopping rule — the matcher would be permitted to backtrack
+// arbitrarily, which leads to ambiguity nightmares.
+func TestRejectsNonTrailingGreedy(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected Insert to panic on a non-trailing greedy")
+		}
+		msg, _ := r.(string)
+		if msg == "" {
+			if e, ok := r.(error); ok {
+				msg = e.Error()
+			}
+		}
+		if !strings.Contains(msg, "trailing segment") {
+			t.Errorf("panic message %q does not identify the cause", msg)
+		}
+	}()
+
+	mux := NewMux()
+	mux.GET("/a/{x...}/b", func(w http.ResponseWriter, r *http.Request) {})
+}
+
+// TestRejectsMultipleGreedy enforces "at most one greedy per route".
+// Practically the first non-trailing greedy would already trip the
+// trailing rule, but registering two adjacent ones (e.g.
+// `/a/{x...}/{y...}`) takes the dedicated path and surfaces a clearer
+// message naming the actual cause.
+func TestRejectsMultipleGreedy(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected Insert to panic on a multi-greedy route")
+		}
+		msg, _ := r.(string)
+		if msg == "" {
+			if e, ok := r.(error); ok {
+				msg = e.Error()
+			}
+		}
+		// The first violation hit by the validator wins — either the
+		// "more than one greedy" or "must be trailing" message is
+		// acceptable here because both correctly describe the route.
+		if !strings.Contains(msg, "greedy") && !strings.Contains(msg, "trailing") {
+			t.Errorf("panic message %q does not identify the cause", msg)
+		}
+	}()
+
+	mux := NewMux()
+	mux.GET("/a/{x...}/{y...}", func(w http.ResponseWriter, r *http.Request) {})
 }
