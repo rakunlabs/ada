@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -462,6 +463,46 @@ func TestDefaultBinder_ErrorCases(t *testing.T) {
 	err = Bind(req, &user)
 	if err == nil {
 		t.Error("Expected error for invalid form data")
+	}
+}
+
+func TestGetFieldCacheConcurrent(t *testing.T) {
+	const (
+		goroutines = 32
+		iterations = 100
+	)
+
+	stringType := reflect.TypeOf("")
+	byteType := reflect.TypeOf(byte(0))
+	errs := make(chan string, goroutines)
+
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for i := range iterations {
+				rt := reflect.StructOf([]reflect.StructField{
+					{Name: "Name", Type: stringType, Tag: `query:"name"`},
+					{Name: "Pad", Type: reflect.ArrayOf(g*iterations+i+1, byteType)},
+				})
+
+				cache := getFieldCache(rt)
+				if len(cache.queryFields) != 1 || cache.queryFields[0].tagValue != "name" {
+					errs <- "unexpected query field cache"
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
 	}
 }
 

@@ -11,18 +11,19 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 var (
 	ErrBinding = fmt.Errorf("binding")
 
-	typeTime        = reflect.TypeOf(time.Time{})
-	typeDuration    = reflect.TypeOf(time.Duration(0))
-	typeRawMessage  = reflect.TypeOf(json.RawMessage{})
-	typeUnmarshaler = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+	typeTime        = reflect.TypeFor[time.Time]()
+	typeDuration    = reflect.TypeFor[time.Duration]()
+	typeRawMessage  = reflect.TypeFor[json.RawMessage]()
+	typeUnmarshaler = reflect.TypeFor[encoding.TextUnmarshaler]()
 
-	fieldCacheMap = make(map[reflect.Type]*fieldCache)
+	fieldCacheMap sync.Map
 )
 
 // Cached field information for faster binding.
@@ -41,8 +42,8 @@ type fieldInfo struct {
 
 // getFieldCache returns cached field information for a struct type.
 func getFieldCache(rt reflect.Type) *fieldCache {
-	if cache, exists := fieldCacheMap[rt]; exists {
-		return cache
+	if cache, exists := fieldCacheMap.Load(rt); exists {
+		return cache.(*fieldCache)
 	}
 
 	cache := &fieldCache{
@@ -101,9 +102,9 @@ func getFieldCache(rt reflect.Type) *fieldCache {
 		}
 	}
 
-	fieldCacheMap[rt] = cache
+	cacheValue, _ := fieldCacheMap.LoadOrStore(rt, cache)
 
-	return cache
+	return cacheValue.(*fieldCache)
 }
 
 // Bind binds HTTP request data to a struct based on content type and struct tags.
