@@ -32,14 +32,20 @@ import (
 
 // Config holds an OAuth2 provider's endpoints and credentials.
 type Config struct {
-	ClientID        string          `cfg:"client_id"`
-	ClientSecret    string          `cfg:"client_secret"`
-	Scopes          []string        `cfg:"scopes"`
-	AuthURL         string          `cfg:"auth_url"`
-	TokenURL        string          `cfg:"token_url"`
-	UserInfoURL     string          `cfg:"userinfo_url"`
-	RevocationURL   string          `cfg:"revocation_url"`
-	LogoutURL       string          `cfg:"logout_url"`
+	ClientID      string   `cfg:"client_id"`
+	ClientSecret  string   `cfg:"client_secret"`
+	Scopes        []string `cfg:"scopes"`
+	AuthURL       string   `cfg:"auth_url"`
+	TokenURL      string   `cfg:"token_url"`
+	UserInfoURL   string   `cfg:"userinfo_url"`
+	RevocationURL string   `cfg:"revocation_url"`
+	LogoutURL     string   `cfg:"logout_url"`
+	// AuthHeaderStyle selects how the client credentials are presented to the
+	// token (and revocation) endpoint. The zero value is Basic
+	// (client_secret_basic). Config may set it as a readable string via
+	// UnmarshalText, e.g. auth_header_style: client_secret_post. Switch away
+	// from Basic when a provider rejects correct credentials with an
+	// "invalid_client" / "client_secret does not match" error.
 	AuthHeaderStyle AuthHeaderStyle `cfg:"auth_header_style"`
 
 	// IssuerURL is the OIDC issuer URL (e.g. "https://accounts.google.com").
@@ -469,6 +475,9 @@ func (s *Strategy) exchangePassword(ctx context.Context, username, password stri
 }
 
 func (s *Strategy) tokenRequest(ctx context.Context, values url.Values) ([]byte, error) {
+	// authBody mutates values, so it must run before Encode below.
+	authBody(s.cfg.ClientID, s.cfg.ClientSecret, values, s.cfg.AuthHeaderStyle)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.TokenURL, strings.NewReader(values.Encode()))
 	if err != nil {
 		return nil, err
@@ -680,6 +689,9 @@ func (s *Strategy) revoke(ctx context.Context, accessToken string) {
 		"token":           {accessToken},
 		"token_type_hint": {"access_token"},
 	}
+
+	// authBody mutates values, so it must run before Encode below.
+	authBody(s.cfg.ClientID, s.cfg.ClientSecret, values, s.cfg.AuthHeaderStyle)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.RevocationURL, strings.NewReader(values.Encode()))
 	if err != nil {
