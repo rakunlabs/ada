@@ -436,6 +436,11 @@ func isGreedyParam(seg string) bool {
 
 // //////////////////////////////////////////////////////////
 
+// MethodQuery is the QUERY HTTP method, a safe and idempotent method that
+// carries the query semantics in the request body. Defined in RFC 10008
+// "The HTTP QUERY Method"; not yet available as a constant in net/http.
+const MethodQuery = "QUERY"
+
 type Mux struct {
 	root *node
 
@@ -501,6 +506,12 @@ func (m *Mux) TRACE(path string, handler http.HandlerFunc, middlewares ...func(n
 
 func (m *Mux) CONNECT(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
 	m.HandleWithMethod(http.MethodConnect, path, handler, middlewares...)
+}
+
+// QUERY registers a handler for the QUERY HTTP method, a safe and idempotent
+// method with a request body carrying the query (RFC 10008).
+func (m *Mux) QUERY(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(MethodQuery, path, handler, middlewares...)
 }
 
 func (m *Mux) HandleFunc(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {

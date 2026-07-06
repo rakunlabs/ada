@@ -158,7 +158,10 @@ server.HEAD("/users/{id}", headUser)
 server.OPTIONS("/users", optionsUsers)
 server.TRACE("/trace", traceHandler)
 server.CONNECT("/connect", connectHandler)
+server.QUERY("/search", searchHandler)
 ```
+
+The `QUERY` method is a safe and idempotent HTTP method that carries the query in the request body ([RFC 10008 - The HTTP QUERY Method](https://www.rfc-editor.org/rfc/rfc10008.html)). Since `net/http` does not define a constant for it yet, ada exposes `ada.MethodQuery`.
 
 Other not standard HTTP methods can be added with `HandleWithMethod`
 

@@ -1,6 +1,7 @@
 package ada
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -853,6 +854,38 @@ func TestUse(t *testing.T) {
 
 	if recorderGet.Body.String() != "GET Test" {
 		t.Errorf("expected GET /test to return 'GET Test', got '%s'", recorderGet.Body.String())
+	}
+}
+
+func TestQueryMethod(t *testing.T) {
+	mux := NewMux()
+	mux.QUERY("/search", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Write([]byte("query: " + string(body)))
+	})
+
+	// QUERY request with a body is routed to the handler
+	req := httptest.NewRequest(MethodQuery, "/search", strings.NewReader("name=ada"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "query: name=ada" {
+		t.Fatalf("expected body 'query: name=ada', got '%s'", rec.Body.String())
+	}
+
+	// Other methods on the same path return 405 with QUERY in Allow header
+	req = httptest.NewRequest(http.MethodPost, "/search", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+	if allow := rec.Header().Get("Allow"); !strings.Contains(allow, MethodQuery) {
+		t.Fatalf("expected Allow header to contain QUERY, got '%s'", allow)
 	}
 }
 
