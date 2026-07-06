@@ -857,6 +857,69 @@ func TestUse(t *testing.T) {
 	}
 }
 
+func TestUse_NotFoundMiddlewareRunsOnce(t *testing.T) {
+	mux := NewMux()
+
+	var count int
+	mux.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			count++
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	mux.GET("/exists", func(w http.ResponseWriter, r *http.Request) {})
+
+	// Unmatched path: middleware must run exactly once, response is 404.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+	if count != 1 {
+		t.Fatalf("expected middleware to run once on 404, ran %d times", count)
+	}
+
+	// Matched path: middleware must also run exactly once.
+	count = 0
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/exists", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if count != 1 {
+		t.Fatalf("expected middleware to run once on match, ran %d times", count)
+	}
+}
+
+func TestGreedyParam_StaticOverlapFallback(t *testing.T) {
+	mux := NewMux()
+
+	var gotP, gotStar string
+	mux.GET("/files/{p...}", func(w http.ResponseWriter, r *http.Request) {
+		gotP = r.PathValue("p")
+		gotStar = r.PathValue("*")
+		w.Write([]byte("wild"))
+	})
+	mux.GET("/files/static/logo.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("static"))
+	})
+
+	// Request goes deeper than the static route — must fall back to the
+	// greedy wildcard and bind the FULL remainder under its name "p".
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/files/static/logo.png/extra", nil))
+
+	if rec.Body.String() != "wild" {
+		t.Fatalf("expected wildcard handler, got body %q (status %d)", rec.Body.String(), rec.Code)
+	}
+	if gotP != "static/logo.png/extra" {
+		t.Fatalf("expected PathValue(p)=%q, got %q (PathValue(*)=%q)", "static/logo.png/extra", gotP, gotStar)
+	}
+}
+
 func TestQueryMethod(t *testing.T) {
 	mux := NewMux()
 	mux.QUERY("/search", func(w http.ResponseWriter, r *http.Request) {

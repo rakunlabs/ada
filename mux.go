@@ -29,28 +29,68 @@ type staticChild struct {
 	node *node
 }
 
+// methodEntry bundles everything needed to dispatch one method on a node:
+// the handler, the route pattern (set on r.Pattern before the call), and the
+// pre-computed param names. Nodes hold these in a small slice instead of
+// maps — a linear scan over 1-4 entries beats map hashing on the hot path.
+type methodEntry struct {
+	method  string
+	pattern string
+	params  []paramInfo
+	handler http.HandlerFunc
+}
+
 type node struct {
-	Segment  *node
+	// Possible marks a trailing (greedy) wildcard child: the node can
+	// consume the entire remaining path.
 	Possible bool
 
-	// Inlined static trie fields (replaces *nodeStatic).
-	// StaticKey is the compressed radix label for this node.
-	// StaticChildren is a sorted slice of children keyed by first byte.
+	// Inlined static trie fields. StaticKey is the compressed radix
+	// label for this node; keys span segment boundaries, so '/' bytes
+	// appear inside keys and one comparison can match several path
+	// segments. StaticChildren is a sorted slice keyed by first byte.
 	StaticKey      string
 	StaticChildren []staticChild
 
 	TypeWildcard *nodeWildcard
 	TypeParam    *nodeParam
 
-	MethodHandler map[string]http.HandlerFunc
-	Handler       http.HandlerFunc
+	// entries holds the per-method handlers; catchAll is the
+	// method-agnostic handler registered via HandleFunc/Handle.
+	entries  []methodEntry
+	catchAll *methodEntry
 
-	// Path of the node, used for telemetry.
-	Path string
+	// allow is the pre-computed Allow header value for 405/auto-OPTIONS
+	// responses. Maintained by SetHandler; "" when a catch-all handler
+	// exists (any method is accepted) or no methods are registered.
+	allow string
+}
 
-	// Params holds per-method pre-computed param names.
-	// Key "" is used for the catch-all (no method) handler.
-	Params map[string][]paramInfo
+// lookupMethod returns the entry for the given method, or nil.
+// Linear scan: nodes typically register 1-4 methods, and a string
+// comparison (length check + memequal) is cheaper than map hashing.
+func (n *node) lookupMethod(method string) *methodEntry {
+	for i := range n.entries {
+		if n.entries[i].method == method {
+			return &n.entries[i]
+		}
+	}
+
+	return nil
+}
+
+// lookupEntry resolves the entry for a request method including the
+// auto-HEAD fallback (HEAD falls back to GET) and the catch-all handler.
+func (n *node) lookupEntry(method string) *methodEntry {
+	entry := n.lookupMethod(method)
+	if entry == nil && method == http.MethodHead {
+		entry = n.lookupMethod(http.MethodGet)
+	}
+	if entry == nil {
+		entry = n.catchAll
+	}
+
+	return entry
 }
 
 // getStaticChild returns the child node for the given first byte.
@@ -104,89 +144,37 @@ type nodeWildcard struct {
 }
 
 func (n *node) IsHandlerExists() bool {
-	if n.Handler != nil || len(n.MethodHandler) > 0 {
-		return true
-	}
-
-	return false
-}
-
-func (n *node) FindNode(path string, r *http.Request) (*node, typeNode) {
-	if path == "" {
-		if n.IsHandlerExists() {
-			return n, 0
-		}
-
-		return nil, 0
-	}
-
-	if len(n.StaticChildren) > 0 {
-		current := n
-		isFound := true
-
-		for i := 0; i < len(path); {
-			char := path[i]
-			child, ok := current.getStaticChild(char)
-			if !ok {
-				isFound = false
-
-				break
-			}
-
-			remaining := path[i:]
-			childKey := child.StaticKey
-			if len(remaining) < len(childKey) || remaining[:len(childKey)] != childKey {
-				isFound = false
-
-				break
-			}
-
-			i += len(childKey)
-			current = child
-		}
-
-		if isFound {
-			return current, typeNodeStatic
-		}
-	}
-
-	// Check for parameter nodes - they match any segment and capture the value
-	if n.TypeParam != nil && path != "" {
-		return n.TypeParam.Children, typeNodeParam
-	}
-
-	// Check for wildcard nodes - they match any remaining path
-	if n.TypeWildcard != nil {
-		return n.TypeWildcard.Children, typeNodeWildcard
-	}
-
-	return nil, 0
+	return n.catchAll != nil || len(n.entries) > 0
 }
 
 func (n *node) SetHandler(method, path string, handler http.HandlerFunc, params []paramInfo) {
-	n.Path = path // Store the path template for telemetry
-
-	handlerAssign := func(w http.ResponseWriter, r *http.Request) {
-		r.Pattern = path // Set the pattern
-		handler(w, r)
+	// The pattern is stored on the entry and assigned to r.Pattern in
+	// ServeHTTP right before the handler runs — no wrapper closure, so
+	// dispatch stays a single indirect call.
+	entry := methodEntry{
+		method:  method,
+		pattern: path,
+		params:  params,
+		handler: handler,
 	}
-
-	if n.Params == nil {
-		n.Params = make(map[string][]paramInfo)
-	}
-	n.Params[method] = params
 
 	if method == "" {
-		n.Handler = handlerAssign
+		n.catchAll = &entry
+		n.allow = buildAllowHeader(n)
 
 		return
 	}
 
-	if n.MethodHandler == nil {
-		n.MethodHandler = make(map[string]http.HandlerFunc)
+	for i := range n.entries {
+		if n.entries[i].method == method {
+			n.entries[i] = entry
+
+			return
+		}
 	}
 
-	n.MethodHandler[method] = handlerAssign
+	n.entries = append(n.entries, entry)
+	n.allow = buildAllowHeader(n)
 }
 
 func (n *node) Insert(method, path string, handler http.HandlerFunc) {
@@ -243,24 +231,59 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 	}
 
 	// ── Insert phase ─────────────────────────────────────────────────
-	var typeNodeSegment typeNode
+	// The trie stores full-path radix keys: consecutive static segments
+	// (and their '/' separators) are compressed into a single key, so
+	// request matching consumes multiple segments with one comparison.
+	//
+	// Anchoring rules:
+	//   - Param/wildcard nodes attach at segment-start nodes; the static
+	//     run before them therefore ends with the '/' separator.
+	//   - A param/wildcard's Children node resumes matching AT the '/'
+	//     that follows the captured segment, so static keys after a
+	//     param/wildcard begin with '/'.
+	//   - Interior empty segments are collapsed ("/a//b" ≡ "/a/b"), but
+	//     a trailing empty segment keeps its '/' in the key: "/users/"
+	//     only matches "/users/", never "/users".
+	var typeNodeSegment typeNode = typeNodeSelf
 	var params []paramInfo
 	current := n
+	var run []byte
+	emitted := false // at least one non-empty segment consumed so far
+
+	flush := func() {
+		if len(run) > 0 {
+			current = current.insertNodeTypeStatic(string(run))
+			run = run[:0]
+		}
+	}
+
 	for i, segment := range pathSegments {
 		if segment == "" {
-			continue // skip empty segments
+			if i == len(pathSegments)-1 && emitted {
+				// Trailing slash is significant.
+				run = append(run, '/')
+				typeNodeSegment = typeNodeStatic
+			}
+
+			continue // collapse interior empty segments
 		}
+
+		if emitted {
+			run = append(run, '/')
+		}
+		emitted = true
 
 		typeNodeSegment = findTypeNode(segment)
 		switch typeNodeSegment {
 		case typeNodeStatic:
-			current = current.insertNodeTypeStatic(segment)
+			run = append(run, segment...)
 		case typeNodeWildcard:
 			// Bare `*`: exposed under PathValue("*") regardless of
 			// whether it's middle or trailing. Middle `*` captures one
 			// segment via the params slice; trailing `*` is greedy and
 			// is reconstructed from the original URL string in
 			// ServeHTTP — but both share this one paramInfo entry.
+			flush()
 			params = append(params, paramInfo{Index: i, Name: "*"})
 			current = current.insertNodeTypeWildcard()
 		case typeNodeWildcardParam:
@@ -269,10 +292,12 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 			// position. Tree shape is identical to a bare trailing
 			// `*` — we reuse `insertNodeTypeWildcard` — only the
 			// PathValue key differs.
+			flush()
 			name := segment[1 : len(segment)-4] // strip '{' and '...}'
 			params = append(params, paramInfo{Index: i, Name: name})
 			current = current.insertNodeTypeWildcard()
 		case typeNodeParam:
+			flush()
 			params = append(params, paramInfo{
 				Index: i,
 				Name:  strings.Trim(segment, "{}"),
@@ -281,16 +306,9 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 		default:
 			panic("unknown node type") // should never happen
 		}
-
-		if i != len(pathSegments)-1 {
-			if current.Segment != nil {
-				current = current.Segment
-			} else {
-				current.Segment = &node{}
-				current = current.Segment
-			}
-		}
 	}
+
+	flush()
 
 	current.SetHandler(method, path, handler, params)
 	// Possible marks "trailing wildcard reached" so ServeHTTP can apply
@@ -449,12 +467,41 @@ type Mux struct {
 	methodNotAllowed http.HandlerFunc
 	middlewares      []func(next http.Handler) http.Handler
 	prefix           string
+
+	// Pre-chained 404/405 handlers. Rebuilt whenever middlewares or the
+	// custom handlers change (registration time), so the request path
+	// never rebuilds the middleware chain — previously every 404/405
+	// allocated len(middlewares) closures via Chain.
+	notFoundChain         http.Handler
+	methodNotAllowedChain http.Handler
 }
 
 func NewMux() *Mux {
-	return &Mux{
+	m := &Mux{
 		root: &node{},
 	}
+	m.rebuildErrorChains()
+
+	return m
+}
+
+// rebuildErrorChains re-composes the middleware chain around the 404 and
+// 405 handlers. Called at every mutation point (NewMux, Use, Group,
+// NotFound, MethodNotAllowed) so ServeHTTP only reads the cached chains.
+func (m *Mux) rebuildErrorChains() {
+	notFound := m.notFound
+	if notFound == nil {
+		notFound = http.NotFound
+	}
+	m.notFoundChain = Chain(m.middlewares...)(notFound)
+
+	methodNotAllowed := m.methodNotAllowed
+	if methodNotAllowed == nil {
+		methodNotAllowed = func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}
+	m.methodNotAllowedChain = Chain(m.middlewares...)(methodNotAllowed)
 }
 
 func (m *Mux) HandleWithMethod(method, path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
@@ -542,11 +589,21 @@ func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
 	}
 
 	m.middlewares = append(m.middlewares, middlewares...)
+	m.rebuildErrorChains()
 
-	// Register a wildcard handler to catch all requests under this prefix
-	// This allows middlewares to intercept requests even for unregistered routes
+	// Register a wildcard handler to catch all requests under this prefix.
+	// This allows middlewares to intercept requests even for unregistered
+	// routes. HandleFunc already wraps the handler with the middleware
+	// chain at registration time, so the handler must call the RAW not
+	// found handler — going through notFoundHandler here would apply the
+	// middlewares a second time.
 	m.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
-		m.notFoundHandler(w, r)
+		notFound := m.notFound
+		if notFound == nil {
+			notFound = http.NotFound
+		}
+
+		notFound(w, r)
 	})
 }
 
@@ -569,6 +626,7 @@ func (m Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http
 	m.middlewares = make([]func(next http.Handler) http.Handler, len(parent), len(parent)+len(middlewares))
 	copy(m.middlewares, parent)
 	m.middlewares = append(m.middlewares, middlewares...)
+	m.rebuildErrorChains()
 
 	return &m
 }
@@ -583,16 +641,12 @@ func (m *Mux) Prefix() string {
 //   - If not set, it defaults to http.NotFound.
 func (m *Mux) NotFound(handler http.HandlerFunc) {
 	m.notFound = handler
+	m.rebuildErrorChains()
 }
 
 func (m *Mux) notFoundHandler(w http.ResponseWriter, r *http.Request) {
-	notFound := m.notFound
-	if notFound == nil {
-		notFound = http.NotFound
-	}
-
-	// Call the not found handler with middlewares applied
-	Chain(m.middlewares...)(notFound).ServeHTTP(w, r)
+	// Pre-chained at registration time; no per-request chain rebuild.
+	m.notFoundChain.ServeHTTP(w, r)
 }
 
 // MethodNotAllowed sets the handler for 405 Method Not Allowed responses.
@@ -600,51 +654,56 @@ func (m *Mux) notFoundHandler(w http.ResponseWriter, r *http.Request) {
 //   - The Allow header is always set before the handler is called.
 func (m *Mux) MethodNotAllowed(handler http.HandlerFunc) {
 	m.methodNotAllowed = handler
+	m.rebuildErrorChains()
 }
 
 func (m *Mux) methodNotAllowedHandler(w http.ResponseWriter, r *http.Request, allowed string) {
 	w.Header().Set("Allow", allowed)
 
-	handler := m.methodNotAllowed
-	if handler == nil {
-		handler = func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		}
-	}
-
-	Chain(m.middlewares...)(handler).ServeHTTP(w, r)
+	// Pre-chained at registration time; no per-request chain rebuild.
+	m.methodNotAllowedChain.ServeHTTP(w, r)
 }
 
 // buildAllowHeader returns a sorted, comma-separated list of HTTP methods
 // allowed on the given node. Returns "" if the node is nil or has a catch-all
 // handler (which accepts any method). HEAD is included if GET is registered.
 // OPTIONS is always included when at least one method is registered.
+// Called at registration time only (SetHandler caches it in node.allow).
 func buildAllowHeader(n *node) string {
-	if n == nil || n.Handler != nil {
+	if n == nil || n.catchAll != nil {
 		// catch-all handler accepts any method — not a 405 case
 		return ""
 	}
 
-	if len(n.MethodHandler) == 0 {
+	if len(n.entries) == 0 {
 		return ""
 	}
 
-	seen := make(map[string]struct{}, len(n.MethodHandler)+2)
-	for method := range n.MethodHandler {
-		seen[method] = struct{}{}
+	// entries cannot contain duplicate methods (SetHandler replaces),
+	// so no dedup map is needed.
+	methods := make([]string, 0, len(n.entries)+2)
+	var hasGet, hasHead, hasOptions bool
+	for i := range n.entries {
+		method := n.entries[i].method
+		methods = append(methods, method)
+		switch method {
+		case http.MethodGet:
+			hasGet = true
+		case http.MethodHead:
+			hasHead = true
+		case http.MethodOptions:
+			hasOptions = true
+		}
 	}
 
 	// Auto-HEAD: if GET is registered, HEAD is implicitly available
-	if _, hasGet := seen[http.MethodGet]; hasGet {
-		seen[http.MethodHead] = struct{}{}
+	if hasGet && !hasHead {
+		methods = append(methods, http.MethodHead)
 	}
 
 	// OPTIONS is always available when at least one method is registered
-	seen[http.MethodOptions] = struct{}{}
-
-	methods := make([]string, 0, len(seen))
-	for method := range seen {
-		methods = append(methods, method)
+	if !hasOptions {
+		methods = append(methods, http.MethodOptions)
 	}
 
 	sort.Strings(methods)
@@ -669,85 +728,134 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	pathPattern := make([]indexValue, 0, 4)
 
-	// Walk the path in-place without allocating a []string slice.
-	// We iterate character-by-character, finding '/' delimiters.
-	segmentIndex := 0
-	pos := 1 // skip leading '/'
-	if len(urlPath) == 0 || urlPath[0] != '/' {
-		pos = 0
+	// Walk the path byte-wise over the full-path radix trie: one key
+	// comparison can consume several segments. Segment bookkeeping
+	// (segStart/segIndex) only advances when a key containing '/' is
+	// fully matched; param/wildcard alternatives are anchored at
+	// segment-start nodes and are consulted on static dead ends.
+	pos := 0
+	if len(urlPath) > 0 && urlPath[0] == '/' {
+		pos = 1 // skip leading '/'
 	}
 
-	for pos <= len(urlPath) {
-		// Find the end of the current segment.
-		end := strings.IndexByte(urlPath[pos:], '/')
-		var segment string
-		if end < 0 {
-			segment = urlPath[pos:]
-			end = len(urlPath)
-		} else {
-			segment = urlPath[pos : pos+end]
-			end = pos + end
+	segStart := pos // byte offset where the current segment starts
+	segIndex := 0   // index of the current segment
+	// segOwner is the node positioned exactly at segStart — the only
+	// place param/wildcard alternatives for the current segment can
+	// live. nil when the current segment started inside a compressed
+	// key (no node there ⇒ no alternatives, by construction).
+	var segOwner *node
+
+	for {
+		if pos == segStart {
+			segOwner = current
+
+			// Capture a trailing (greedy) wildcard as the fallback for
+			// everything at/under this segment.
+			if current.TypeWildcard != nil && current.TypeWildcard.Children.Possible {
+				possible = current.TypeWildcard.Children
+				possibleIndex = segIndex
+				possibleOffset = pos
+			}
 		}
 
-		isLast := end >= len(urlPath)
+		if pos == len(urlPath) {
+			if !current.IsHandlerExists() {
+				current = possible
+			}
 
-		if current.TypeWildcard != nil && current.TypeWildcard.Children.Possible {
-			possible = current.TypeWildcard.Children
-			possibleIndex = segmentIndex
-			possibleOffset = pos
-		}
-
-		// Find the type of the node.
-		nd, nodeType := current.FindNode(segment, r)
-		if nd == nil {
-			current = possible
 			break
 		}
 
-		// Capture this segment's value for the binding loop at the
-		// end of ServeHTTP. Both single-segment params (`{id}`) and
-		// wildcards (bare `*`) record a single-segment value here.
-		// Trailing wildcards also flow through this branch but their
-		// per-segment value is later superseded by the greedy joined
-		// reconstruction (see `current.Possible` block at the bottom)
-		// — the pathPattern entry is skipped by the `possibleIndex`
-		// guard in the binding loop, so this isn't a double write.
-		//
-		// Greedy named wildcards (`{name...}`) are matched as
-		// `typeNodeWildcard` here too because they share the same
-		// trie branch; the name distinction lives in the params slice.
-		if nodeType == typeNodeParam || nodeType == typeNodeWildcard {
-			pathPattern = append(pathPattern, indexValue{
-				index: segmentIndex,
-				value: segment,
-			})
+		// ── Static descent: one child hop ──
+		q := pos // first diverging byte on failure
+		var keyByte byte
+		hasKeyByte := false
+		if child, ok := current.getStaticChild(urlPath[pos]); ok {
+			key := child.StaticKey
+			if len(urlPath)-pos >= len(key) && urlPath[pos:pos+len(key)] == key {
+				// Full key match: advance, updating segment bookkeeping
+				// when the key crosses '/' boundaries.
+				if last := strings.LastIndexByte(key, '/'); last >= 0 {
+					segStart = pos + last + 1
+					segIndex += strings.Count(key, "/")
+					if last != len(key)-1 {
+						// The new segment started inside this key — no
+						// node sits at its start, so no alternatives
+						// exist there.
+						segOwner = nil
+					}
+				}
+				pos += len(key)
+				current = child
+
+				continue
+			}
+
+			// Cold path (mismatch): locate the first diverging byte.
+			maxCmp := len(key)
+			if rem := len(urlPath) - pos; rem < maxCmp {
+				maxCmp = rem
+			}
+			for q-pos < maxCmp && urlPath[q] == key[q-pos] {
+				q++
+			}
+			if q-pos < len(key) {
+				keyByte = key[q-pos]
+				hasKeyByte = true
+			}
 		}
 
-		if !isLast {
-			if nd.Possible {
-				possible = nd
-				// Note: possibleOffset is NOT updated here. It stays at the value
-				// from the top-of-loop wildcard check, which is the correct byte
-				// position for reconstructing the wildcard path value.
-			}
-
-			if nd.Segment == nil {
-				current = possible
-				possibleIndex = segmentIndex
-				break
-			}
-
-			current = nd.Segment
+		// ── Static dead end: classify against the current segment ──
+		e := strings.IndexByte(urlPath[segStart:], '/')
+		if e < 0 {
+			e = len(urlPath)
 		} else {
-			if nd.IsHandlerExists() {
-				current = nd
-			} else {
-				current = possible
+			e += segStart
+		}
+
+		// The failure is "inside" the current segment when static
+		// matching could not consume the segment entirely (q < e), or
+		// when it consumed it but the key demands more in-segment bytes
+		// (q == e with a non-'/' key byte, e.g. path "user" vs key
+		// "users"). Only then do param/wildcard alternatives apply —
+		// mirroring the per-segment matcher: a fully static-matched
+		// segment is committed and never re-tried (no backtracking).
+		inSegment := q < e || (q == e && hasKeyByte && keyByte != '/')
+		if inSegment && segOwner != nil && e > segStart {
+			var next *node
+			if segOwner.TypeParam != nil {
+				next = segOwner.TypeParam.Children
+			} else if segOwner.TypeWildcard != nil {
+				next = segOwner.TypeWildcard.Children
+			}
+
+			if next != nil {
+				// Capture the segment value for the binding loop.
+				// Trailing wildcards flow through here too; their
+				// per-segment value is superseded by the greedy joined
+				// reconstruction (possibleIndex guard in the binding
+				// loop skips it).
+				pathPattern = append(pathPattern, indexValue{
+					index: segIndex,
+					value: urlPath[segStart:e],
+				})
+				current = next
+				pos = e // resume at the '/' (or end of path)
+				segOwner = nil
+
+				continue
 			}
 		}
 
-		pos = end + 1
-		segmentIndex++
+		// Fall back to the last trailing wildcard seen (or 404).
+		// possibleIndex and possibleOffset keep the values from the
+		// segment where the wildcard was captured — they must stay
+		// consistent so the greedy value is bound under the wildcard's
+		// registered name (e.g. {p...}), not the "*" fallback.
+		current = possible
+
+		break
 	}
 
 	if current == nil {
@@ -757,38 +865,23 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Optimization #6: use r.Method directly.
 	// HTTP methods from net/http are always uppercase per RFC 7230.
+	// lookupEntry resolves method → auto-HEAD (GET fallback) → catch-all.
 	method := r.Method
-	handler := current.MethodHandler[method]
-
-	// Auto-HEAD: if HEAD is requested and no explicit HEAD handler exists,
-	// fall back to the GET handler. Go's http.ResponseWriter automatically
-	// suppresses the body for HEAD responses.
-	if handler == nil && method == http.MethodHead {
-		handler = current.MethodHandler[http.MethodGet]
-	}
-
-	if handler == nil {
-		handler = current.Handler
-	}
+	entry := current.lookupEntry(method)
 
 	// Fallback to wildcard handler if specific method handler not found.
-	if handler == nil && possible != nil {
-		handler = possible.MethodHandler[method]
-		if handler == nil && method == http.MethodHead {
-			handler = possible.MethodHandler[http.MethodGet]
-		}
-		if handler == nil {
-			handler = possible.Handler
-		}
-		if handler != nil {
+	if entry == nil && possible != nil {
+		entry = possible.lookupEntry(method)
+		if entry != nil {
 			current = possible
 		}
 	}
 
 	// Auto-OPTIONS: if OPTIONS is requested and no explicit handler exists,
 	// respond with 204 No Content and an Allow header listing available methods.
-	if handler == nil && method == http.MethodOptions {
-		if allowed := buildAllowHeader(current); allowed != "" {
+	// The Allow value is pre-computed on the node at registration time.
+	if entry == nil && method == http.MethodOptions {
+		if allowed := current.allow; allowed != "" {
 			w.Header().Set("Allow", allowed)
 			w.WriteHeader(http.StatusNoContent)
 
@@ -798,8 +891,8 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 405 Method Not Allowed: the path exists (node has handlers) but not
 	// for the requested method.
-	if handler == nil {
-		if allowed := buildAllowHeader(current); allowed != "" {
+	if entry == nil {
+		if allowed := current.allow; allowed != "" {
 			m.methodNotAllowedHandler(w, r, allowed)
 
 			return
@@ -818,13 +911,10 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// dominant case for most APIs, and the original code already
 	// relied on this short-circuit; we preserve it.
 	if current.Possible || len(pathPattern) > 0 {
-		// Look up the pre-computed param names for this method (or
-		// catch-all ""). Hoisted so both the trailing-wildcard
+		// The pre-computed param names live on the resolved entry —
+		// no map lookup needed. Hoisted so both the trailing-wildcard
 		// reconstruction and the per-segment binding loop reuse it.
-		params := current.Params[method]
-		if params == nil {
-			params = current.Params[""]
-		}
+		params := entry.params
 
 		if current.Possible {
 			// Trailing wildcard: reconstruct the greedy joined value
@@ -873,7 +963,11 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	handler.ServeHTTP(w, r)
+	// Set the route pattern (used by telemetry/log middleware) and
+	// dispatch. Assigning here instead of in a per-handler wrapper
+	// closure saves one indirect call on every request.
+	r.Pattern = entry.pattern
+	entry.handler(w, r)
 }
 
 // ////////////////////////////////////////////
@@ -893,6 +987,5 @@ func Chain(middlewares ...func(next http.Handler) http.Handler) func(next http.H
 
 type indexValue struct {
 	index int
-	name  string
 	value string
 }

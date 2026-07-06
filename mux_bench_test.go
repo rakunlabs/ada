@@ -79,6 +79,41 @@ func BenchmarkRouter_Param1(b *testing.B) {
 	}
 }
 
+// FreshRequest variants create a new request on every iteration, matching
+// real-server behavior where each request arrives with empty path-value
+// storage. The delta between the static and param variants exposes the
+// true per-request cost of r.SetPathValue (lazy map allocation inside
+// net/http), which the reused-request benchmarks above hide.
+func BenchmarkRouter_StaticShort_FreshRequest(b *testing.B) {
+	mux := NewMux()
+	mux.GET("/users", noopHandler)
+
+	rec := httptest.NewRecorder()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		req := httptest.NewRequest(http.MethodGet, "/users", nil)
+		mux.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkRouter_Param1_FreshRequest(b *testing.B) {
+	mux := NewMux()
+	mux.GET("/users/{id}", noopHandler)
+
+	rec := httptest.NewRecorder()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		req := httptest.NewRequest(http.MethodGet, "/users/12345", nil)
+		mux.ServeHTTP(rec, req)
+	}
+}
+
 func BenchmarkRouter_Param3(b *testing.B) {
 	mux := NewMux()
 	mux.GET("/api/{version}/users/{userId}/posts/{postId}", noopHandler)
