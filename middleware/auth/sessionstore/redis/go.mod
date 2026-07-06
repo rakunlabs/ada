@@ -3,7 +3,7 @@ module github.com/rakunlabs/ada/middleware/auth/sessionstore/redis
 go 1.24
 
 require (
-	github.com/rakunlabs/ada/middleware/auth v0.4.5
+	github.com/rakunlabs/ada/middleware/auth v0.4.6
 	github.com/redis/go-redis/v9 v9.14.0
 	github.com/twmb/tlscfg v1.3.0
 )
