@@ -15,6 +15,8 @@ var trueClientIP = http.CanonicalHeaderKey("True-Client-IP")
 var xForwardedFor = http.CanonicalHeaderKey("X-Forwarded-For")
 var xRealIP = http.CanonicalHeaderKey("X-Real-IP")
 
+var defaultLogger = defaultSlogLogger
+
 // Logger is a middleware that logs HTTP requests and additional information to context.
 type Logger struct {
 	Skipper  func(r *http.Request) bool
@@ -40,6 +42,7 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 			// Skip logging if skipper function is provided and returns true
 			if l.Skipper != nil && l.Skipper(r) {
 				next.ServeHTTP(w, r)
+
 				return
 			}
 
@@ -78,43 +81,7 @@ func (l *Logger) Middleware() func(next http.Handler) http.Handler {
 
 func New(opts ...Option) *Logger {
 	o := option{
-		Logger: Logger{
-			PreFunc: func(r *http.Request) *http.Request {
-				user := r.Header.Get("X-User")
-				requestID := r.Header.Get("X-Request-ID")
-				userAgent := userAgent(r)
-
-				slogAttrs := make([]any, 0, 3)
-				if requestID != "" {
-					slogAttrs = append(slogAttrs, slog.String("request_id", requestID))
-				}
-				if user != "" {
-					slogAttrs = append(slogAttrs, slog.String("user", user))
-				}
-				if userAgent != "" {
-					slogAttrs = append(slogAttrs, slog.String("user_agent", userAgent))
-				}
-
-				return r.WithContext(logi.WithContext(r.Context(), slog.With(slogAttrs...)))
-			},
-			PostFunc: func(r *http.Request, v *Response) {
-				slog.Debug("request",
-					slog.String("user", r.Header.Get("X-User")),
-					slog.String("route", r.Pattern),
-					slog.String("request_id", r.Header.Get("X-Request-ID")),
-					slog.String("remote_ip", realIP(r)),
-					slog.String("host", r.Host),
-					slog.String("method", r.Method),
-					slog.String("uri", r.RequestURI),
-					slog.String("user_agent", userAgent(r)),
-					slog.Int("status", v.Status),
-					slog.Int64("latency", v.Latency.Nanoseconds()),
-					slog.String("latency_human", v.Latency.String()),
-					slog.String("bytes_in", r.Header.Get("Content-Length")),
-					slog.Int64("bytes_out", v.ResponseSize),
-				)
-			},
-		},
+		Logger: defaultLogger(),
 	}
 
 	for _, opt := range opts {
@@ -128,7 +95,59 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 	return New(opts...).Middleware()
 }
 
-func realIP(r *http.Request) (ip string) {
+// SetDefaultLogger replaces the logger used by New when no WithLogger option is provided.
+func SetDefaultLogger(f func() Logger) {
+	if f == nil {
+		defaultLogger = defaultSlogLogger
+
+		return
+	}
+
+	defaultLogger = f
+}
+
+func defaultSlogLogger() Logger {
+	return Logger{
+		PreFunc: func(r *http.Request) *http.Request {
+			user := r.Header.Get("X-User")
+			requestID := r.Header.Get("X-Request-ID")
+			userAgent := UserAgent(r)
+
+			slogAttrs := make([]any, 0, 3)
+			if requestID != "" {
+				slogAttrs = append(slogAttrs, slog.String("request_id", requestID))
+			}
+			if user != "" {
+				slogAttrs = append(slogAttrs, slog.String("user", user))
+			}
+			if userAgent != "" {
+				slogAttrs = append(slogAttrs, slog.String("user_agent", userAgent))
+			}
+
+			return r.WithContext(logi.WithContext(r.Context(), slog.With(slogAttrs...)))
+		},
+		PostFunc: func(r *http.Request, v *Response) {
+			slog.Debug("request",
+				slog.String("user", r.Header.Get("X-User")),
+				slog.String("route", r.Pattern),
+				slog.String("request_id", r.Header.Get("X-Request-ID")),
+				slog.String("remote_ip", RealIP(r)),
+				slog.String("host", r.Host),
+				slog.String("method", r.Method),
+				slog.String("uri", r.RequestURI),
+				slog.String("user_agent", UserAgent(r)),
+				slog.Int("status", v.Status),
+				slog.Int64("latency", v.Latency.Nanoseconds()),
+				slog.String("latency_human", v.Latency.String()),
+				slog.String("bytes_in", r.Header.Get("Content-Length")),
+				slog.Int64("bytes_out", v.ResponseSize),
+			)
+		},
+	}
+}
+
+// RealIP returns the client IP extracted from common proxy headers.
+func RealIP(r *http.Request) (ip string) {
 	defer func() {
 		if ip == "" {
 			ip = r.RemoteAddr
@@ -149,7 +168,8 @@ func realIP(r *http.Request) (ip string) {
 	return ip
 }
 
-func userAgent(r *http.Request) string {
+// UserAgent returns the first user-agent token.
+func UserAgent(r *http.Request) string {
 	// get first part of user-agent before space
 	if ua := r.Header.Get("User-Agent"); ua != "" {
 		if i := strings.Index(ua, " "); i != -1 {
