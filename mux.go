@@ -52,6 +52,14 @@ type node struct {
 	StaticKey      string
 	StaticChildren []staticChild
 
+	// Pre-computed '/' metadata for StaticKey, maintained by setKey so
+	// the hot path avoids strings.LastIndexByte/strings.Count per key
+	// hop. keySlashPos is lastIndexByte(key,'/')+1 — 0 means "no slash"
+	// so the zero value is correct for empty keys. keySlashCount is the
+	// number of '/' bytes in the key.
+	keySlashPos   int
+	keySlashCount int
+
 	TypeWildcard *nodeWildcard
 	TypeParam    *nodeParam
 
@@ -91,6 +99,14 @@ func (n *node) lookupEntry(method string) *methodEntry {
 	}
 
 	return entry
+}
+
+// setKey assigns the radix key and refreshes the pre-computed '/'
+// metadata used by ServeHTTP's segment bookkeeping.
+func (n *node) setKey(key string) {
+	n.StaticKey = key
+	n.keySlashPos = strings.LastIndexByte(key, '/') + 1
+	n.keySlashCount = strings.Count(key, "/")
 }
 
 // getStaticChild returns the child node for the given first byte.
@@ -347,20 +363,18 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 				byteIndex += commonLen
 			} else {
 				// Need to split the node
-				splitNode := &node{
-					StaticKey: child.StaticKey[:commonLen],
-				}
+				splitNode := &node{}
+				splitNode.setKey(child.StaticKey[:commonLen])
 
 				// Update existing child
-				child.StaticKey = child.StaticKey[commonLen:]
+				child.setKey(child.StaticKey[commonLen:])
 				splitNode.setStaticChild(child.StaticKey[0], child)
 
 				// Add new path if needed
 				if commonLen < len(remaining) {
 					newSuffix := remaining[commonLen:]
-					newNode := &node{
-						StaticKey: newSuffix,
-					}
+					newNode := &node{}
+					newNode.setKey(newSuffix)
 
 					splitNode.setStaticChild(newSuffix[0], newNode)
 					current.setStaticChild(char, splitNode)
@@ -373,9 +387,8 @@ func (n *node) insertNodeTypeStatic(path string) *node {
 			}
 		} else {
 			// Create new node with remaining characters
-			newNode := &node{
-				StaticKey: path[byteIndex:],
-			}
+			newNode := &node{}
+			newNode.setKey(path[byteIndex:])
 			current.setStaticChild(char, newNode)
 
 			return newNode
@@ -775,11 +788,12 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			key := child.StaticKey
 			if len(urlPath)-pos >= len(key) && urlPath[pos:pos+len(key)] == key {
 				// Full key match: advance, updating segment bookkeeping
-				// when the key crosses '/' boundaries.
-				if last := strings.LastIndexByte(key, '/'); last >= 0 {
-					segStart = pos + last + 1
-					segIndex += strings.Count(key, "/")
-					if last != len(key)-1 {
+				// when the key crosses '/' boundaries. The '/' metadata
+				// is pre-computed at registration time (setKey).
+				if sp := child.keySlashPos; sp > 0 {
+					segStart = pos + sp
+					segIndex += child.keySlashCount
+					if sp != len(key) {
 						// The new segment started inside this key — no
 						// node sits at its start, so no alternatives
 						// exist there.
