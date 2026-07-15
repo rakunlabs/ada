@@ -3,7 +3,7 @@ module github.com/rakunlabs/ada/middleware/log/logzero
 go 1.24
 
 require (
-	github.com/rakunlabs/ada/middleware/log v0.4.6-1
+	github.com/rakunlabs/ada/middleware/log v0.4.7
 	github.com/rs/zerolog v1.34.0
 )
 
