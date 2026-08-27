@@ -3,6 +3,7 @@ package issuer
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -27,23 +28,29 @@ type Backend interface {
 // Config sets the TTL/rotation behavior for the default issuer.
 type Config struct {
 	// AccessTTL is how long an access token is valid. Default 15 minutes.
-	AccessTTL time.Duration
+	AccessTTL time.Duration `cfg:"access_ttl"`
 	// RefreshTTL is how long a refresh token is valid. Default 7 days.
-	RefreshTTL time.Duration
-	// RotateRefresh, when true, mints a fresh refresh token on every Refresh.
-	// Default true.
-	RotateRefresh bool
+	RefreshTTL time.Duration `cfg:"refresh_ttl"`
+	// DisableRefreshRotation turns off refresh-token rotation.
+	//
+	// Rotation is on by default: every Refresh mints a fresh refresh token and
+	// invalidates the previous one, so a leaked refresh token is usable at most
+	// once. Turn it off only when several clients share one session and would
+	// race each other out of it.
+	DisableRefreshRotation bool `cfg:"disable_refresh_rotation"`
 	// Now is the time source; defaults to time.Now. Tests override.
-	Now func() time.Time
+	Now func() time.Time `cfg:"-"`
 }
 
 func (c Config) withDefaults() Config {
 	if c.AccessTTL <= 0 {
 		c.AccessTTL = 15 * time.Minute
 	}
+
 	if c.RefreshTTL <= 0 {
 		c.RefreshTTL = 7 * 24 * time.Hour
 	}
+
 	if c.Now == nil {
 		c.Now = time.Now
 	}
@@ -103,18 +110,39 @@ func (d *Default) Issue(ctx context.Context, id *identity.Identity) (*Pair, erro
 		return nil, fmt.Errorf("issuer: random refresh: %w", err)
 	}
 
+	accessExp := now.Add(d.cfg.AccessTTL)
+
+	// The identity never outlives the access token it travels with: a strategy
+	// may advertise a longer upstream expiry, but our own access TTL is the
+	// binding one.
+	if id.ExpiresAt.IsZero() || id.ExpiresAt.After(accessExp) {
+		id.ExpiresAt = accessExp
+	}
+
 	pair := &Pair{
 		SessionID: sessionID,
 		Identity:  id,
-		Access:    Token{Value: access, ExpiresAt: now.Add(d.cfg.AccessTTL)},
+		Access:    Token{Value: access, ExpiresAt: accessExp},
 		Refresh:   Token{Value: refresh, ExpiresAt: now.Add(d.cfg.RefreshTTL)},
 	}
 
-	if err := d.backend.SavePair(ctx, pair, d.cfg.RefreshTTL); err != nil {
+	if err := d.backend.SavePair(ctx, pair, d.storageTTL()); err != nil {
 		return nil, fmt.Errorf("issuer: save pair: %w", err)
 	}
 
 	return pair, nil
+}
+
+// storageGrace keeps a record alive slightly past the refresh token it holds.
+//
+// Without it, the backend TTL and the token expiry land at the same instant
+// and a client that refreshes a moment too late gets ErrNotFound — "no such
+// session" — instead of ErrRefreshExpired. Same outcome, worse diagnosis, and
+// callers that distinguish the two would take the wrong branch.
+const storageGrace = time.Minute
+
+func (d *Default) storageTTL() time.Duration {
+	return d.cfg.RefreshTTL + storageGrace
 }
 
 // Resolve fetches the pair for sessionID. The caller decides what to do based
@@ -164,26 +192,33 @@ func (d *Default) refresh(ctx context.Context, sessionID, refreshToken string) (
 		return nil, err
 	}
 
-	if pair.Refresh.Value != refreshToken {
+	// Constant time: the refresh token is a bearer secret, so a comparison
+	// that returns early leaks its prefix to a patient caller.
+	if subtle.ConstantTimeCompare([]byte(pair.Refresh.Value), []byte(refreshToken)) != 1 {
 		return nil, ErrRefreshInvalid
 	}
 
-	if pair.Refresh.Expired() {
+	now := d.cfg.Now()
+
+	if pair.Refresh.ExpiredAt(now) {
 		_ = d.backend.DeletePair(ctx, sessionID)
 
 		return nil, ErrRefreshExpired
 	}
-
-	now := d.cfg.Now()
 
 	newAccess, err := randomToken(32)
 	if err != nil {
 		return nil, fmt.Errorf("issuer: random access: %w", err)
 	}
 
-	pair.Access = Token{Value: newAccess, ExpiresAt: now.Add(d.cfg.AccessTTL)}
+	accessExp := now.Add(d.cfg.AccessTTL)
+	pair.Access = Token{Value: newAccess, ExpiresAt: accessExp}
 
-	if d.cfg.RotateRefresh {
+	if pair.Identity != nil {
+		pair.Identity.ExpiresAt = accessExp
+	}
+
+	if !d.cfg.DisableRefreshRotation {
 		newRefresh, err := randomToken(32)
 		if err != nil {
 			return nil, fmt.Errorf("issuer: random refresh: %w", err)
@@ -192,11 +227,67 @@ func (d *Default) refresh(ctx context.Context, sessionID, refreshToken string) (
 		pair.Refresh = Token{Value: newRefresh, ExpiresAt: now.Add(d.cfg.RefreshTTL)}
 	}
 
-	if err := d.backend.SavePair(ctx, pair, d.cfg.RefreshTTL); err != nil {
+	if err := d.backend.SavePair(ctx, pair, d.storageTTL()); err != nil {
 		return nil, fmt.Errorf("issuer: save pair: %w", err)
 	}
 
 	return pair, nil
+}
+
+// Update implements Updater: it rewrites the stored identity in place.
+//
+// Serialized against Refresh through the same per-session flight lock, so an
+// update and a rotation cannot interleave and lose each other's write.
+func (d *Default) Update(ctx context.Context, sessionID string, fn func(*identity.Identity) error) (*Pair, error) {
+	if sessionID == "" {
+		return nil, ErrNotFound
+	}
+
+	unlock := d.lockSession(sessionID)
+	defer unlock()
+
+	pair, err := d.backend.LoadPair(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	if pair.Identity == nil {
+		pair.Identity = &identity.Identity{}
+	}
+
+	if err := fn(pair.Identity); err != nil {
+		return nil, err
+	}
+
+	if err := d.backend.SavePair(ctx, pair, d.storageTTL()); err != nil {
+		return nil, fmt.Errorf("issuer: save pair: %w", err)
+	}
+
+	return pair, nil
+}
+
+// lockSession serializes writes for one session ID.
+func (d *Default) lockSession(sessionID string) func() {
+	for {
+		d.mu.Lock()
+
+		f, busy := d.flights[sessionID]
+		if !busy {
+			f = &refreshFlight{done: make(chan struct{})}
+			d.flights[sessionID] = f
+			d.mu.Unlock()
+
+			return func() {
+				d.mu.Lock()
+				delete(d.flights, sessionID)
+				d.mu.Unlock()
+				close(f.done)
+			}
+		}
+
+		d.mu.Unlock()
+		<-f.done
+	}
 }
 
 // Revoke deletes the session.

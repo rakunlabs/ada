@@ -224,8 +224,31 @@ func (s *Strategy) AuthenticateRequest(ctx context.Context, r *http.Request) (*i
 	return id, nil
 }
 
+// Challenge implements strategy.Challenger.
+//
+// Only the Bearer scheme is advertised, and only when the strategy is
+// actually reading the Authorization header. A deployment that moved its
+// key to a custom header has no registered scheme to name, so it
+// contributes nothing rather than pointing clients at a header it ignores.
+func (s *Strategy) Challenge() string {
+	if !s.bearerPrefix {
+		return ""
+	}
+
+	for _, h := range s.effectiveHeaders() {
+		if strings.EqualFold(h, "Authorization") {
+			return "Bearer"
+		}
+	}
+
+	return ""
+}
+
 // Interface compliance.
-var _ strategy.RequestAuthenticator = (*Strategy)(nil)
+var (
+	_ strategy.RequestAuthenticator = (*Strategy)(nil)
+	_ strategy.Challenger           = (*Strategy)(nil)
+)
 
 // effectiveHeaders returns the header lookup order, applying the default
 // when nothing was configured.

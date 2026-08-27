@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
@@ -81,6 +82,8 @@ type Strategy struct {
 	register       Registrar
 	registerFields []strategy.Field
 	autoLogin      bool
+
+	limiter guard.Limiter
 }
 
 // Option configures a Strategy.
@@ -115,6 +118,15 @@ func WithFields(fields ...strategy.Field) Option {
 			s.passwordField = fields[1].Name
 		}
 	}
+}
+
+// WithLimiter locks an account out after repeated failed logins.
+//
+// Nothing here counts failures without it: the Verifier is called once per
+// request, forever. guard.New(guard.Config{}) gives five attempts and an
+// escalating lockout.
+func WithLimiter(l guard.Limiter) Option {
+	return func(s *Strategy) { s.limiter = l }
 }
 
 // WithRegistrar enables signup for this strategy. The presence of a Registrar
@@ -252,14 +264,27 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	key := s.guardKey(r, username)
+
+	if s.limiter != nil {
+		if d := s.limiter.Check(key); !d.Allowed {
+			guard.WriteLocked(w, d)
+
+			return nil, strategy.OutcomeFailed, nil
+		}
+	}
+
 	id, err := s.verify(r.Context(), username, password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
+			s.recordFailure(key)
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 
 			return nil, strategy.OutcomeFailed, nil
 		}
 
+		// A verifier that blew up is not a wrong password. Counting it would
+		// let a database outage lock out the whole user base.
 		slog.Error("local verifier error", "strategy", s.name, "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "verify_failed", "verifier error")
 
@@ -267,14 +292,36 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 	}
 
 	if id == nil {
+		s.recordFailure(key)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	if s.limiter != nil {
+		s.limiter.Succeed(key)
+	}
+
 	id.Provider = s.name
 
 	return id, strategy.OutcomeContinue, nil
+}
+
+func (s *Strategy) recordFailure(key string) {
+	if s.limiter != nil {
+		s.limiter.Fail(key)
+	}
+}
+
+// guardKey identifies the attempt for rate-limiting purposes.
+//
+// Keyed on the username, not the client address. An attacker spraying one
+// password across many accounts from one IP is the case an IP key catches; an
+// attacker grinding one account from a botnet is the case it misses, and that
+// is the one that actually takes over accounts. Deployments that want both can
+// wrap the Limiter.
+func (s *Strategy) guardKey(_ *http.Request, username string) string {
+	return s.name + ":" + strings.ToLower(username)
 }
 
 // Logout is a no-op for the local strategy; the issuer revokes the session.

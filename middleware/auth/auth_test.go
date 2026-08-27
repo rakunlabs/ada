@@ -32,6 +32,15 @@ func (f *fakeMux) POST(p string, h http.HandlerFunc, _ ...func(http.Handler) htt
 }
 func (f *fakeMux) HandleFunc(p string, h http.HandlerFunc, _ ...func(http.Handler) http.Handler) {
 	f.routes = append(f.routes, p)
+
+	// ada.Mux spells a subtree as "/x/*"; http.ServeMux spells it "/x/" and
+	// would otherwise treat the star as a literal path segment.
+	if strings.HasSuffix(p, "/*") {
+		f.mu.HandleFunc(strings.TrimSuffix(p, "*"), h)
+
+		return
+	}
+
 	f.mu.HandleFunc(p, h)
 }
 func (f *fakeMux) HandleFuncWildcard(p string, h http.HandlerFunc, _ ...func(http.Handler) http.Handler) {
@@ -532,5 +541,76 @@ func TestMount_AutoWiresOAuth2CallbackBasePath(t *testing.T) {
 	wantSub := "redirect_uri=https%3A%2F%2Fapp.example.com%2Fapi%2Fv1%2Flogin%2Fcallback%2Fgoogle"
 	if !strings.Contains(loc, wantSub) {
 		t.Errorf("redirect Location should contain %q, got %q", wantSub, loc)
+	}
+}
+
+// The login page reads redirect_path out of window.location and navigates to
+// it. Validating only the copy we echo back is not enough — the browser never
+// asks us about the one in its address bar — so an unsafe value must be
+// stripped before the page can see it.
+func TestUIStripsUnsafeRedirectPath(t *testing.T) {
+	a := auth.New(auth.Config{})
+
+	a.Strategy(local.New("local", func(context.Context, string, string) (*identity.Identity, error) {
+		return nil, local.ErrInvalidCredentials
+	}))
+
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	mux := newFakeMux()
+	a.Mount(mux)
+
+	rec := httptest.NewRecorder()
+	mux.mu.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"/login/?redirect_path=https%3A%2F%2Fevil.example%2F", nil))
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("code = %d, want a redirect stripping the parameter", rec.Code)
+	}
+
+	loc := rec.Header().Get("Location")
+	if strings.Contains(loc, "evil.example") {
+		t.Fatalf("unsafe redirect_path survived: %q", loc)
+	}
+
+	// A safe value is left alone: the page is served, not redirected.
+	rec = httptest.NewRecorder()
+	mux.mu.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"/login/?redirect_path=%2Fdashboard", nil))
+
+	if rec.Code == http.StatusFound {
+		t.Fatalf("a same-origin redirect_path should not be stripped: %q", rec.Header().Get("Location"))
+	}
+}
+
+// A successful login must not echo an attacker-supplied absolute URL back to
+// the page that is about to navigate to it.
+func TestLoginResponseDropsUnsafeRedirectPath(t *testing.T) {
+	a := auth.New(auth.Config{UI: auth.UIConfig{ExternalFolder: true}})
+
+	a.Strategy(local.New("local", func(context.Context, string, string) (*identity.Identity, error) {
+		return &identity.Identity{Subject: "alice"}, nil
+	}))
+
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	mux := newFakeMux()
+	a.Mount(mux)
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost,
+		"/login/pass/local?redirect_path=https%3A%2F%2Fevil.example%2F",
+		strings.NewReader(`{"username":"a","password":"b"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json")
+
+	mux.mu.ServeHTTP(rec, r)
+
+	if strings.Contains(rec.Body.String(), "evil.example") {
+		t.Fatalf("response echoes an off-site redirect: %s", rec.Body)
 	}
 }

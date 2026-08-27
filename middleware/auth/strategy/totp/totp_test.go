@@ -160,11 +160,11 @@ func TestVerify_RejectsMalformedInput(t *testing.T) {
 
 	bads := []string{
 		"",
-		"1234567",     // too short
-		"123456789",   // too long
-		"94287082 ",   // trailing whitespace handled by TrimSpace, OK
-		"94287082\n",  // newline — TrimSpace handles
-		"94287O82",    // letter O instead of digit 0
+		"1234567",    // too short
+		"123456789",  // too long
+		"94287082 ",  // trailing whitespace handled by TrimSpace, OK
+		"94287082\n", // newline — TrimSpace handles
+		"94287O82",   // letter O instead of digit 0
 		"hello",
 		"--------",
 	}

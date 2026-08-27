@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 )
 
 var (
@@ -73,13 +72,17 @@ func (c *CookieCodec) computeMAC(name, sessionID string) []byte {
 }
 
 // GenerateSessionID creates a cryptographically random session ID.
+//
+// The ID carries no structure on purpose: an earlier version prefixed it with
+// the creation timestamp, which leaked session age to anyone who saw the
+// cookie.
 func GenerateSessionID() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return "", err
+		return "", fmt.Errorf("sessionstore: read random: %w", err)
 	}
 
-	return fmt.Sprintf("%d_%s", time.Now().UnixNano(), base64.RawURLEncoding.EncodeToString(b)), nil
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // SetSessionCookie writes the session cookie to the response.
@@ -108,11 +111,24 @@ func ReadSessionCookie(r *http.Request, name string) (string, error) {
 	return cookie.Value, nil
 }
 
-// GenerateRandomKey generates a random key of the given length.
-func GenerateRandomKey(length int) []byte {
+// NewRandomKey generates a random key of the given length, reporting failure.
+func NewRandomKey(length int) ([]byte, error) {
 	k := make([]byte, length)
 	if _, err := rand.Read(k); err != nil {
-		return nil
+		return nil, fmt.Errorf("sessionstore: read random: %w", err)
+	}
+
+	return k, nil
+}
+
+// GenerateRandomKey generates a random key of the given length.
+//
+// Deprecated: it cannot report an RNG failure — a nil key would silently be
+// used as an HMAC key. Use NewRandomKey.
+func GenerateRandomKey(length int) []byte {
+	k, err := NewRandomKey(length)
+	if err != nil {
+		panic(err)
 	}
 
 	return k

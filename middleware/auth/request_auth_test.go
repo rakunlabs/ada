@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/rakunlabs/ada/middleware/auth"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
+	"github.com/rakunlabs/ada/middleware/auth/session"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 	"github.com/rakunlabs/ada/middleware/auth/strategy/apikey"
 	"github.com/rakunlabs/ada/middleware/auth/strategy/basic"
@@ -205,6 +207,125 @@ func TestRequireRequestCredentialsWinOverCookie(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != "svc@apikey" {
 		t.Errorf("expected the key's identity, got %q", got)
+	}
+}
+
+// TestDisableRedirectAnswers401 pins the corrected status for callers that
+// opt out of the login redirect.
+//
+// This used to be 407 Proxy Authentication Required, which was wrong on
+// both counts: ada is an origin server, not a proxy, and RFC 9110 §15.5.8
+// pairs 407 with a Proxy-Authenticate header that was never sent. Clients
+// switch on this status — that is the entire reason to opt out of the
+// redirect — so a wrong code sent them looking for an upstream proxy that
+// does not exist.
+func TestDisableRedirectAnswers401(t *testing.T) {
+	a := newAPIKeyAuth(t, auth.Config{}, "s3cret")
+
+	handler := a.Require()(whoami())
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req = req.WithContext(session.SetDisableRedirect(req.Context(), true))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
+		t.Errorf("WWW-Authenticate = %q, want %q", got, "Bearer")
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["error"] != "unauthorized" {
+		t.Errorf("body = %+v, want error=unauthorized", body)
+	}
+}
+
+// TestChallengeReflectsRegisteredStrategies checks that the 401 names
+// schemes the deployment actually accepts. Advertising Bearer to a
+// cookie-only server sends clients chasing an endpoint that does not
+// exist; omitting it from a server that does take API keys leaves them
+// with no way to discover it.
+func TestChallengeReflectsRegisteredStrategies(t *testing.T) {
+	tests := []struct {
+		name       string
+		strategies []strategy.Authenticator
+		want       string
+	}{
+		{
+			name:       "cookie-only deployment advertises nothing",
+			strategies: []strategy.Authenticator{local.New("local", nil)},
+			want:       "",
+		},
+		{
+			name:       "api key advertises Bearer",
+			strategies: []strategy.Authenticator{apikey.New("apikey", keyValidator("k"), apikey.WithHeaders("Authorization"))},
+			want:       "Bearer",
+		},
+		{
+			name: "custom header carries no registered scheme",
+			// The key does not travel in Authorization, so there is no
+			// standard challenge to name.
+			strategies: []strategy.Authenticator{apikey.New("apikey", keyValidator("k"), apikey.WithHeaders("X-Custom-Key"))},
+			want:       "",
+		},
+		{
+			name: "basic advertises its realm",
+			strategies: []strategy.Authenticator{
+				basic.New("basic", func(context.Context, string, string) (*identity.Identity, error) { return nil, nil },
+					basic.WithRealm("pika")),
+			},
+			want: `Basic realm="pika"`,
+		},
+		{
+			name: "several schemes are offered together",
+			strategies: []strategy.Authenticator{
+				apikey.New("apikey", keyValidator("k"), apikey.WithHeaders("Authorization")),
+				basic.New("basic", func(context.Context, string, string) (*identity.Identity, error) { return nil, nil },
+					basic.WithRealm("pika")),
+			},
+			want: `Bearer, Basic realm="pika"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := strategy.NewRegistry()
+			for _, s := range tt.strategies {
+				if err := reg.Add(s); err != nil {
+					t.Fatalf("add %s: %v", s.Name(), err)
+				}
+			}
+
+			if got := reg.Challenge(); got != tt.want {
+				t.Errorf("Challenge() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestChallengeFollowsStrategyReload guards the reason the challenge is
+// resolved per response rather than captured at Init: strategies can be
+// swapped at runtime, and a stale header would advertise whatever was
+// configured at boot.
+func TestChallengeFollowsStrategyReload(t *testing.T) {
+	reg := strategy.NewRegistry()
+	if err := reg.Add(local.New("local", nil)); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	if got := reg.Challenge(); got != "" {
+		t.Fatalf("cookie-only registry should advertise nothing, got %q", got)
+	}
+
+	reg.Replace(apikey.New("apikey", keyValidator("k"), apikey.WithHeaders("Authorization")))
+
+	if got := reg.Challenge(); got != "Bearer" {
+		t.Errorf("after reload Challenge() = %q, want %q", got, "Bearer")
 	}
 }
 

@@ -12,7 +12,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
+	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
@@ -34,6 +36,8 @@ type Strategy struct {
 	priority int
 	hidden   bool
 	realm    string
+
+	limiter guard.Limiter
 }
 
 // Option configures a Strategy.
@@ -58,6 +62,15 @@ func WithHidden() Option {
 // challenge header. Defaults to "Restricted".
 func WithRealm(realm string) Option {
 	return func(s *Strategy) { s.realm = realm }
+}
+
+// WithLimiter locks an account out after repeated failed attempts.
+//
+// Basic auth is the strategy that most needs one: the client re-sends the
+// credentials on every request, so a guessing loop is a plain HTTP loop with
+// no login page, no cookie and no state to manage.
+func WithLimiter(l guard.Limiter) Option {
+	return func(s *Strategy) { s.limiter = l }
 }
 
 // New returns an HTTP Basic Auth strategy with the given name and verifier.
@@ -110,14 +123,27 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	key := s.guardKey(username)
+
+	if s.limiter != nil {
+		if d := s.limiter.Check(key); !d.Allowed {
+			guard.WriteLocked(w, d)
+
+			return nil, strategy.OutcomeFailed, nil
+		}
+	}
+
 	id, err := s.verify(r.Context(), username, password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
+			s.fail(key)
 			s.writeChallenge(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 
 			return nil, strategy.OutcomeFailed, nil
 		}
 
+		// A broken verifier is not a wrong password; counting it would turn an
+		// outage into a fleet-wide lockout.
 		slog.Error("basic verifier error", "strategy", s.name, "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "verify_failed", "verifier error")
 
@@ -125,14 +151,33 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 	}
 
 	if id == nil {
+		s.fail(key)
 		s.writeChallenge(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	s.succeed(key)
+
 	id.Provider = s.name
 
 	return id, strategy.OutcomeContinue, nil
+}
+
+func (s *Strategy) guardKey(username string) string {
+	return s.name + ":" + strings.ToLower(username)
+}
+
+func (s *Strategy) fail(key string) {
+	if s.limiter != nil {
+		s.limiter.Fail(key)
+	}
+}
+
+func (s *Strategy) succeed(key string) {
+	if s.limiter != nil {
+		s.limiter.Succeed(key)
+	}
 }
 
 // Logout is a no-op for the basic strategy; sessions are stateless.
@@ -143,8 +188,8 @@ func (s *Strategy) Logout(_ context.Context, _ *identity.Identity) error { retur
 //
 // This is what RFC 7617 already describes: the client re-sends the
 // Authorization header on every request. Requiring a login round-trip to
-// convert it into a cookie first would be a protocol pika invented, not
-// one any Basic-auth client implements.
+// convert it into a cookie first would be a protocol this library invented,
+// not one any Basic-auth client implements.
 //
 // Note the WWW-Authenticate challenge is written by Require, not here —
 // AuthenticateRequest must not touch the response — so the realm
@@ -159,9 +204,23 @@ func (s *Strategy) AuthenticateRequest(ctx context.Context, r *http.Request) (*i
 		return nil, strategy.ErrNoCredentials
 	}
 
+	key := s.guardKey(username)
+
+	if s.limiter != nil {
+		if d := s.limiter.Check(key); !d.Allowed {
+			// Reported as invalid credentials because AuthenticateRequest
+			// cannot write a 429 — it must not touch the response. Require
+			// turns this into a 401, which is the right answer for a caller
+			// that is, right now, not authorized.
+			return nil, strategy.ErrInvalidCredentials
+		}
+	}
+
 	id, err := s.verify(ctx, username, password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
+			s.fail(key)
+
 			return nil, strategy.ErrInvalidCredentials
 		}
 
@@ -171,16 +230,30 @@ func (s *Strategy) AuthenticateRequest(ctx context.Context, r *http.Request) (*i
 	}
 
 	if id == nil {
+		s.fail(key)
+
 		return nil, strategy.ErrInvalidCredentials
 	}
+
+	s.succeed(key)
 
 	id.Provider = s.name
 
 	return id, nil
 }
 
+// Challenge implements strategy.Challenger, carrying the configured realm
+// so a browser shows its native credential dialog for the right
+// protection space.
+func (s *Strategy) Challenge() string {
+	return `Basic realm="` + s.realm + `"`
+}
+
 // Interface compliance.
-var _ strategy.RequestAuthenticator = (*Strategy)(nil)
+var (
+	_ strategy.RequestAuthenticator = (*Strategy)(nil)
+	_ strategy.Challenger           = (*Strategy)(nil)
+)
 
 // writeChallenge writes a JSON error response with the WWW-Authenticate header
 // set so the browser shows the native credential dialog.

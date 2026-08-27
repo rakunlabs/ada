@@ -20,7 +20,9 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 
+	"github.com/rakunlabs/ada/middleware/auth/cookie"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/issuer"
 )
@@ -41,17 +43,36 @@ type Session struct {
 
 	// LoginPath is where unauthenticated requests are redirected.
 	LoginPath string
+
+	// ChallengeFn supplies the WWW-Authenticate value sent with the 401
+	// that replaces the login redirect for requests opting out via
+	// SetDisableRedirect. RFC 9110 §15.5.2 requires a 401 to name a
+	// scheme the client can use.
+	//
+	// It is a function rather than a string because the set of usable
+	// schemes follows the registered strategies, which can be swapped at
+	// runtime (see Registry.Replace) — a value captured at construction
+	// would advertise whatever happened to be configured at boot.
+	//
+	// Auth wires this to the strategy registry. Leaving it nil, or
+	// returning "", omits the header: a cookie-only deployment has no
+	// scheme to offer.
+	ChallengeFn func() string
+
+	// RejectFn, when set, can veto an otherwise valid session. Auth uses it
+	// to refuse a half-authenticated identity that has not cleared its second
+	// factor, so a pending session ID pasted into the session cookie is not a
+	// way around MFA.
+	RejectFn func(*identity.Identity) bool
 }
 
 // CookieOptions controls the session cookie attributes.
-type CookieOptions struct {
-	Path     string        `cfg:"path"`
-	MaxAge   int           `cfg:"max_age"`
-	Domain   string        `cfg:"domain"`
-	Secure   bool          `cfg:"secure"`
-	HttpOnly bool          `cfg:"http_only"`
-	SameSite http.SameSite `cfg:"same_site"`
-}
+//
+// It is an alias for cookie.Options so the session cookie, the post-login
+// success cookie and the OAuth2 flow cookies cannot drift apart in their
+// defaults. HttpOnly is on unless DisableHTTPOnly is set, and Secure follows
+// the request scheme unless pinned.
+type CookieOptions = cookie.Options
 
 // HostCookieName overrides the cookie name for matching hosts.
 type HostCookieName struct {
@@ -70,11 +91,10 @@ func (s *Session) Init() error {
 	if s.CookieName == "" {
 		s.CookieName = "auth_session"
 	}
-	if s.Cookie.Path == "" {
-		s.Cookie.Path = "/"
-	}
-	if s.Cookie.SameSite == 0 {
-		s.Cookie.SameSite = http.SameSiteLaxMode
+
+	s.Cookie = s.Cookie.WithDefaults()
+	if err := s.Cookie.Validate(); err != nil {
+		return fmt.Errorf("session: %w", err)
 	}
 
 	for i, hc := range s.CookieNameHosts {
@@ -175,35 +195,23 @@ func (s *Session) resolve(w http.ResponseWriter, r *http.Request) (*identity.Ide
 		pair = newPair
 	}
 
+	if s.RejectFn != nil && s.RejectFn(pair.Identity) {
+		s.RedirectToLogin(w, r, true, true)
+
+		return nil, false
+	}
+
 	return pair.Identity, true
 }
 
 // IssueCookie writes the session cookie carrying the opaque session ID.
 func (s *Session) IssueCookie(w http.ResponseWriter, r *http.Request, sessionID string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     s.CookieNameFor(r),
-		Value:    sessionID,
-		Path:     s.Cookie.Path,
-		Domain:   s.Cookie.Domain,
-		MaxAge:   s.Cookie.MaxAge,
-		Secure:   s.Cookie.Secure,
-		HttpOnly: s.Cookie.HttpOnly,
-		SameSite: s.Cookie.SameSite,
-	})
+	s.Cookie.Set(w, r, s.CookieNameFor(r), sessionID)
 }
 
 // ClearCookie deletes the session cookie on the client.
 func (s *Session) ClearCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     s.CookieNameFor(r),
-		Value:    "",
-		Path:     s.Cookie.Path,
-		Domain:   s.Cookie.Domain,
-		MaxAge:   -1,
-		Secure:   s.Cookie.Secure,
-		HttpOnly: s.Cookie.HttpOnly,
-		SameSite: s.Cookie.SameSite,
-	})
+	s.Cookie.Clear(w, r, s.CookieNameFor(r))
 }
 
 // CurrentSessionID returns the opaque session ID for the request, or "".
@@ -229,9 +237,7 @@ func (s *Session) RedirectToLogin(w http.ResponseWriter, r *http.Request, addRed
 	}
 
 	if GetDisableRedirect(r.Context()) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusProxyAuthRequired)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": http.StatusText(http.StatusProxyAuthRequired)})
+		s.writeUnauthorized(w)
 
 		return
 	}
@@ -248,12 +254,37 @@ func (s *Session) RedirectToLogin(w http.ResponseWriter, r *http.Request, addRed
 	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 }
 
+// writeUnauthorized answers a request that opted out of the login
+// redirect.
+//
+// The status is 401. Earlier versions sent 407 Proxy Authentication
+// Required, which was wrong twice over: this is an origin server, not a
+// proxy, and RFC 9110 §15.5.8 pairs 407 with a Proxy-Authenticate header
+// that was never sent. Clients keying off the status — the reason a caller
+// opts out of the redirect in the first place — saw a code that told them
+// to authenticate with an upstream proxy that does not exist.
+func (s *Session) writeUnauthorized(w http.ResponseWriter) {
+	if s.ChallengeFn != nil {
+		if challenge := s.ChallengeFn(); challenge != "" {
+			w.Header().Set("WWW-Authenticate", challenge)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":   "unauthorized",
+		"message": "invalid or missing credentials",
+	})
+}
+
 func appendRedirectPath(loginPath string, r *http.Request) string {
 	rp := r.URL.Path
 	if r.URL.RawQuery != "" {
 		rp = rp + "?" + r.URL.RawQuery
 	}
 
+	rp = SafeRedirectPath(rp)
 	if rp == "" || rp == "/" {
 		return loginPath
 	}
@@ -264,4 +295,53 @@ func appendRedirectPath(loginPath string, r *http.Request) string {
 	}
 
 	return loginPath + sep + "redirect_path=" + url.QueryEscape(rp)
+}
+
+// SafeRedirectPath returns raw if it is a same-origin relative target, or ""
+// if it is not.
+//
+// The login flow round-trips this value through a query parameter that anyone
+// can craft, and the UI hands it straight to window.location. Without this
+// check, /login?redirect_path=https://evil.example/ turns the login page into
+// an open redirect that borrows the deployment's own domain for a phishing
+// hop.
+//
+// Accepted: a path starting with a single "/", optionally followed by a query
+// and fragment. Everything else is rejected, in particular:
+//
+//   - absolute URLs, with or without a scheme
+//   - protocol-relative "//host/path"
+//   - backslash variants, which some browsers normalise to "/"
+//   - anything containing a control character, which can smuggle a header
+//     break into a Location value
+func SafeRedirectPath(raw string) string {
+	if raw == "" {
+		return ""
+	}
+
+	for _, c := range raw {
+		if c < 0x20 || c == 0x7f {
+			return ""
+		}
+	}
+
+	// "/\evil.com" and "/\/evil.com" are treated as protocol-relative by
+	// some browsers; normalising first makes the prefix test meaningful.
+	normalized := strings.ReplaceAll(raw, `\`, "/")
+
+	if !strings.HasPrefix(normalized, "/") || strings.HasPrefix(normalized, "//") {
+		return ""
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+
+	// A relative reference must carry neither an authority nor a scheme.
+	if u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return ""
+	}
+
+	return raw
 }

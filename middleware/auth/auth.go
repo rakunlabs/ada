@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/rakunlabs/ada/middleware/auth/cookie"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/issuer"
 	"github.com/rakunlabs/ada/middleware/auth/issuer/backend"
@@ -56,6 +57,10 @@ type Config struct {
 
 	// IssuerConfig controls TTLs and rotation for the default issuer.
 	IssuerConfig issuer.Config `cfg:"issuer"`
+
+	// MFA tunes the second-factor step. Only consulted when a SecondFactor is
+	// registered via WithSecondFactor.
+	MFA MFAConfig `cfg:"mfa"`
 
 	// DisableRequestAuth turns off request-credential authentication in
 	// Require(), restoring cookie-only gating.
@@ -107,12 +112,12 @@ type UIConfig struct {
 
 // SuccessCookie is the post-login indicator cookie (read by the status iframe).
 type SuccessCookie struct {
-	Name     string        `cfg:"name"`
-	MaxAge   int           `cfg:"max_age"`
-	Path     string        `cfg:"path"`
-	Domain   string        `cfg:"domain"`
-	Secure   bool          `cfg:"secure"`
-	SameSite http.SameSite `cfg:"same_site"`
+	Name     string            `cfg:"name"`
+	MaxAge   int               `cfg:"max_age"`
+	Path     string            `cfg:"path"`
+	Domain   string            `cfg:"domain"`
+	Secure   cookie.SecureMode `cfg:"secure"`
+	SameSite http.SameSite     `cfg:"same_site"`
 }
 
 func (sc SuccessCookie) withDefaults() SuccessCookie {
@@ -127,6 +132,10 @@ func (sc SuccessCookie) withDefaults() SuccessCookie {
 	}
 	if sc.SameSite == 0 {
 		sc.SameSite = http.SameSiteLaxMode
+	}
+
+	if sc.Secure == "" {
+		sc.Secure = cookie.SecureAuto
 	}
 
 	return sc
@@ -148,6 +157,17 @@ type Auth struct {
 	ui       *uiHandler
 	status   *statusHandler
 
+	// backend is the storage the default issuer was built on, kept so the
+	// short-lived pending-login issuer can share it.
+	backend issuer.Backend
+
+	secondFactor  SecondFactor
+	pendingIssuer issuer.Issuer
+
+	// deferred holds the first error produced by a chained With* call, so the
+	// builder can stay fluent and still fail loudly at Init.
+	deferred error
+
 	resolvedPaths paths
 }
 
@@ -161,6 +181,7 @@ type paths struct {
 	Register string // /login/register/{strategy}
 	Callback string // /login/callback/{strategy}
 	Refresh  string // /login/refresh
+	MFA      string // /login/mfa
 	Logout   string // /logout
 	Status   string // /login/status
 }
@@ -169,6 +190,7 @@ type paths struct {
 // via Strategy() before Init().
 func New(cfg Config) *Auth {
 	cfg.SuccessCookie = cfg.SuccessCookie.withDefaults()
+	cfg.MFA = cfg.MFA.withDefaults()
 
 	// Normalize Base to always start and end with "/". The path builders
 	// below concatenate as `cfg.Base + "login/..."` and expect Base to
@@ -196,6 +218,7 @@ func New(cfg Config) *Auth {
 		Register: cfg.Base + "login/register/{strategy}",
 		Callback: cfg.Base + "login/callback/{strategy}",
 		Refresh:  cfg.Base + "login/refresh",
+		MFA:      cfg.Base + "login/mfa",
 		Logout:   cfg.Base + "logout",
 		Status:   cfg.Base + "login/status",
 	}
@@ -227,24 +250,37 @@ func (a *Auth) WithBackend(b issuer.Backend) *Auth {
 		return a
 	}
 
+	a.backend = b
 	a.issuer = issuer.NewDefault(b, a.cfg.IssuerConfig)
 
 	return a
 }
 
-// WithSessionStore overrides the underlying sessionstore used by the default
-// issuer backend. Ignored if WithIssuer or WithBackend is used.
-func (a *Auth) WithSessionStore(store sessionstore.Store) *Auth {
+// WithSessionStore persists sessions in a sessionstore.Store (file, redis)
+// instead of process memory. Ignored if WithIssuer or WithBackend is used.
+//
+// The store must implement sessionstore.DirectStore; both bundled stores do.
+// A store that cannot address records by raw session ID is rejected at Init
+// rather than silently dropping every write.
+//
+// Pass WithPairCipher to encrypt the stored pair at rest — strongly
+// recommended, since it carries live tokens and the full identity.
+func (a *Auth) WithSessionStore(store sessionstore.Store, opts ...backend.SessionStoreOption) *Auth {
 	if a.issuer != nil {
 		return a
 	}
 
-	cookieName := a.cfg.CookieName
-	if cookieName == "" {
-		cookieName = "auth_session"
+	b, err := backend.NewSessionStore(store, opts...)
+	if err != nil {
+		if a.deferred == nil {
+			a.deferred = fmt.Errorf("auth: session store: %w", err)
+		}
+
+		return a
 	}
 
-	a.issuer = issuer.NewDefault(backend.NewSessionStore(store, cookieName), a.cfg.IssuerConfig)
+	a.backend = b
+	a.issuer = issuer.NewDefault(b, a.cfg.IssuerConfig)
 
 	return a
 }
@@ -252,9 +288,26 @@ func (a *Auth) WithSessionStore(store sessionstore.Store) *Auth {
 // Init validates configuration and prepares the middleware. Must be called
 // after all Strategy registrations and before Mount/Require.
 func (a *Auth) Init(_ context.Context) error {
+	if a.deferred != nil {
+		return a.deferred
+	}
+
 	if a.issuer == nil {
 		// Sensible default: in-memory issuer backend.
-		a.issuer = issuer.NewDefault(backend.NewMemory(), a.cfg.IssuerConfig)
+		a.backend = backend.NewMemory()
+		a.issuer = issuer.NewDefault(a.backend, a.cfg.IssuerConfig)
+	}
+
+	// A parked login gets its own issuer so it expires on the MFA window
+	// rather than the session window — minutes, not days.
+	if a.secondFactor != nil && a.backend != nil {
+		a.pendingIssuer = issuer.NewDefault(a.backend, issuer.Config{
+			AccessTTL:  a.cfg.MFA.TTL,
+			RefreshTTL: a.cfg.MFA.TTL,
+			// Rotation would invalidate the refresh token the attempt counter
+			// is written through.
+			DisableRefreshRotation: true,
+		})
 	}
 
 	a.session = &session.Session{
@@ -265,6 +318,11 @@ func (a *Auth) Init(_ context.Context) error {
 		// Unauthenticated callers are redirected to the login UI, not the
 		// bare base prefix.
 		LoginPath: a.resolvedPaths.UI,
+		// Callers that opted out of the redirect get a 401, which has to
+		// name a scheme they can actually use. Read through the registry
+		// on each 401 so a Registry.Replace is reflected immediately.
+		ChallengeFn: a.registry.Challenge,
+		RejectFn:    PendingIdentity,
 	}
 
 	if err := a.session.Init(); err != nil {
@@ -334,7 +392,7 @@ func (a *Auth) Require() func(http.Handler) http.Handler {
 			case errors.Is(err, strategy.ErrNoCredentials):
 				sessionNext.ServeHTTP(w, r)
 			case errors.Is(err, strategy.ErrInvalidCredentials):
-				writeUnauthorized(w)
+				a.writeUnauthorized(w)
 			case err != nil:
 				slog.Error("auth: request authentication failed", "error", err.Error())
 				writeError(w, http.StatusInternalServerError, "auth_error", "authentication error")
@@ -346,10 +404,14 @@ func (a *Auth) Require() func(http.Handler) http.Handler {
 }
 
 // writeUnauthorized rejects a request that presented bad credentials.
-// WWW-Authenticate is set so a client can discover how to authenticate
-// instead of guessing from a bare status code.
-func writeUnauthorized(w http.ResponseWriter) {
-	w.Header().Set("WWW-Authenticate", `Bearer`)
+// WWW-Authenticate advertises the schemes the registered strategies
+// actually accept, so a client can discover how to authenticate instead of
+// guessing from a bare status code.
+func (a *Auth) writeUnauthorized(w http.ResponseWriter) {
+	if challenge := a.registry.Challenge(); challenge != "" {
+		w.Header().Set("WWW-Authenticate", challenge)
+	}
+
 	writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 }
 
@@ -378,6 +440,7 @@ func (a *Auth) Mount(mux Mux) {
 	mux.POST(p.Register, a.handleRegister)
 	mux.GET(p.Callback, a.handleLogin)
 	mux.POST(p.Refresh, a.handleRefresh)
+	mux.POST(p.MFA, a.handleMFA)
 	mux.POST(p.Logout, a.handleLogout)
 	mux.GET(p.Status, a.handleStatus)
 
@@ -523,6 +586,12 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A second factor, if configured, stands between a verified first factor
+	// and an actual session.
+	if a.beginSecondFactor(w, r, id, name) {
+		return
+	}
+
 	pair, err := a.issuer.Issue(r.Context(), id)
 	if err != nil {
 		slog.Error("auth: issue session", "error", err.Error())
@@ -532,7 +601,7 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.session.IssueCookie(w, r, pair.SessionID)
-	a.setSuccessCookie(w)
+	a.setSuccessCookie(w, r)
 
 	a.respondAfterLogin(w, r, name)
 }
@@ -593,7 +662,7 @@ func (a *Auth) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.session.IssueCookie(w, r, pair.SessionID)
-	a.setSuccessCookie(w)
+	a.setSuccessCookie(w, r)
 
 	a.respondAfterRegister(w, r, name)
 }
@@ -602,7 +671,7 @@ func (a *Auth) handleRegister(w http.ResponseWriter, r *http.Request) {
 // with auto-login. Includes auto_login: true so the UI knows to redirect
 // rather than showing a "please sign in" message.
 func (a *Auth) respondAfterRegister(w http.ResponseWriter, r *http.Request, strategyName string) {
-	redirectPath := r.URL.Query().Get("redirect_path")
+	redirectPath := session.SafeRedirectPath(r.URL.Query().Get("redirect_path"))
 
 	if r.Method == http.MethodPost && wantsJSON(r) {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -672,7 +741,7 @@ func (a *Auth) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.session.ClearCookie(w, r)
-	a.removeSuccessCookie(w)
+	a.removeSuccessCookie(w, r)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -682,6 +751,23 @@ func (a *Auth) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Auth) handleUI(w http.ResponseWriter, r *http.Request) {
+	// The login page reads redirect_path straight out of window.location and
+	// navigates to it once authentication succeeds. Server-side validation of
+	// the value we echo back is not enough, because the browser never asked
+	// us about the copy in its own address bar — so strip an unsafe value
+	// here, before the page can ever see it.
+	if raw := r.URL.Query().Get("redirect_path"); raw != "" && session.SafeRedirectPath(raw) == "" {
+		q := r.URL.Query()
+		q.Del("redirect_path")
+
+		clean := *r.URL
+		clean.RawQuery = q.Encode()
+
+		http.Redirect(w, r, clean.RequestURI(), http.StatusFound)
+
+		return
+	}
+
 	a.ui.serve(w, r)
 }
 
@@ -713,7 +799,7 @@ func (a *Auth) identity(w http.ResponseWriter, r *http.Request) (*identity.Ident
 }
 
 func (a *Auth) respondAfterLogin(w http.ResponseWriter, r *http.Request, strategyName string) {
-	redirectPath := r.URL.Query().Get("redirect_path")
+	redirectPath := session.SafeRedirectPath(r.URL.Query().Get("redirect_path"))
 
 	// JSON callers (typically the local strategy form) get a JSON OK; browsers
 	// coming through OAuth2 callback get the close-popup script (matches today).
@@ -739,30 +825,27 @@ func wantsJSON(r *http.Request) bool {
 		strings.HasPrefix(r.Header.Get("Content-Type"), "application/json")
 }
 
-func (a *Auth) setSuccessCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     a.cfg.SuccessCookie.Name,
-		Value:    "true",
-		Path:     a.cfg.SuccessCookie.Path,
-		Domain:   a.cfg.SuccessCookie.Domain,
-		MaxAge:   a.cfg.SuccessCookie.MaxAge,
-		Secure:   a.cfg.SuccessCookie.Secure,
-		SameSite: a.cfg.SuccessCookie.SameSite,
-		HttpOnly: false,
-	})
+// successCookieOptions returns the Set-Cookie policy for the post-login
+// indicator cookie. HttpOnly is deliberately off: the status iframe reads it
+// from JavaScript, which is its entire purpose. It carries no secret — only
+// the fact that a login just happened.
+func (a *Auth) successCookieOptions() cookie.Options {
+	return cookie.Options{
+		Path:            a.cfg.SuccessCookie.Path,
+		Domain:          a.cfg.SuccessCookie.Domain,
+		MaxAge:          a.cfg.SuccessCookie.MaxAge,
+		Secure:          a.cfg.SuccessCookie.Secure,
+		SameSite:        a.cfg.SuccessCookie.SameSite,
+		DisableHTTPOnly: true,
+	}
 }
 
-func (a *Auth) removeSuccessCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     a.cfg.SuccessCookie.Name,
-		Value:    "",
-		Path:     a.cfg.SuccessCookie.Path,
-		Domain:   a.cfg.SuccessCookie.Domain,
-		MaxAge:   -1,
-		Secure:   a.cfg.SuccessCookie.Secure,
-		SameSite: a.cfg.SuccessCookie.SameSite,
-		HttpOnly: false,
-	})
+func (a *Auth) setSuccessCookie(w http.ResponseWriter, r *http.Request) {
+	a.successCookieOptions().Set(w, r, a.cfg.SuccessCookie.Name, "true")
+}
+
+func (a *Auth) removeSuccessCookie(w http.ResponseWriter, r *http.Request) {
+	a.successCookieOptions().Clear(w, r, a.cfg.SuccessCookie.Name)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

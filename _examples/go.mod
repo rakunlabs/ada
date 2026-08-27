@@ -8,7 +8,7 @@ require (
 	connectrpc.com/grpcreflect v1.3.0
 	connectrpc.com/otelconnect v0.7.2
 	github.com/rakunlabs/ada v0.0.0-00010101000000-000000000000
-	github.com/rakunlabs/ada/handler/folder v0.4.0
+	github.com/rakunlabs/ada/handler/folder v0.4.7
 	github.com/rakunlabs/ada/handler/mcp v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/handler/swagger v0.0.0-00010101000000-000000000000
 	github.com/rakunlabs/ada/middleware/auth v0.0.0-00010101000000-000000000000

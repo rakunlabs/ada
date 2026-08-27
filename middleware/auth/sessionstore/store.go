@@ -1,12 +1,19 @@
 // Package sessionstore defines the session storage interface and common types.
 //
-// Implementations live in this package (cookie, file) or in sub-modules
-// (redis) that carry their own dependencies.
+// The cookie codec (signing/verification) lives in this package; concrete
+// stores live in sub-packages: file (stdlib only) and redis (own module).
 package sessionstore
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"time"
 )
+
+// ErrNotDirect is returned by adapters that need DirectStore semantics from a
+// Store that does not implement it.
+var ErrNotDirect = errors.New("sessionstore: store does not implement DirectStore")
 
 // Store is the interface for session storage backends.
 type Store interface {
@@ -17,6 +24,35 @@ type Store interface {
 	// Save persists the session to the backend and writes the session cookie.
 	Save(r *http.Request, w http.ResponseWriter, s *Session) error
 }
+
+// DirectStore is an optional interface for stores that can read and write
+// session values keyed by a raw session ID, without an *http.Request and
+// without going through the cookie codec.
+//
+// The issuer backend requires this: it owns its own session IDs and never has
+// a real request/response pair to hand to Get/Save. Attempting to drive a
+// codec-based Store through a synthesized request silently fails, because the
+// codec expects a signed "b64(id)|b64(mac)" cookie value rather than a raw ID.
+//
+// Both the file and redis stores implement DirectStore.
+type DirectStore interface {
+	Store
+
+	// LoadByID returns the stored values for id. It must return ErrNoSession
+	// when the id is unknown.
+	LoadByID(ctx context.Context, id string) (map[string]any, error)
+
+	// SaveByID persists values under id. A ttl of 0 means "no explicit
+	// expiry"; stores that cannot express that may apply their default.
+	SaveByID(ctx context.Context, id string, values map[string]any, ttl time.Duration) error
+
+	// DeleteByID removes the record for id. Deleting an unknown id is not an
+	// error.
+	DeleteByID(ctx context.Context, id string) error
+}
+
+// ErrNoSession is returned by DirectStore.LoadByID when the id is unknown.
+var ErrNoSession = errors.New("sessionstore: session not found")
 
 // Session represents a server-side session.
 type Session struct {

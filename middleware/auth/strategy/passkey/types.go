@@ -12,10 +12,16 @@
 //   - "none" (recommended; what platform authenticators emit)
 //   - "packed" with self attestation or x5c basic attestation
 //
+// Signature algorithms: ES256/384/512, RS256/384/512, PS256/384/512
+// and EdDSA (Ed25519).
+//
 // Unsupported (deliberate, not bugs):
 //   - tpm, android-key, android-safetynet, apple, fido-u2f
-//   - EdDSA / OKP keys
 //   - ECDAA
+//
+// x5c chains are parsed but not validated against a trust anchor:
+// there is no metadata service here, so an attestation certificate
+// proves only that the authenticator holds its private key.
 //
 // These cover the bulk of real-world deployments. Adding more
 // attestation formats is straightforward — slot them into the

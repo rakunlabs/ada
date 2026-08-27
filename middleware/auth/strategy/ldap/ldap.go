@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
@@ -49,19 +50,24 @@ type Entry struct {
 // Configuration types
 // ---------------------------------------------------------------------------
 
-// Config holds the LDAP connection and search parameters.
+// Config holds the LDAP search parameters.
 type Config struct {
 	// Address is the LDAP server URL (e.g. "ldap://ad.example.com:389").
-	Address string
+	//
+	// This package never dials: the Connector you supply owns the connection,
+	// including TLS policy and pooling. Address is carried here so the same
+	// struct can configure both, and is only meaningful to a Connector that
+	// reads it.
+	Address string `cfg:"address"`
 	// BaseDN is the search base (e.g. "dc=example,dc=com").
-	BaseDN string
+	BaseDN string `cfg:"base_dn"`
 	// BindDN is the service-account DN used for the initial bind + search.
-	BindDN string
+	BindDN string `cfg:"bind_dn"`
 	// BindPassword is the service-account password.
-	BindPassword string
+	BindPassword string `cfg:"bind_password"`
 	// UserFilter is an LDAP search filter with a single %s placeholder for the
 	// username. Defaults to "(uid=%s)".
-	UserFilter string
+	UserFilter string `cfg:"user_filter"`
 }
 
 // AttributeMap maps LDAP attribute names to Identity fields. Each value is
@@ -103,6 +109,8 @@ type Strategy struct {
 	// usernameField/passwordField are the JSON/form keys the strategy reads.
 	usernameField string
 	passwordField string
+
+	limiter guard.Limiter
 }
 
 // Option configures a Strategy.
@@ -111,6 +119,15 @@ type Option func(*Strategy)
 // WithLabel sets the human-readable label shown in the login UI.
 func WithLabel(label string) Option {
 	return func(s *Strategy) { s.label = label }
+}
+
+// WithLimiter locks an account out after repeated failed binds.
+//
+// Worth having even when the directory enforces its own lockout: reaching that
+// policy costs a bind per guess, so an unthrottled endpoint is a way to load
+// the directory server as well as to guess passwords.
+func WithLimiter(l guard.Limiter) Option {
+	return func(s *Strategy) { s.limiter = l }
 }
 
 // WithPriority sets the sort order in /auth/info (lower = earlier).
@@ -218,18 +235,37 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	key := s.name + ":" + strings.ToLower(username)
+
+	if s.limiter != nil {
+		if d := s.limiter.Check(key); !d.Allowed {
+			guard.WriteLocked(w, d)
+
+			return nil, strategy.OutcomeFailed, nil
+		}
+	}
+
 	id, err := s.authenticate(r.Context(), username, password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidCredentials) {
+			if s.limiter != nil {
+				s.limiter.Fail(key)
+			}
+
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 
 			return nil, strategy.OutcomeFailed, nil
 		}
 
+		// A directory that is down is not a wrong password.
 		slog.Error("ldap authentication error", "strategy", s.name, "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "ldap_error", "authentication failed")
 
 		return nil, strategy.OutcomeFailed, nil
+	}
+
+	if s.limiter != nil {
+		s.limiter.Succeed(key)
 	}
 
 	id.Provider = s.name
@@ -250,7 +286,7 @@ func (s *Strategy) authenticate(ctx context.Context, username, password string) 
 	if err != nil {
 		return nil, fmt.Errorf("ldap connect: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Step 1: Bind with the service account.
 	if err := conn.Bind(s.config.BindDN, s.config.BindPassword); err != nil {

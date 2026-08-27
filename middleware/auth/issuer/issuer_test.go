@@ -17,9 +17,8 @@ func newTestIssuer(t *testing.T) (*issuer.Default, *backend.Memory) {
 
 	mem := backend.NewMemory()
 	iss := issuer.NewDefault(mem, issuer.Config{
-		AccessTTL:     50 * time.Millisecond,
-		RefreshTTL:    500 * time.Millisecond,
-		RotateRefresh: true,
+		AccessTTL:  50 * time.Millisecond,
+		RefreshTTL: 500 * time.Millisecond,
 	})
 
 	return iss, mem
@@ -164,9 +163,8 @@ func TestRefreshSingleFlight(t *testing.T) {
 	slow := newSlowBackend()
 
 	iss := issuer.NewDefault(slow, issuer.Config{
-		AccessTTL:     50 * time.Millisecond,
-		RefreshTTL:    500 * time.Millisecond,
-		RotateRefresh: true,
+		AccessTTL:  50 * time.Millisecond,
+		RefreshTTL: 500 * time.Millisecond,
 	})
 	ctx := context.Background()
 

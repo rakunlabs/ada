@@ -36,23 +36,75 @@ type Identity struct {
 }
 
 // HasRole reports whether the identity has the given role.
-// An empty role string returns true (no requirement).
+//
+// A nil identity or an empty role is false. It used to return true for an
+// empty role, on the reading that "no requirement" is trivially satisfied —
+// but the call site that matters is `if id.HasRole(cfg.RequiredRole)`, where a
+// missing configuration value would then wave everyone through. Absence of a
+// requirement is the caller's decision to make, not this function's.
 func (i *Identity) HasRole(role string) bool {
-	if role == "" {
-		return true
+	if i == nil || role == "" {
+		return false
 	}
 
 	return slices.Contains(i.Roles, role)
 }
 
 // HasScope reports whether the identity has the given scope.
-// An empty scope string returns true (no requirement).
+//
+// A nil identity or an empty scope is false; see HasRole.
 func (i *Identity) HasScope(scope string) bool {
-	if scope == "" {
-		return true
+	if i == nil || scope == "" {
+		return false
 	}
 
 	return slices.Contains(i.Scopes, scope)
+}
+
+// HasAnyRole reports whether the identity holds at least one of roles.
+// An empty list is false.
+func (i *Identity) HasAnyRole(roles ...string) bool {
+	for _, r := range roles {
+		if i.HasRole(r) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// HasAllRoles reports whether the identity holds every one of roles.
+// An empty list is true: nothing was required and nothing is missing.
+func (i *Identity) HasAllRoles(roles ...string) bool {
+	for _, r := range roles {
+		if !i.HasRole(r) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// HasAnyScope reports whether the identity holds at least one of scopes.
+func (i *Identity) HasAnyScope(scopes ...string) bool {
+	for _, s := range scopes {
+		if i.HasScope(s) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// HasAllScopes reports whether the identity holds every one of scopes.
+func (i *Identity) HasAllScopes(scopes ...string) bool {
+	for _, s := range scopes {
+		if !i.HasScope(s) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Claim returns the value at key from Claims, or zero T if missing or wrong type.

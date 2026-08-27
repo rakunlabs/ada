@@ -50,7 +50,7 @@ func TestDefault_FallsBackToXAPIKey(t *testing.T) {
 
 // TestWithHeaders_Single_DisablesFallback verifies that restricting the
 // strategy to a single header causes the ada-side X-API-Key fallback to be
-// dropped, which is the behavior pika wants for its Access Tokens.
+// dropped, which is the behaviour a bearer-token deployment wants.
 func TestWithHeaders_Single_DisablesFallback(t *testing.T) {
 	s := apikey.New("apikey", staticValidator("k1"),
 		apikey.WithHeaders("Authorization"),

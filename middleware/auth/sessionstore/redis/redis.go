@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -15,7 +16,7 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/sessionstore"
 )
 
-// Store implements sessionstore.Store using Redis.
+// Store implements sessionstore.Store and sessionstore.DirectStore using Redis.
 type Store struct {
 	client    redis.UniversalClient
 	keyPrefix string
@@ -23,6 +24,8 @@ type Store struct {
 	options   sessionstore.Options
 	ttl       time.Duration
 }
+
+var _ sessionstore.DirectStore = (*Store)(nil)
 
 // Config holds configuration for a Redis session store.
 type Config struct {
@@ -107,7 +110,14 @@ func New(ctx context.Context, cfg Config, opts sessionstore.Options) (*Store, er
 
 	sessionKey := []byte(cfg.SessionKey)
 	if len(sessionKey) == 0 {
-		sessionKey = sessionstore.GenerateRandomKey(32)
+		key, err := sessionstore.NewRandomKey(32)
+		if err != nil {
+			client.Close()
+
+			return nil, fmt.Errorf("redis: generate session key: %w", err)
+		}
+
+		sessionKey = key
 	}
 
 	ttl := time.Duration(opts.MaxAge) * time.Second
@@ -178,6 +188,39 @@ func (s *Store) Save(r *http.Request, w http.ResponseWriter, session *sessionsto
 	sessionstore.SetSessionCookie(w, session.Name(), cookieValue, session.Options)
 
 	return nil
+}
+
+// LoadByID implements sessionstore.DirectStore.
+func (s *Store) LoadByID(ctx context.Context, id string) (map[string]any, error) {
+	v, err := s.load(ctx, id)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, sessionstore.ErrNoSession
+		}
+
+		return nil, err
+	}
+
+	return v, nil
+}
+
+// SaveByID implements sessionstore.DirectStore.
+func (s *Store) SaveByID(ctx context.Context, id string, values map[string]any, ttl time.Duration) error {
+	if ttl <= 0 {
+		ttl = s.ttl
+	}
+
+	data, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+
+	return s.client.Set(ctx, s.redisKey(id), data, ttl).Err()
+}
+
+// DeleteByID implements sessionstore.DirectStore.
+func (s *Store) DeleteByID(ctx context.Context, id string) error {
+	return s.client.Del(ctx, s.redisKey(id)).Err()
 }
 
 // Close closes the Redis client connection.

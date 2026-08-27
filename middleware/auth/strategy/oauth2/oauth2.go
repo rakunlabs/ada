@@ -12,7 +12,6 @@ package oauth2
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -26,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rakunlabs/ada/middleware/auth/cookie"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
@@ -50,9 +50,36 @@ type Config struct {
 
 	// IssuerURL is the OIDC issuer URL (e.g. "https://accounts.google.com").
 	// When set, the strategy fetches /.well-known/openid-configuration to
-	// auto-populate AuthURL, TokenURL, UserInfoURL, RevocationURL, and
-	// LogoutURL. Explicitly set fields take precedence over discovered ones.
+	// auto-populate AuthURL, TokenURL, UserInfoURL, RevocationURL, LogoutURL
+	// and JWKSURL. Explicitly set fields take precedence over discovered ones.
 	IssuerURL string `cfg:"issuer_url"`
+
+	// JWKSURL is the IdP's JSON Web Key Set endpoint, used to verify the
+	// id_token signature. Discovered from IssuerURL when left empty.
+	JWKSURL string `cfg:"jwks_url"`
+
+	// Audience is the value that must appear in the id_token's aud claim.
+	// Defaults to ClientID, which is what OIDC mandates.
+	Audience string `cfg:"audience"`
+
+	// SkipIDTokenVerify disables id_token signature and claim verification.
+	//
+	// Do not set this. It exists for the one legitimate case — an IdP that
+	// publishes no key set and is reached only over a trusted channel — and
+	// turns the id_token into an unauthenticated assertion of whatever the
+	// caller wants. When no key set is reachable and this is false, the
+	// strategy refuses to derive an identity from an id_token and requires
+	// UserInfoURL instead.
+	SkipIDTokenVerify bool `cfg:"skip_id_token_verify"`
+
+	// ClockSkew is the tolerance applied to id_token exp/nbf. Default 60s.
+	ClockSkew time.Duration `cfg:"clock_skew"`
+
+	// DisableNonce omits the OIDC nonce from the authorization request.
+	//
+	// The nonce binds an id_token to the browser session that asked for it.
+	// Only turn it off for a provider that rejects the parameter.
+	DisableNonce bool `cfg:"disable_nonce"`
 
 	// DisablePKCE disables PKCE (Proof Key for Code Exchange). PKCE is enabled
 	// by default for the authorization code flow. Only disable if your IdP
@@ -93,6 +120,14 @@ type Options struct {
 	// CallbackBasePath is the path prefix for the callback (e.g. "/auth/callback").
 	// The strategy appends "/<name>" to it when building redirect_uri.
 	CallbackBasePath string
+
+	// FlowCookie overrides the attributes of the short-lived cookie holding
+	// state, nonce and PKCE verifier during an authorization request.
+	//
+	// The defaults are already the safe ones: HttpOnly, SameSite=Lax, Secure
+	// inferred from the request. Set Domain here if the callback lands on a
+	// different subdomain than the one that started the flow.
+	FlowCookie cookie.Options
 }
 
 // XUserClaims maps OIDC claim names to Identity fields.
@@ -132,43 +167,48 @@ type Strategy struct {
 
 	client *http.Client
 
-	stateCookie    StateCookie
-	verifierCookie StateCookie // stores PKCE code_verifier alongside state
-	discovery      *discoveryCache
+	flowCookie cookie.Options
+	discovery  *discoveryCache
+
+	// keys verifies id_token signatures. Nil when the IdP publishes no key
+	// set and none was configured.
+	keys *keySet
+
+	// issuer is the value the id_token's iss claim must equal. Taken from the
+	// discovery document when available, else from Config.IssuerURL.
+	issuer string
 }
 
-// StateCookie controls the CSRF state cookie set during the code flow.
-type StateCookie struct {
-	Name     string
-	MaxAge   int
-	Path     string
-	Domain   string
-	Secure   bool
-	SameSite http.SameSite
-	HttpOnly bool
-}
-
-func (sc StateCookie) withDefaults(name string) StateCookie {
-	if sc.Name == "" {
-		sc.Name = "auth_state_" + name
-	}
-	if sc.MaxAge == 0 {
-		sc.MaxAge = 360
-	}
-	if sc.Path == "" {
-		sc.Path = "/"
-	}
-	if sc.SameSite == 0 {
-		sc.SameSite = http.SameSiteLaxMode
-	}
-
-	return sc
-}
-
-// New returns an OAuth2 strategy. If cfg.IssuerURL is set, OIDC discovery is
-// performed immediately to populate missing endpoint URLs.
+// New returns an OAuth2 strategy.
+//
+// Deprecated behaviour note: New swallows discovery failures with a warning so
+// a transient IdP outage at boot does not take the process down. Use NewWithContext
+// when you want the error.
 func New(name string, cfg Config, opts Options) *Strategy {
+	s, err := NewWithContext(context.Background(), name, cfg, opts)
+	if err != nil {
+		slog.Warn("oauth2: discovery failed, using explicit config",
+			"strategy", name, "issuer", cfg.IssuerURL, "error", err.Error())
+	}
+
+	return s
+}
+
+// NewWithContext returns an OAuth2 strategy, performing OIDC discovery under
+// the caller's context when cfg.IssuerURL is set.
+//
+// A discovery failure is reported but never fatal: the returned Strategy is
+// always usable with whatever endpoints were configured explicitly.
+func NewWithContext(ctx context.Context, name string, cfg Config, opts Options) (*Strategy, error) {
 	opts.XUserClaims = opts.XUserClaims.withDefaults()
+
+	if cfg.Audience == "" {
+		cfg.Audience = cfg.ClientID
+	}
+
+	if cfg.ClockSkew <= 0 {
+		cfg.ClockSkew = time.Minute
+	}
 
 	client := opts.HTTPClient
 	if client == nil {
@@ -180,37 +220,55 @@ func New(name string, cfg Config, opts Options) *Strategy {
 		}
 	}
 
-	// OIDC Discovery: auto-populate endpoints from issuer.
-	dc := newDiscoveryCache(1 * time.Hour)
+	s := &Strategy{
+		name:       name,
+		opts:       opts,
+		client:     client,
+		flowCookie: defaultFlowCookie(opts.FlowCookie),
+		discovery:  newDiscoveryCache(1 * time.Hour),
+		issuer:     strings.TrimSuffix(cfg.IssuerURL, "/"),
+	}
+
+	var discErr error
+
 	if cfg.IssuerURL != "" {
-		doc, err := Discover(context.Background(), client, cfg.IssuerURL)
+		doc, err := Discover(ctx, client, cfg.IssuerURL)
 		if err != nil {
-			slog.Warn("oauth2: discovery failed, using explicit config", "strategy", name, "issuer", cfg.IssuerURL, "error", err.Error())
+			discErr = err
 		} else {
-			dc.set(doc)
+			s.discovery.set(doc)
 			applyDiscovery(&cfg, doc)
+
+			// The document states its own issuer; per OIDC Discovery §4.3 it
+			// must match the URL we asked, and it is the value that goes into
+			// the iss check.
+			if doc.Issuer != "" {
+				s.issuer = doc.Issuer
+			}
 		}
 	}
 
-	verifierCookie := StateCookie{
-		Name: "auth_pkce_" + name,
-	}.withDefaults(name)
-	// Override the name since withDefaults would set "auth_state_<name>"
-	verifierCookie.Name = "auth_pkce_" + name
+	s.cfg = cfg
 
-	return &Strategy{
-		name:           name,
-		cfg:            cfg,
-		opts:           opts,
-		client:         client,
-		stateCookie:    StateCookie{}.withDefaults(name),
-		verifierCookie: verifierCookie,
-		discovery:      dc,
+	if cfg.JWKSURL != "" {
+		s.keys = newKeySet(cfg.JWKSURL, client)
 	}
+
+	return s, discErr
 }
 
 // Name returns the strategy's URL key.
 func (s *Strategy) Name() string { return s.name }
+
+// Discovery returns the cached OIDC discovery document, or nil when discovery
+// was not configured, failed, or the cached copy is older than its TTL.
+//
+// Exposed so a caller can see what the strategy actually resolved — which
+// endpoints it will use, and whether a key set was found — instead of
+// inferring it from the logs.
+func (s *Strategy) Discovery() *DiscoveryDocument {
+	return s.discovery.get()
+}
 
 // SetCallbackBasePath implements strategy.CallbackBinder. It lets the auth
 // middleware push its resolved callback base (typically
@@ -294,7 +352,7 @@ func (s *Strategy) Logout(ctx context.Context, _ *identity.Identity) error {
 		return err
 	}
 
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("oauth2 logout: %s", resp.Status)
@@ -303,19 +361,33 @@ func (s *Strategy) Logout(ctx context.Context, _ *identity.Identity) error {
 	return nil
 }
 
-// handleInitiate generates state (and PKCE if enabled), sets cookies, and redirects to AuthURL.
+// handleInitiate generates state, nonce and PKCE, stores them in one flow
+// cookie, and redirects to AuthURL.
 func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
-	state, err := randomState(16)
+	flow := flowState{}
+
+	state, err := randomURLSafe(16)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "state_generate", err.Error())
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	s.setStateCookie(w, state)
+	flow.State = state
 
-	// PKCE
+	if !s.cfg.DisableNonce {
+		nonce, err := randomURLSafe(16)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "nonce_generate", err.Error())
+
+			return nil, strategy.OutcomeFailed, nil
+		}
+
+		flow.Nonce = nonce
+	}
+
 	var pkce *pkceParams
+
 	if !s.cfg.DisablePKCE {
 		pkce, err = newPKCE()
 		if err != nil {
@@ -324,7 +396,13 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 			return nil, strategy.OutcomeFailed, nil
 		}
 
-		s.setVerifierCookie(w, pkce.Verifier)
+		flow.Verifier = pkce.Verifier
+	}
+
+	if err := s.setFlowCookie(w, r, flow); err != nil {
+		writeError(w, http.StatusInternalServerError, "flow_cookie", err.Error())
+
+		return nil, strategy.OutcomeFailed, nil
 	}
 
 	redirectURI, err := s.callbackURL(r)
@@ -334,7 +412,7 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	authURL, err := s.buildAuthCodeURL(state, redirectURI, pkce)
+	authURL, err := s.buildAuthCodeURL(flow, redirectURI, pkce)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "auth_url", err.Error())
 
@@ -346,23 +424,44 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 	return nil, strategy.OutcomePending, nil
 }
 
-// handleCallback validates state, exchanges code (with PKCE verifier), fetches userinfo, builds Identity, revokes.
+// handleCallback validates state, exchanges code (with PKCE verifier), fetches
+// userinfo, builds Identity, revokes.
 func (s *Strategy) handleCallback(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
 	q := r.URL.Query()
-	code := q.Get("code")
-	state := q.Get("state")
 
-	if err := s.checkStateCookie(w, r, state); err != nil {
+	// The IdP reports failures on the redirect, not as a transport error.
+	// Ignoring these turned an explicit "access_denied" into a confusing
+	// "state does not match" further down.
+	if e := q.Get("error"); e != "" {
+		desc := q.Get("error_description")
+		if desc == "" {
+			desc = e
+		}
+
+		writeError(w, http.StatusUnauthorized, e, desc)
+
+		return nil, strategy.OutcomeFailed, nil
+	}
+
+	flow, err := s.takeFlowCookie(w, r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "state_invalid", "authorization flow expired or cookie missing")
+
+		return nil, strategy.OutcomeFailed, nil
+	}
+
+	if err := checkState(flow.State, q.Get("state")); err != nil {
 		writeError(w, http.StatusUnauthorized, "state_invalid", "state does not match")
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	// Read PKCE verifier
-	var codeVerifier string
-	if !s.cfg.DisablePKCE {
-		codeVerifier = s.readVerifierCookie(r)
-		s.clearVerifierCookie(w)
+	// A flow that started with PKCE must finish with it. Letting the verifier
+	// go missing would make the protection opt-out by cookie deletion.
+	if !s.cfg.DisablePKCE && flow.Verifier == "" {
+		writeError(w, http.StatusUnauthorized, "pkce_missing", "code_verifier missing")
+
+		return nil, strategy.OutcomeFailed, nil
 	}
 
 	redirectURI, err := s.callbackURL(r)
@@ -372,14 +471,14 @@ func (s *Strategy) handleCallback(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	body, err := s.exchangeCode(r.Context(), code, redirectURI, codeVerifier)
+	body, err := s.exchangeCode(r.Context(), q.Get("code"), redirectURI, flow.Verifier)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "code_exchange", err.Error())
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	id, accessToken, err := s.identityFromTokenResponse(r.Context(), body)
+	id, accessToken, err := s.identityFromTokenResponse(r.Context(), body, flow.Nonce)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "identity_extract", err.Error())
 
@@ -430,7 +529,8 @@ func (s *Strategy) handlePassword(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	id, accessToken, err := s.identityFromTokenResponse(r.Context(), tokenBody)
+	// The password grant has no authorization request and therefore no nonce.
+	id, accessToken, err := s.identityFromTokenResponse(r.Context(), tokenBody, "")
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "identity_extract", err.Error())
 
@@ -493,7 +593,7 @@ func (s *Strategy) tokenRequest(ctx context.Context, values url.Values) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -517,7 +617,7 @@ type tokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
-func (s *Strategy) identityFromTokenResponse(ctx context.Context, body []byte) (*identity.Identity, string, error) {
+func (s *Strategy) identityFromTokenResponse(ctx context.Context, body []byte, nonce string) (*identity.Identity, string, error) {
 	var tr tokenResponse
 	if err := json.Unmarshal(body, &tr); err != nil {
 		return nil, "", fmt.Errorf("decode token response: %w", err)
@@ -527,7 +627,7 @@ func (s *Strategy) identityFromTokenResponse(ctx context.Context, body []byte) (
 		return nil, "", fmt.Errorf("token response missing access_token")
 	}
 
-	claims, err := s.fetchClaims(ctx, tr)
+	claims, err := s.fetchClaims(ctx, tr, nonce)
 	if err != nil {
 		return nil, tr.AccessToken, err
 	}
@@ -537,54 +637,140 @@ func (s *Strategy) identityFromTokenResponse(ctx context.Context, body []byte) (
 	return id, tr.AccessToken, nil
 }
 
-// fetchClaims pulls the user's claims either from UserInfoURL (preferred) or
-// by JSON-decoding the JWT id_token / access_token. We never verify the JWT;
-// the IdP just authenticated us, so we trust the response we got from it.
-func (s *Strategy) fetchClaims(ctx context.Context, tr tokenResponse) (map[string]any, error) {
+// fetchClaims resolves the user's claims.
+//
+// An id_token, when present, is always verified: signature against the IdP's
+// key set, then iss / aud / exp / nbf / nonce. That is the only thing that
+// binds the token to this client and this browser session. The token endpoint
+// being reached over TLS proves who *sent* the response, not who it was minted
+// for — an id_token issued to a different client of the same IdP travels over
+// exactly the same TLS.
+//
+// Claim source, in order:
+//
+//  1. UserInfoURL, if configured. Authenticated with the access token, so the
+//     response speaks for the user it describes.
+//  2. The verified id_token's claims.
+//
+// With neither — no UserInfoURL and no way to verify the id_token — the login
+// fails rather than falling back to an unauthenticated payload.
+func (s *Strategy) fetchClaims(ctx context.Context, tr tokenResponse, nonce string) (map[string]any, error) {
+	idClaims, err := s.verifyIDToken(ctx, tr.IDToken, nonce)
+	if err != nil {
+		return nil, err
+	}
+
 	if s.cfg.UserInfoURL != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.UserInfoURL, nil)
+		claims, err := s.fetchUserInfo(ctx, tr.AccessToken)
 		if err != nil {
 			return nil, err
 		}
 
-		req.Header.Set("Authorization", "Bearer "+tr.AccessToken)
-		req.Header.Set("Accept", "application/json")
+		// OIDC Core §5.3.2: the userinfo sub must match the id_token sub, or
+		// the response describes somebody else.
+		if idClaims != nil {
+			idSub, _ := idClaims["sub"].(string)
+			uiSub, _ := claims["sub"].(string)
 
-		resp, err := s.client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("userinfo: %s", strings.TrimSpace(string(body)))
-		}
-
-		var claims map[string]any
-		if err := json.Unmarshal(body, &claims); err != nil {
-			return nil, fmt.Errorf("decode userinfo: %w", err)
+			if idSub != "" && uiSub != "" && idSub != uiSub {
+				return nil, fmt.Errorf("oauth2: userinfo sub %q does not match id_token sub %q", uiSub, idSub)
+			}
 		}
 
 		return claims, nil
 	}
 
-	candidate := tr.IDToken
-	if candidate == "" {
-		candidate = tr.AccessToken
+	if idClaims != nil {
+		return idClaims, nil
 	}
 
-	return decodeJWTPayload(candidate)
+	if tr.IDToken == "" {
+		return nil, errors.New("oauth2: token response has no id_token and no userinfo_url is configured")
+	}
+
+	return nil, errors.New("oauth2: cannot verify id_token (no jwks_url) and no userinfo_url is configured")
 }
 
-// decodeJWTPayload base64-decodes a JWT's claims segment without verifying
-// signature. Safe here because the strategy already trusts the response from
-// the IdP — we just need the claims, not a verification.
-func decodeJWTPayload(token string) (map[string]any, error) {
+// verifyIDToken returns the verified claims of tr.IDToken, or nil when there
+// is no token to verify or verification is deliberately disabled.
+func (s *Strategy) verifyIDToken(ctx context.Context, idToken, nonce string) (map[string]any, error) {
+	if idToken == "" {
+		return nil, nil
+	}
+
+	if s.cfg.SkipIDTokenVerify {
+		return decodeJWTPayloadUnverified(idToken)
+	}
+
+	if s.keys == nil {
+		// No key set: we cannot say anything about this token, so we say
+		// nothing. fetchClaims decides whether that is fatal.
+		return nil, nil
+	}
+
+	claims, err := verifyJWT(ctx, s.keys, idToken)
+	if err != nil {
+		return nil, err
+	}
+
+	checks := idTokenChecks{
+		Issuer:   s.issuer,
+		Audience: s.cfg.Audience,
+		Nonce:    nonce,
+		Skew:     s.cfg.ClockSkew,
+	}
+
+	if err := validateIDToken(claims, checks); err != nil {
+		return nil, err
+	}
+
+	return claims, nil
+}
+
+func (s *Strategy) fetchUserInfo(ctx context.Context, accessToken string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.UserInfoURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("userinfo: %s", strings.TrimSpace(string(body)))
+	}
+
+	// A userinfo endpoint may answer with a signed JWT instead of plain JSON.
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/jwt") {
+		if s.keys == nil {
+			return nil, errors.New("oauth2: signed userinfo response but no jwks_url")
+		}
+
+		return verifyJWT(ctx, s.keys, strings.TrimSpace(string(body)))
+	}
+
+	var claims map[string]any
+	if err := json.Unmarshal(body, &claims); err != nil {
+		return nil, fmt.Errorf("decode userinfo: %w", err)
+	}
+
+	return claims, nil
+}
+
+// decodeJWTPayloadUnverified base64-decodes a JWT's claims segment without
+// checking the signature. Reachable only via Config.SkipIDTokenVerify.
+func decodeJWTPayloadUnverified(token string) (map[string]any, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("not a JWT")
@@ -712,11 +898,12 @@ func (s *Strategy) revoke(ctx context.Context, accessToken string) {
 		return
 	}
 
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
-// buildAuthCodeURL constructs the IdP authorize URL with state, redirect_uri, and optional PKCE.
-func (s *Strategy) buildAuthCodeURL(state, redirectURI string, pkce *pkceParams) (string, error) {
+// buildAuthCodeURL constructs the IdP authorize URL with state, nonce,
+// redirect_uri, and optional PKCE.
+func (s *Strategy) buildAuthCodeURL(flow flowState, redirectURI string, pkce *pkceParams) (string, error) {
 	u, err := url.Parse(s.cfg.AuthURL)
 	if err != nil {
 		return "", err
@@ -725,11 +912,17 @@ func (s *Strategy) buildAuthCodeURL(state, redirectURI string, pkce *pkceParams)
 	q := u.Query()
 	q.Set("response_type", "code")
 	q.Set("client_id", s.cfg.ClientID)
-	q.Set("state", state)
+	q.Set("state", flow.State)
 	q.Set("redirect_uri", redirectURI)
+
+	if flow.Nonce != "" {
+		q.Set("nonce", flow.Nonce)
+	}
+
 	if len(s.cfg.Scopes) > 0 {
 		q.Set("scope", strings.Join(s.cfg.Scopes, " "))
 	}
+
 	if pkce != nil {
 		q.Set("code_challenge", pkce.Challenge)
 		q.Set("code_challenge_method", pkce.Method)
@@ -778,88 +971,6 @@ func (o Options) callbackOrigin(r *http.Request) (string, string) {
 	}
 
 	return scheme, r.Host
-}
-
-func (s *Strategy) setStateCookie(w http.ResponseWriter, state string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     s.stateCookie.Name,
-		Value:    state,
-		Path:     s.stateCookie.Path,
-		Domain:   s.stateCookie.Domain,
-		MaxAge:   s.stateCookie.MaxAge,
-		Secure:   s.stateCookie.Secure,
-		HttpOnly: s.stateCookie.HttpOnly,
-		SameSite: s.stateCookie.SameSite,
-	})
-}
-
-func (s *Strategy) checkStateCookie(w http.ResponseWriter, r *http.Request, expected string) error {
-	c, err := r.Cookie(s.stateCookie.Name)
-	if err != nil {
-		return err
-	}
-
-	// Always clear after one use.
-	http.SetCookie(w, &http.Cookie{
-		Name:     s.stateCookie.Name,
-		Value:    "",
-		Path:     s.stateCookie.Path,
-		Domain:   s.stateCookie.Domain,
-		MaxAge:   -1,
-		Secure:   s.stateCookie.Secure,
-		HttpOnly: s.stateCookie.HttpOnly,
-		SameSite: s.stateCookie.SameSite,
-	})
-
-	if c.Value == "" || c.Value != expected {
-		return errors.New("state mismatch")
-	}
-
-	return nil
-}
-
-func (s *Strategy) setVerifierCookie(w http.ResponseWriter, verifier string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     s.verifierCookie.Name,
-		Value:    verifier,
-		Path:     s.verifierCookie.Path,
-		Domain:   s.verifierCookie.Domain,
-		MaxAge:   s.verifierCookie.MaxAge,
-		Secure:   s.verifierCookie.Secure,
-		HttpOnly: true,
-		SameSite: s.verifierCookie.SameSite,
-	})
-}
-
-func (s *Strategy) readVerifierCookie(r *http.Request) string {
-	c, err := r.Cookie(s.verifierCookie.Name)
-	if err != nil {
-		return ""
-	}
-
-	return c.Value
-}
-
-func (s *Strategy) clearVerifierCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     s.verifierCookie.Name,
-		Value:    "",
-		Path:     s.verifierCookie.Path,
-		Domain:   s.verifierCookie.Domain,
-		MaxAge:   -1,
-		Secure:   s.verifierCookie.Secure,
-		HttpOnly: true,
-		SameSite: s.verifierCookie.SameSite,
-	})
-}
-
-func randomState(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

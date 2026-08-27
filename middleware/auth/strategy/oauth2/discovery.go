@@ -25,10 +25,10 @@ type DiscoveryDocument struct {
 
 // discoveryCache caches a fetched discovery document for a configured TTL.
 type discoveryCache struct {
-	mu       sync.RWMutex
-	doc      *DiscoveryDocument
+	mu        sync.RWMutex
+	doc       *DiscoveryDocument
 	fetchedAt time.Time
-	ttl      time.Duration
+	ttl       time.Duration
 }
 
 func newDiscoveryCache(ttl time.Duration) *discoveryCache {
@@ -78,7 +78,7 @@ func Discover(ctx context.Context, client *http.Client, issuerURL string) (*Disc
 	if err != nil {
 		return nil, fmt.Errorf("discovery: fetch: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -114,5 +114,8 @@ func applyDiscovery(cfg *Config, doc *DiscoveryDocument) {
 	}
 	if cfg.LogoutURL == "" {
 		cfg.LogoutURL = doc.EndSessionEndpoint
+	}
+	if cfg.JWKSURL == "" {
+		cfg.JWKSURL = doc.JWKSURI
 	}
 }

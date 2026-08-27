@@ -1,6 +1,7 @@
 package passkey
 
 import (
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -192,17 +193,19 @@ func parseEC2Key(m map[any]any, alg int) (*publicKey, error) {
 
 	var (
 		curve     elliptic.Curve
+		ecdhCurve ecdh.Curve
 		coordSize int
 	)
+
 	switch crv {
 	case coseCrvP256:
-		curve = elliptic.P256()
+		curve, ecdhCurve = elliptic.P256(), ecdh.P256()
 		coordSize = 32
 	case coseCrvP384:
-		curve = elliptic.P384()
+		curve, ecdhCurve = elliptic.P384(), ecdh.P384()
 		coordSize = 48
 	case coseCrvP521:
-		curve = elliptic.P521()
+		curve, ecdhCurve = elliptic.P521(), ecdh.P521()
 		coordSize = 66
 	default:
 		return nil, fmt.Errorf("unsupported curve %d", crv)
@@ -239,8 +242,16 @@ func parseEC2Key(m map[any]any, alg int) (*publicKey, error) {
 	// authenticator (or a forged COSE_Key) could submit a point not
 	// on the curve, which some signature verification paths accept
 	// silently and use to recover an arbitrary "valid" signature.
-	if !curve.IsOnCurve(x, y) {
-		return nil, errors.New("public key point is not on the named curve")
+	//
+	// Done through crypto/ecdh: elliptic.IsOnCurve is deprecated and, on some
+	// curves, was only ever a partial check.
+	uncompressed := make([]byte, 1+2*coordSize)
+	uncompressed[0] = 4
+	copy(uncompressed[1:1+coordSize], xb)
+	copy(uncompressed[1+coordSize:], yb)
+
+	if _, err := ecdhCurve.NewPublicKey(uncompressed); err != nil {
+		return nil, fmt.Errorf("public key point is not on the named curve: %w", err)
 	}
 
 	return &publicKey{

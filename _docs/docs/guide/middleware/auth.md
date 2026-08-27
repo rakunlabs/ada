@@ -112,6 +112,20 @@ type Verifier func(ctx context.Context, username, password string) (*identity.Id
 
 Return `local.ErrInvalidCredentials` for bad credentials (produces 401). Any other error produces 500.
 
+Add a limiter, and use `password` for the hash — the two things a credential
+strategy needs that nothing else supplies:
+
+```go
+g := guard.New(guard.Config{}) // 5 failures, escalating lockout
+defer g.Close()
+
+authMW.Strategy(local.New("local", myVerifierFunc, local.WithLimiter(g)))
+```
+
+Only `ErrInvalidCredentials` counts against the account. An unexpected error is
+a server fault, and counting it would let a database outage lock out every
+user.
+
 #### Self-Service Sign-up
 
 The local strategy can also create accounts. Pass a `Registrar` with `local.WithRegistrar(...)` — its presence enables signup for that strategy and the login UI grows a "Sign up" toggle.
@@ -185,7 +199,8 @@ local.WithRegisterFields(
 
 ### OAuth2 / OIDC Strategy
 
-The OAuth2 strategy supports the authorization code flow (with PKCE) and optional password flow.
+The OAuth2 strategy supports the authorization code flow — with PKCE, `state`,
+`nonce` and full `id_token` verification — and an optional password flow.
 
 ```go
 import authoauth2 "github.com/rakunlabs/ada/middleware/auth/strategy/oauth2"
@@ -212,8 +227,14 @@ When `IssuerURL` is set, the strategy fetches `/.well-known/openid-configuration
 | `userinfo_endpoint` | `UserInfoURL` |
 | `revocation_endpoint` | `RevocationURL` |
 | `end_session_endpoint` | `LogoutURL` |
+| `jwks_uri` | `JWKSURL` |
+| `issuer` | expected `iss` claim |
 
 Explicitly set fields always take precedence over discovered ones.
+
+Discovery happens once at construction. `New` logs a failure and returns a
+strategy that still works with explicitly configured endpoints; use
+`NewWithContext` to get the error and control the timeout.
 
 #### PKCE (Proof Key for Code Exchange)
 
@@ -349,28 +370,37 @@ This means you can use `go-ldap`, `go-ldap/v3`, or any other LDAP library by wra
 Passwordless email-based authentication. User enters their email, receives a one-time link, and clicks it to log in.
 
 ```go
-import "github.com/rakunlabs/ada/middleware/auth/strategy/magiclink"
+import (
+    "github.com/rakunlabs/ada/middleware/auth/guard"
+    "github.com/rakunlabs/ada/middleware/auth/strategy/magiclink"
+)
 
-authMW.Strategy(magiclink.New("magic", magiclink.Config{
-    Sender: func(ctx context.Context, email, token, verifyURL string) error {
-        // Send the magic link via your email service
-        return emailService.Send(ctx, email, "Login link", verifyURL)
-    },
-    Resolver: func(ctx context.Context, email string) (*identity.Identity, error) {
-        // Look up or create the user by email
-        user, err := db.FindOrCreateByEmail(ctx, email)
-        if err != nil {
-            return nil, err
-        }
-        return &identity.Identity{
-            Subject: user.ID,
-            Email:   email,
-            Name:    user.Name,
-        }, nil
-    },
-    TokenTTL: 15 * time.Minute,
-}, magiclink.WithLabel("Sign in with email")))
+send := func(ctx context.Context, email, token, verifyURL string) error {
+    // Deliver the magic link via your email service.
+    return emailService.Send(ctx, email, "Login link", verifyURL)
+}
+
+resolve := func(ctx context.Context, email string) (*identity.Identity, error) {
+    user, err := db.FindOrCreateByEmail(ctx, email)
+    if err != nil {
+        return nil, err
+    }
+
+    return &identity.Identity{Subject: user.ID, Email: email, Name: user.Name}, nil
+}
+
+authMW.Strategy(magiclink.New("magic", send, resolve,
+    magiclink.WithLabel("Sign in with email"),
+    magiclink.WithTokenTTL(15*time.Minute),
+    // Without a limiter the send endpoint is an open relay pointed at
+    // anybody's inbox, and a free user-enumeration oracle.
+    magiclink.WithLimiter(g),
+))
 ```
+
+The link points at `{base}login/callback/{name}`, wired automatically at
+`Mount`. Override it with `WithVerifyPath` only if you mount the route
+yourself.
 
 Flow:
 
@@ -382,19 +412,20 @@ sequenceDiagram
     participant E as Email Inbox
 
     B->>A: POST /login/pass/magic with email
-    A->>A: Generate token and store
+    A->>A: Generate token, store SHA-256 of it
     A->>S: Sender callback with token + verifyURL
     S->>E: Send email with link
     A-->>B: 200 check your email
 
     E->>B: User clicks link
-    B->>A: GET /login/pass/magic?token=abc123
-    A->>A: Lookup token and delete
+    B->>A: GET /login/callback/magic?token=abc123
+    A->>A: Hash, look up, delete
     A->>A: Resolver callback for email
     A-->>B: Set-Cookie auth_session
 ```
 
-The strategy ships with a built-in in-memory `TokenStore`. For production, provide your own Redis/DB-backed store:
+The strategy ships with a built-in in-memory `TokenStore` (single-process, with
+a background sweeper). For production, provide your own Redis/DB-backed store:
 
 ```go
 type TokenStore interface {
@@ -403,6 +434,9 @@ type TokenStore interface {
     Delete(ctx context.Context, token string) error
 }
 ```
+
+The `token` a store sees is the SHA-256 of the value that went out by email,
+never the value itself — the same reason a password is not stored in the clear.
 
 ### HTTP Basic Strategy
 
@@ -447,17 +481,64 @@ authMW.Strategy(header.New("proxy",
 ))
 ```
 
-All header names have sensible defaults (`X-Forwarded-User`, `X-Forwarded-Email`, etc.) so the minimal setup is:
+All header names have sensible defaults (`X-Forwarded-User`, `X-Forwarded-Email`, etc.).
+
+These headers carry no proof of anything, so the strategy needs a trust
+boundary — state it explicitly rather than assuming it:
 
 ```go
-authMW.Strategy(header.New("proxy"))
+// Only the proxy's network may claim an identity.
+authMW.Strategy(header.New("proxy", header.WithTrustedProxies("10.0.0.0/8")))
+
+// Or, where the network cannot be separated, a shared secret.
+authMW.Strategy(header.New("proxy",
+    header.WithSharedSecret("X-Proxy-Secret", os.Getenv("PROXY_SECRET")),
+))
 ```
 
-If the User header is missing from the request, the strategy returns 401.
+The check is against `RemoteAddr`, never `X-Forwarded-For` — an attacker sets
+that as easily as the header it is meant to guard. With neither option the
+strategy logs a warning at construction and accepts whatever the caller claims.
 
-::: warning
-Only use this behind a trusted reverse proxy that sets these headers. An attacker can forge them if the proxy is bypassed. Make sure your infrastructure strips these headers from external requests.
-:::
+The strategy deliberately does **not** implement `RequestAuthenticator`: header
+identity is accepted at the login endpoint only, so a misrouted deployment
+exposes one route instead of every route.
+
+### mTLS Strategy
+
+Authenticates callers by their TLS client certificate, natively or behind a
+terminating proxy.
+
+```go
+import "github.com/rakunlabs/ada/middleware/auth/strategy/mtls"
+
+// Native: TLS terminates in this process. Requires tls.Config.ClientCAs and
+// ClientAuth set to RequireAndVerifyClientCert (or VerifyClientCertIfGiven).
+s, err := mtls.New("mtls", func(ctx context.Context, cert *x509.Certificate) (*identity.Identity, error) {
+    svc, ok := registry.Lookup(mtls.Fingerprint(cert))
+    if !ok {
+        return nil, strategy.ErrInvalidCredentials
+    }
+
+    return &identity.Identity{Subject: svc.ID, Roles: svc.Roles}, nil
+})
+
+// Proxy: the certificate arrives in a header.
+s, err := mtls.New("mtls", verify, mtls.WithProxy(mtls.ProxyConfig{
+    TrustedCIDRs: []string{"10.0.0.0/8"},
+    CertHeader:   "X-Forwarded-Tls-Client-Cert",
+    VerifyHeader: "X-Forwarded-Tls-Client-Cert-Info",
+}))
+```
+
+Only `tls.ConnectionState.VerifiedChains` is consulted, never
+`PeerCertificates` — the latter holds whatever the client sent, validated or
+not. With no verifier, the identity is derived from the certificate itself:
+`Subject` is the SHA-256 fingerprint (a CN is neither unique nor
+authoritative), `Roles` come from the subject's OU values.
+
+It implements `RequestAuthenticator`, so a client presenting a certificate is
+authenticated on protected routes directly, without a session.
 
 ### Passkey Strategy
 
@@ -610,12 +691,20 @@ The UI groups them: form-based strategies (local, LDAP, magic link, password-flo
 | `Cookie.Path` | `string` | `"/"` | Cookie path |
 | `Cookie.MaxAge` | `int` | `0` | Cookie max-age in seconds |
 | `Cookie.Domain` | `string` | `""` | Cookie domain |
-| `Cookie.Secure` | `bool` | `false` | Cookie secure flag |
-| `Cookie.HttpOnly` | `bool` | `false` | Cookie HttpOnly flag |
+| `Cookie.Secure` | `cookie.SecureMode` | `auto` | `auto` (set when the request is HTTPS), `always`, or `never` |
+| `Cookie.DisableHTTPOnly` | `bool` | `false` | Expose the cookie to JavaScript. **HttpOnly is on by default** |
 | `Cookie.SameSite` | `http.SameSite` | `Lax` | Cookie SameSite policy |
 | `IssuerConfig.AccessTTL` | `time.Duration` | `15m` | Access token lifetime |
 | `IssuerConfig.RefreshTTL` | `time.Duration` | `7d` | Refresh token lifetime |
-| `IssuerConfig.RotateRefresh` | `bool` | `true` | Rotate refresh token on each refresh |
+| `IssuerConfig.DisableRefreshRotation` | `bool` | `false` | Turn off refresh rotation. **Rotation is on by default** |
+| `MFA.CookieName` | `string` | `"auth_mfa"` | Pending-login cookie (only used with `WithSecondFactor`) |
+| `MFA.TTL` | `time.Duration` | `5m` | How long the user has to complete the second factor |
+| `MFA.MaxAttempts` | `int` | `5` | Wrong codes tolerated before the pending login is destroyed |
+
+`Cookie.Secure` defaults to `auto`: the `Secure` attribute is set when the
+request arrived over TLS, directly or via `X-Forwarded-Proto`. That protects
+real deployments without breaking `http://localhost`. Pin it to `always` when
+TLS terminates upstream and the proxy forwards no protocol hint.
 
 ### OAuth2 Config
 
@@ -630,9 +719,30 @@ The UI groups them: form-based strategies (local, LDAP, magic link, password-flo
 | `UserInfoURL` | `string` | auto | UserInfo endpoint |
 | `RevocationURL` | `string` | auto | Token revocation endpoint |
 | `LogoutURL` | `string` | auto | End-session endpoint |
+| `JWKSURL` | `string` | auto | Key set used to verify the `id_token` signature |
+| `Audience` | `string` | `ClientID` | Value required in the `id_token` `aud` claim |
+| `ClockSkew` | `time.Duration` | `60s` | Tolerance applied to `exp` / `nbf` |
 | `DisablePKCE` | `bool` | `false` | Disable PKCE (not recommended) |
+| `DisableNonce` | `bool` | `false` | Omit the OIDC `nonce` (not recommended) |
+| `SkipIDTokenVerify` | `bool` | `false` | Accept an unverified `id_token`. **Do not set this** |
 | `PasswordFlow` | `bool` | `false` | Enable resource owner password flow |
 | `AuthHeaderStyle` | `int` | `0` (Basic) | `0`=Basic, `1`=Bearer, `2`=Params |
+
+### ID token verification
+
+An `id_token`, when present, is always verified: RS/PS/ES/EdDSA signature
+against the IdP's JWKS, then `iss`, `aud`, `exp`, `nbf` and `nonce`.
+
+Claims are taken from `UserInfoURL` when it is configured, otherwise from the
+verified `id_token`. With neither — no userinfo endpoint and no reachable key
+set — the login **fails** rather than falling back to an unverified payload.
+`SkipIDTokenVerify` exists for the single case of an IdP that publishes no key
+set on a trusted channel; it turns the `id_token` into an unauthenticated
+assertion of whatever the caller wants.
+
+State, nonce and the PKCE verifier live together in one `HttpOnly` cookie
+(`auth_flow_<name>`), cleared after a single use. Override its attributes with
+`Options.FlowCookie` if the callback lands on a different subdomain.
 
 ## Routes
 
@@ -647,6 +757,7 @@ With default `Base: "/"`:
 | POST | `/login/register/{strategy}` | Create an account (strategy must implement `Registerer`) |
 | GET | `/login/callback/{strategy}` | OAuth2 redirect callback |
 | POST | `/login/refresh` | Force-refresh access token |
+| POST | `/login/mfa` | Complete a second factor (only with `WithSecondFactor`) |
 | POST | `/logout` | Revoke session and clear cookie |
 | GET | `/login/status` | Status iframe (for popup flow) |
 
@@ -670,10 +781,127 @@ id.IssuedAt      // time.Time
 // Typed claim access
 tenantID := identity.Claim[string](id, "tenant_id")
 
-// Role/scope checks
-id.HasRole("admin")  // true
-id.HasScope("write") // true
+// Role/scope checks. An empty role or scope is false, not "no requirement":
+// id.HasRole(cfg.Role) with an unset config value must not wave everyone through.
+id.HasRole("admin")             // true
+id.HasScope("write")            // true
+id.HasAnyRole("admin", "root")  // true
+id.HasAllRoles("admin", "root") // false
 ```
+
+## Authorization
+
+`Require()` only answers "is this someone?". `middleware/auth/authz` answers
+"may they do this?".
+
+```go
+import "github.com/rakunlabs/ada/middleware/auth/authz"
+
+// Per-route.
+mux.GET("/admin", handler, authMW.Require(), authz.RequireRole("admin"))
+mux.GET("/reports", handler, authMW.Require(), authz.RequireAnyScope("reports:read", "admin"))
+
+// Or a policy table, evaluated in order — first match wins.
+rules := authz.Rules{
+    Rules: []authz.Rule{
+        {Name: "health", Paths: []string{"/health", "/metrics"}, Public: true},
+        {Name: "admin", Paths: []string{"/api/admin/**"}, Roles: []string{"admin"}},
+        {
+            Name:     "api",
+            Paths:    []string{"/api/**"},
+            Excluded: []authz.Rule{{Paths: []string{"/api/public/**"}}},
+            Scopes:   []string{"api"},
+        },
+    },
+    // Applies when nothing matches. Defaults to Authenticated.
+    Default: authz.Authenticated,
+}
+
+if err := rules.Validate(); err != nil {
+    return err
+}
+
+mux.Use(authMW.Require(), rules.Middleware())
+```
+
+Path patterns support `*` (one segment), `**` (any depth) and `?` (one
+character). `/api/**` also matches `/api` itself.
+
+A denied request gets `403` when somebody is logged in and `401` when nobody
+is; the response never names the requirement that was missing.
+
+## Second factor (MFA)
+
+`strategy/totp` is an RFC 6238 primitive. `WithSecondFactor` is where it plugs
+into the login flow:
+
+```go
+sf := totp.NewSecondFactor(totp.Default(), lookupSecret,
+    totp.WithRecoveryCodes(consumeRecoveryCode))
+
+authMW := auth.New(cfg).
+    Strategy(local.New("local", verify)).
+    WithSecondFactor(sf)
+```
+
+The first factor no longer issues a session. It parks the identity for
+`MFA.TTL`, sets a short-lived `HttpOnly` cookie scoped to `/login/mfa`, and
+answers `{"mfa_required": true}`. The client posts the code to
+`POST {base}login/mfa`; only then is the real session minted. A parked login
+that is not usable as a session — `Require()` rejects it — and it is destroyed
+after `MFA.MaxAttempts` wrong codes.
+
+Return `totp.ErrNotEnrolled` from the lookup for users who have no secret, so
+enrolment can be rolled out gradually.
+
+## Rate limiting and lockout
+
+Nothing counts failed attempts unless you say so:
+
+```go
+import "github.com/rakunlabs/ada/middleware/auth/guard"
+
+g := guard.New(guard.Config{})   // 5 failures, escalating lockout from 15m
+defer g.Close()
+
+local.New("local", verify, local.WithLimiter(g))
+magiclink.New("mail", send, resolve, magiclink.WithLimiter(g))
+```
+
+The local strategy keys on the username, not the client address: an attacker
+grinding one account from a botnet is the case an IP key misses, and the one
+that actually takes over accounts. The guard is in-process, so with several
+replicas the effective limit multiplies by the replica count; supply your own
+`guard.Limiter` for an exact global budget.
+
+## Password hashing
+
+```go
+import "github.com/rakunlabs/ada/middleware/auth/password"
+
+h := password.New() // PBKDF2-HMAC-SHA256, 600k iterations
+
+encoded, err := h.Hash("correct horse battery staple")
+
+// On login — use the dummy hash for unknown users so a missing account costs
+// the same as a wrong password.
+stored, ok := db.Lookup(username)
+if !ok {
+    stored = password.Dummy
+}
+
+if err := h.Verify(stored, given); err != nil {
+    return nil, local.ErrInvalidCredentials
+}
+
+if h.NeedsRehash(stored) {
+    // upgrade in the background
+}
+```
+
+PBKDF2 is the weakest acceptable choice; it is the default only because this
+module carries no third-party dependencies. Implement `password.Hasher` with
+Argon2id if you can take the dependency.
 
 ## Session & Issuer
 
@@ -684,14 +912,40 @@ The session is backed by an internal **issuer** that mints opaque access/refresh
 - Refresh tokens live for 7 days (configurable), rotated on each use
 - Session state is stored in a pluggable backend (in-memory by default)
 
-### Custom Issuer Backend
+### Persisting sessions
 
 ```go
-import "github.com/rakunlabs/ada/middleware/auth/sessionstore/file"
+import (
+    "github.com/rakunlabs/ada/middleware/auth/issuer/backend"
+    "github.com/rakunlabs/ada/middleware/auth/issuer/crypto"
+    "github.com/rakunlabs/ada/middleware/auth/sessionstore"
+    "github.com/rakunlabs/ada/middleware/auth/sessionstore/file"
+)
 
-store := file.New(file.Config{Path: "/var/sessions"}, sessionstore.Options{...})
-authMW.WithSessionStore(store)
+store, err := file.New(file.Config{
+    // Set this. Left empty, a random key is generated per process: every
+    // session breaks on restart and no two replicas can read each other's.
+    SessionKey: os.Getenv("SESSION_KEY"),
+    Path:       "/var/sessions",
+}, sessionstore.Options{Path: "/", MaxAge: 86400})
+if err != nil {
+    return err
+}
+
+store.StartGC() // sweep expired session files
+defer store.Close()
+
+cipher, err := crypto.New(os.Getenv("SESSION_ENCRYPTION_KEY"))
+if err != nil {
+    return err
+}
+
+authMW.WithSessionStore(store, backend.WithCipher(cipher))
 ```
+
+`WithCipher` is strongly recommended: the stored pair holds both live tokens
+and the full identity, including every raw upstream claim. Without it, a
+database dump or a stolen disk is a stack of usable sessions.
 
 For Redis:
 
@@ -699,11 +953,17 @@ For Redis:
 import redisstore "github.com/rakunlabs/ada/middleware/auth/sessionstore/redis"
 
 store, err := redisstore.New(ctx, redisstore.Config{
-    Address:  "localhost:6379",
-    Password: "secret",
-}, sessionstore.Options{...})
-authMW.WithSessionStore(store)
+    Address:    "localhost:6379",
+    Password:   "secret",
+    SessionKey: os.Getenv("SESSION_KEY"),
+}, sessionstore.Options{Path: "/", MaxAge: 86400})
+
+authMW.WithSessionStore(store, backend.WithCipher(cipher))
 ```
+
+The store must implement `sessionstore.DirectStore` — reading and writing by
+raw session ID, without an `*http.Request`. Both bundled stores do. A store
+that does not is rejected at `Init` rather than silently losing every write.
 
 ## Login UI
 
@@ -930,10 +1190,17 @@ func verifyUser(ctx context.Context, user, pass string) (*identity.Identity, err
 ```
 
 ::: warning
-Always use `Cookie.Secure: true` and `Cookie.HttpOnly: true` in production.
-The defaults are permissive for local development.
+The cookie defaults are the safe ones — `HttpOnly` on, `Secure` set whenever
+the request is HTTPS. Pin `Cookie.Secure: "always"` if TLS terminates upstream
+and the proxy forwards no `X-Forwarded-Proto`.
+
+Two things still need a decision from you: a `Limiter` on any strategy that
+takes a password or sends mail, and a `SessionKey` plus `WithCipher` on any
+store that persists outside the process.
 :::
 
 ::: danger
-Never store secrets (`ClientSecret`, `SessionKey`) in source code. Use environment variables or a secret manager.
+Never store secrets (`ClientSecret`, `SessionKey`, encryption keys) in source
+code. Use environment variables or a secret manager.
 :::
+

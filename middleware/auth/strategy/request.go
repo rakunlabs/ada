@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 )
@@ -101,4 +102,42 @@ func (r *Registry) HasRequestAuthenticator() bool {
 	}
 
 	return false
+}
+
+// Challenger is an optional interface for strategies that can describe
+// themselves as an HTTP authentication challenge (RFC 9110 §11.6.1).
+//
+// A 401 response is required to carry a WWW-Authenticate header naming a
+// scheme the client can actually use. Hardcoding one would be a guess —
+// a deployment running only OAuth2 has no bearer-key endpoint to point a
+// client at — so the challenge is assembled from whatever is registered.
+type Challenger interface {
+	// Challenge returns one WWW-Authenticate value, e.g. `Bearer` or
+	// `Basic realm="Restricted"`. An empty string contributes nothing.
+	Challenge() string
+}
+
+// Challenge assembles the WWW-Authenticate value advertising every
+// registered strategy that can authenticate a request directly.
+//
+// Multiple challenges are comma-separated, which RFC 9110 §11.6.1 allows
+// and clients are expected to choose from. Returns "" when no registered
+// strategy accepts credentials on the request — a cookie-only deployment
+// has no scheme to offer, and inventing one would send clients chasing an
+// endpoint that does not exist.
+func (r *Registry) Challenge() string {
+	var challenges []string
+
+	for _, s := range r.List() {
+		c, ok := s.(Challenger)
+		if !ok {
+			continue
+		}
+
+		if v := c.Challenge(); v != "" {
+			challenges = append(challenges, v)
+		}
+	}
+
+	return strings.Join(challenges, ", ")
 }

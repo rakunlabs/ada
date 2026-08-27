@@ -20,12 +20,17 @@ package header
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
@@ -79,6 +84,10 @@ type Strategy struct {
 	priority  int
 	hidden    bool
 	headerMap HeaderMap
+
+	trustedProxies []*net.IPNet
+	secretHeader   string
+	secretValue    string
 }
 
 // Option configures a Strategy.
@@ -104,7 +113,46 @@ func WithHeaderMap(m HeaderMap) Option {
 	return func(s *Strategy) { s.headerMap = m.defaults() }
 }
 
+// WithTrustedProxies restricts the strategy to requests whose immediate peer
+// falls inside one of the given CIDRs (bare IPs are accepted too).
+//
+// This is the trust boundary the strategy has been missing. The identity
+// headers carry no proof of anything; the only thing standing between them and
+// an arbitrary impersonation is the claim that nothing but the proxy can
+// reach this port. Stating that claim explicitly turns it from an assumption
+// into a check.
+//
+// The peer address is r.RemoteAddr, never X-Forwarded-For — an attacker sets
+// that as easily as the header it is supposed to guard.
+func WithTrustedProxies(cidrs ...string) Option {
+	return func(s *Strategy) {
+		nets, err := guard.ParseCIDRs(cidrs)
+		if err != nil {
+			panic(fmt.Errorf("header: trusted proxies: %w", err))
+		}
+
+		s.trustedProxies = nets
+	}
+}
+
+// WithSharedSecret requires the given header to carry the given value.
+//
+// Use it when the proxy and the application cannot be separated at the network
+// layer — a shared cluster, a service mesh without mTLS. Compared in constant
+// time. It is a weaker control than WithTrustedProxies and composes with it.
+func WithSharedSecret(headerName, value string) Option {
+	return func(s *Strategy) {
+		s.secretHeader = headerName
+		s.secretValue = value
+	}
+}
+
 // New returns a header-auth strategy with the given name.
+//
+// With neither WithTrustedProxies nor WithSharedSecret, the strategy accepts
+// whatever the caller claims. It logs a warning once at construction rather
+// than refusing, because a genuinely closed network is a legitimate
+// deployment — but silence would have been the wrong default.
 func New(name string, opts ...Option) *Strategy {
 	s := &Strategy{
 		name:      name,
@@ -117,7 +165,46 @@ func New(name string, opts ...Option) *Strategy {
 		opt(s)
 	}
 
+	if len(s.trustedProxies) == 0 && s.secretValue == "" {
+		slog.Warn("header strategy has no trust boundary; any client that can reach this endpoint can claim any identity",
+			"strategy", name,
+			"hint", "set WithTrustedProxies or WithSharedSecret",
+		)
+	}
+
 	return s
+}
+
+// trusted reports whether the request may speak for someone else.
+func (s *Strategy) trusted(r *http.Request) bool {
+	if s.secretValue != "" {
+		got := r.Header.Get(s.secretHeader)
+		if subtle.ConstantTimeCompare([]byte(got), []byte(s.secretValue)) != 1 {
+			return false
+		}
+	}
+
+	if len(s.trustedProxies) == 0 {
+		return true
+	}
+
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+
+	for _, n := range s.trustedProxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Name returns the strategy's URL key.
@@ -140,6 +227,15 @@ func (s *Strategy) Descriptor() strategy.Descriptor {
 // missing or empty the strategy writes a 401 JSON error and returns
 // OutcomeFailed.
 func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
+	if !s.trusted(r) {
+		// Same response as a missing header. A caller outside the trust
+		// boundary learns nothing about why it failed, and in particular not
+		// that a shared-secret header exists.
+		writeError(w, http.StatusUnauthorized, "no_user_header", "missing required header: "+s.headerMap.User)
+
+		return nil, strategy.OutcomeFailed, nil
+	}
+
 	user := strings.TrimSpace(r.Header.Get(s.headerMap.User))
 	if user == "" {
 		writeError(w, http.StatusUnauthorized, "no_user_header", "missing required header: "+s.headerMap.User)

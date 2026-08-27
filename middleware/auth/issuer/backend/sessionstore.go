@@ -1,13 +1,12 @@
-// Package backend wires the issuer to the existing sessionstore backends
-// (cookie/file/redis). Each adapter exposes a Backend that the default issuer
-// can call without knowing the underlying storage.
+// Package backend wires the issuer to the sessionstore backends (file, redis)
+// and provides an in-memory backend for tests and single-process deployments.
 package backend
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
@@ -15,84 +14,102 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/sessionstore"
 )
 
-// SessionStore is an issuer.Backend backed by a sessionstore.Store. It works
-// for stores that key values by an opaque cookie name (file, redis); the
-// cookie-only store needs a different adapter (CookieOnly below).
+// SessionStore is an issuer.Backend backed by a sessionstore.DirectStore.
 //
-// The pair is stored as a single JSON blob under sessionstore.Session.Values
-// keyed by "pair".
+// The issuer owns its own session IDs and has no request/response pair to hand
+// to Store.Get/Store.Save, so the store must be able to read and write by raw
+// ID. Both the file and redis stores implement sessionstore.DirectStore.
+//
+// The pair is stored as a single JSON blob under Values["pair"].
 type SessionStore struct {
-	store      sessionstore.Store
-	cookieName string
+	store  sessionstore.DirectStore
+	cipher issuer.Cipher
 }
 
 const pairKey = "pair"
 
-// NewSessionStore wraps a sessionstore.Store for the issuer. cookieName is the
-// session cookie name; the issuer's session ID is mapped to a "fake" request
-// cookie when reading and a Set-Cookie is issued when saving.
+// NewSessionStore wraps a sessionstore.Store for the issuer.
 //
-// Note: this adapter is awkward for the issuer pattern because sessionstore
-// expects a *http.Request to extract the cookie. We keep the existing store
-// for redis/file but provide a richer Direct backend that works without an
-// HTTP request (issuer/backend/memory.go) for tests.
-func NewSessionStore(store sessionstore.Store, cookieName string) *SessionStore {
-	return &SessionStore{store: store, cookieName: cookieName}
+// It returns sessionstore.ErrNotDirect if the store cannot address records by
+// raw session ID. Driving a codec-based store through a synthesized request
+// silently loses every write, so this is a hard error rather than a fallback.
+func NewSessionStore(store sessionstore.Store, opts ...SessionStoreOption) (*SessionStore, error) {
+	direct, ok := store.(sessionstore.DirectStore)
+	if !ok {
+		return nil, fmt.Errorf("%w: %T", sessionstore.ErrNotDirect, store)
+	}
+
+	s := &SessionStore{store: direct}
+	for _, o := range opts {
+		o(s)
+	}
+
+	return s, nil
 }
 
-// LoadPair retrieves the pair by sessionID. It synthesizes a request carrying
-// the sessionID as the session cookie so the underlying store can decode it.
+// SessionStoreOption configures a SessionStore.
+type SessionStoreOption func(*SessionStore)
+
+// WithCipher encrypts the stored pair at rest. Without it the pair — which
+// holds both live tokens and the full identity — is persisted as plain JSON.
+func WithCipher(c issuer.Cipher) SessionStoreOption {
+	return func(s *SessionStore) { s.cipher = c }
+}
+
+// LoadPair retrieves the pair by sessionID.
 func (s *SessionStore) LoadPair(ctx context.Context, sessionID string) (*issuer.Pair, error) {
-	r, err := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+	values, err := s.store.LoadByID(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, sessionstore.ErrNoSession) {
+			return nil, issuer.ErrNotFound
+		}
+
+		return nil, fmt.Errorf("backend: load: %w", err)
 	}
 
-	r.AddCookie(&http.Cookie{Name: s.cookieName, Value: sessionID})
-
-	sess, err := s.store.Get(r, s.cookieName)
-	if err != nil || sess == nil || sess.IsNew {
-		return nil, issuer.ErrNotFound
-	}
-
-	raw, ok := sess.Values[pairKey].(string)
+	raw, ok := values[pairKey].(string)
 	if !ok || raw == "" {
 		return nil, issuer.ErrNotFound
 	}
 
+	blob := []byte(raw)
+
+	if s.cipher != nil {
+		blob, err = s.cipher.Decrypt(blob)
+		if err != nil {
+			return nil, fmt.Errorf("backend: decrypt pair: %w", err)
+		}
+	}
+
 	var p issuer.Pair
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+	if err := json.Unmarshal(blob, &p); err != nil {
 		return nil, fmt.Errorf("backend: decode pair: %w", err)
 	}
 
 	return &p, nil
 }
 
-// SavePair persists a pair. The underlying sessionstore writes a Set-Cookie on
-// the synthesized response — we discard that header because the auth
-// middleware writes the real cookie itself with the issuer's SessionID.
-func (s *SessionStore) SavePair(ctx context.Context, p *issuer.Pair, _ time.Duration) error {
-	raw, err := json.Marshal(p)
+// SavePair persists a pair under its session ID.
+func (s *SessionStore) SavePair(ctx context.Context, p *issuer.Pair, ttl time.Duration) error {
+	if p == nil || p.SessionID == "" {
+		return fmt.Errorf("backend: pair without session id")
+	}
+
+	blob, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
 
-	r, err := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
-	if err != nil {
-		return err
+	if s.cipher != nil {
+		blob, err = s.cipher.Encrypt(blob)
+		if err != nil {
+			return fmt.Errorf("backend: encrypt pair: %w", err)
+		}
 	}
 
-	r.AddCookie(&http.Cookie{Name: s.cookieName, Value: p.SessionID})
+	values := map[string]any{pairKey: string(blob)}
 
-	sess, _ := s.store.Get(r, s.cookieName)
-	if sess == nil {
-		return fmt.Errorf("backend: store returned nil session")
-	}
-
-	sess.Values[pairKey] = string(raw)
-
-	// The store needs a writer to set its cookie; we hand it a discard writer.
-	if err := s.store.Save(r, discardWriter{}, sess); err != nil {
+	if err := s.store.SaveByID(ctx, p.SessionID, values, ttl); err != nil {
 		return fmt.Errorf("backend: save: %w", err)
 	}
 
@@ -101,46 +118,31 @@ func (s *SessionStore) SavePair(ctx context.Context, p *issuer.Pair, _ time.Dura
 
 // DeletePair removes the pair.
 func (s *SessionStore) DeletePair(ctx context.Context, sessionID string) error {
-	r, err := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
-	if err != nil {
-		return err
+	if err := s.store.DeleteByID(ctx, sessionID); err != nil {
+		return fmt.Errorf("backend: delete: %w", err)
 	}
 
-	r.AddCookie(&http.Cookie{Name: s.cookieName, Value: sessionID})
-
-	sess, err := s.store.Get(r, s.cookieName)
-	if err != nil || sess == nil || sess.IsNew {
-		return nil
-	}
-
-	sess.Options.MaxAge = -1
-
-	return s.store.Save(r, discardWriter{}, sess)
+	return nil
 }
-
-// discardWriter implements http.ResponseWriter and ignores all writes.
-type discardWriter struct{ headers http.Header }
-
-func (d discardWriter) Header() http.Header {
-	if d.headers == nil {
-		return http.Header{}
-	}
-
-	return d.headers
-}
-func (d discardWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (d discardWriter) WriteHeader(_ int)            {}
 
 // Memory is an in-process Backend used in tests and as the default when no
-// store is configured.
+// store is configured. Entries honour the TTL passed to SavePair, so an
+// abandoned session does not pin memory for the lifetime of the process.
 type Memory struct {
 	mu    sync.RWMutex
-	pairs map[string]*issuer.Pair
+	pairs map[string]memoryEntry
+
+	now func() time.Time
+}
+
+type memoryEntry struct {
+	pair      *issuer.Pair
+	expiresAt time.Time
 }
 
 // NewMemory returns an empty in-memory backend.
 func NewMemory() *Memory {
-	return &Memory{pairs: make(map[string]*issuer.Pair)}
+	return &Memory{pairs: make(map[string]memoryEntry), now: time.Now}
 }
 
 // LoadPair returns a copy of the pair for sessionID, or issuer.ErrNotFound.
@@ -148,24 +150,76 @@ func NewMemory() *Memory {
 // without affecting the stored value.
 func (m *Memory) LoadPair(_ context.Context, sessionID string) (*issuer.Pair, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	e, ok := m.pairs[sessionID]
+	m.mu.RUnlock()
 
-	p, ok := m.pairs[sessionID]
 	if !ok {
 		return nil, issuer.ErrNotFound
 	}
 
-	return clonePair(p), nil
+	if !e.expiresAt.IsZero() && !m.now().Before(e.expiresAt) {
+		m.mu.Lock()
+		// Re-check: a concurrent SavePair may have refreshed the entry.
+		if cur, still := m.pairs[sessionID]; still && cur.expiresAt.Equal(e.expiresAt) {
+			delete(m.pairs, sessionID)
+		}
+		m.mu.Unlock()
+
+		return nil, issuer.ErrNotFound
+	}
+
+	return clonePair(e.pair), nil
 }
 
-// SavePair stores a clone of the pair.
-func (m *Memory) SavePair(_ context.Context, p *issuer.Pair, _ time.Duration) error {
+// SavePair stores a clone of the pair, expiring it after ttl. A ttl of zero
+// means "never expire".
+func (m *Memory) SavePair(_ context.Context, p *issuer.Pair, ttl time.Duration) error {
+	if p == nil || p.SessionID == "" {
+		return fmt.Errorf("backend: pair without session id")
+	}
+
+	e := memoryEntry{pair: clonePair(p)}
+	if ttl > 0 {
+		e.expiresAt = m.now().Add(ttl)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.pairs[p.SessionID] = clonePair(p)
+	m.pairs[p.SessionID] = e
+
+	// Opportunistic sweep: bounded work, keeps an idle-but-written-to backend
+	// from growing without limit.
+	m.sweepLocked()
 
 	return nil
+}
+
+const memorySweepBudget = 32
+
+func (m *Memory) sweepLocked() {
+	now := m.now()
+	n := 0
+
+	for id, e := range m.pairs {
+		if n >= memorySweepBudget {
+			return
+		}
+
+		n++
+
+		if !e.expiresAt.IsZero() && !now.Before(e.expiresAt) {
+			delete(m.pairs, id)
+		}
+	}
+}
+
+// Len reports the number of live entries. Intended for tests and metrics.
+func (m *Memory) Len() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return len(m.pairs)
 }
 
 func clonePair(p *issuer.Pair) *issuer.Pair {
@@ -174,6 +228,7 @@ func clonePair(p *issuer.Pair) *issuer.Pair {
 	}
 
 	cp := *p
+
 	if p.Identity != nil {
 		idCopy := *p.Identity
 		cp.Identity = &idCopy

@@ -14,14 +14,47 @@ func TestHasRoleScope(t *testing.T) {
 	if id.HasRole("ghost") {
 		t.Errorf("did not expect ghost role")
 	}
-	if !id.HasRole("") {
-		t.Errorf("empty role should be true")
+	// An empty role is not a satisfied requirement. A caller writing
+	// id.HasRole(cfg.Role) with an unset config value must not be told yes.
+	if id.HasRole("") {
+		t.Errorf("empty role should be false")
 	}
 	if !id.HasScope("read") {
 		t.Errorf("expected read scope")
 	}
 	if id.HasScope("delete") {
 		t.Errorf("did not expect delete scope")
+	}
+	if id.HasScope("") {
+		t.Errorf("empty scope should be false")
+	}
+
+	var nilID *Identity
+	if nilID.HasRole("admin") || nilID.HasScope("read") {
+		t.Errorf("nil identity should hold nothing")
+	}
+}
+
+func TestHasAnyAll(t *testing.T) {
+	id := &Identity{Roles: []string{"admin"}, Scopes: []string{"read"}}
+
+	if !id.HasAnyRole("ghost", "admin") {
+		t.Errorf("expected any-role match")
+	}
+	if id.HasAnyRole("ghost") {
+		t.Errorf("did not expect any-role match")
+	}
+	if id.HasAllRoles("admin", "ghost") {
+		t.Errorf("did not expect all-roles match")
+	}
+	if !id.HasAllRoles() {
+		t.Errorf("empty all-roles should be vacuously true")
+	}
+	if !id.HasAnyScope("read", "write") {
+		t.Errorf("expected any-scope match")
+	}
+	if !id.HasAllScopes("read") {
+		t.Errorf("expected all-scopes match")
 	}
 }
 

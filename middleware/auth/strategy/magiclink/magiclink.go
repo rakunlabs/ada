@@ -12,6 +12,7 @@ package magiclink
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
@@ -36,6 +38,11 @@ type Sender func(ctx context.Context, email, token, verifyURL string) error
 type Resolver func(ctx context.Context, email string) (*identity.Identity, error)
 
 // TokenStore persists pending magic-link tokens.
+//
+// The value handed to Store is the SHA-256 of the token that went out by
+// email, never the token itself. A store is a database row or a Redis key;
+// treating a login credential the way a password is treated means a leaked
+// dump is not a stack of usable logins.
 type TokenStore interface {
 	Store(ctx context.Context, token, email string, ttl time.Duration) error
 	Lookup(ctx context.Context, token string) (email string, err error)
@@ -57,6 +64,13 @@ type Strategy struct {
 	tokenLength int
 
 	verifyBaseURL string
+
+	// verifyBasePath is the mounted path prefix the magic link points at. Set
+	// by SetCallbackBasePath at Mount time, or pinned via WithVerifyPath.
+	verifyBasePath string
+	verifyPathSet  bool
+
+	limiter guard.Limiter
 }
 
 // Option configures a Strategy.
@@ -99,6 +113,28 @@ func WithVerifyBaseURL(u string) Option {
 	return func(s *Strategy) { s.verifyBaseURL = u }
 }
 
+// WithVerifyPath pins the path prefix the magic link points at, e.g.
+// "/auth/login/callback". The strategy appends "/<name>".
+//
+// Leave it unset in the normal case: the auth middleware pushes its own
+// resolved callback base at Mount time, which is the only value guaranteed to
+// match the routes that actually exist.
+func WithVerifyPath(p string) Option {
+	return func(s *Strategy) {
+		s.verifyBasePath = p
+		s.verifyPathSet = true
+	}
+}
+
+// WithLimiter throttles link requests per email address.
+//
+// Without one, the send endpoint is an open relay pointed at anybody's inbox
+// and a free user-enumeration oracle. guard.New(guard.Config{}) is a
+// reasonable default.
+func WithLimiter(l guard.Limiter) Option {
+	return func(s *Strategy) { s.limiter = l }
+}
+
 // New returns a magic-link strategy with the given name, sender, and resolver.
 func New(name string, sender Sender, resolver Resolver, opts ...Option) *Strategy {
 	s := &Strategy{
@@ -123,6 +159,21 @@ func New(name string, sender Sender, resolver Resolver, opts ...Option) *Strateg
 
 // Name returns the strategy's URL key.
 func (s *Strategy) Name() string { return s.name }
+
+// SetCallbackBasePath implements strategy.CallbackBinder.
+//
+// A magic link is a callback: the user leaves the site, and the mail client
+// brings them back with a one-time credential in the URL. The auth middleware
+// pushes the base it actually mounted, which is what the previously hardcoded
+// "/auth/login" was standing in for — and getting wrong, since the real route
+// has never been at that path.
+func (s *Strategy) SetCallbackBasePath(p string) {
+	if s.verifyPathSet {
+		return
+	}
+
+	s.verifyBasePath = p
+}
 
 // Descriptor returns the UI-facing description of this strategy.
 func (s *Strategy) Descriptor() strategy.Descriptor {
@@ -175,10 +226,20 @@ func (s *Strategy) handleSendLink(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	if email == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "email is required")
+	if !validEmail(email) {
+		writeError(w, http.StatusBadRequest, "bad_request", "a valid email is required")
 
 		return nil, strategy.OutcomeFailed, nil
+	}
+
+	key := strings.ToLower(email)
+
+	if s.limiter != nil {
+		if d := s.limiter.Check(key); !d.Allowed {
+			guard.WriteLocked(w, d)
+
+			return nil, strategy.OutcomePending, nil
+		}
 	}
 
 	token, err := generateToken(s.tokenLength)
@@ -188,7 +249,7 @@ func (s *Strategy) handleSendLink(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	if err := s.store.Store(r.Context(), token, email, s.tokenTTL); err != nil {
+	if err := s.store.Store(r.Context(), hashToken(token), email, s.tokenTTL); err != nil {
 		slog.Error("magiclink store error", "strategy", s.name, "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "store_failed", "failed to store token")
 
@@ -199,7 +260,7 @@ func (s *Strategy) handleSendLink(w http.ResponseWriter, r *http.Request) (*iden
 
 	if err := s.sender(r.Context(), email, token, verifyURL); err != nil {
 		// Best-effort cleanup of stored token on send failure.
-		_ = s.store.Delete(r.Context(), token)
+		_ = s.store.Delete(r.Context(), hashToken(token))
 
 		slog.Error("magiclink sender error", "strategy", s.name, "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "send_failed", "failed to send magic link")
@@ -207,19 +268,28 @@ func (s *Strategy) handleSendLink(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	// Every send counts against the address, successful or not: the abuse
+	// here is volume, not failure.
+	if s.limiter != nil {
+		s.limiter.Fail(key)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "check your email",
 	})
 
-	return nil, strategy.OutcomeFailed, nil
+	// Pending, not Failed. The response is written and the flow is mid-air
+	// waiting for the user to click; reporting failure was misleading to
+	// anything reading the outcome.
+	return nil, strategy.OutcomePending, nil
 }
 
 // handleVerifyToken looks up the token, validates it, resolves the identity,
 // and returns it for session minting.
 func (s *Strategy) handleVerifyToken(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
-	token := r.URL.Query().Get("token")
+	hashed := hashToken(r.URL.Query().Get("token"))
 
-	email, err := s.store.Lookup(r.Context(), token)
+	email, err := s.store.Lookup(r.Context(), hashed)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid_token", "token is invalid or expired")
 
@@ -227,7 +297,11 @@ func (s *Strategy) handleVerifyToken(w http.ResponseWriter, r *http.Request) (*i
 	}
 
 	// Delete the token so it cannot be reused.
-	_ = s.store.Delete(r.Context(), token)
+	_ = s.store.Delete(r.Context(), hashed)
+
+	if s.limiter != nil {
+		s.limiter.Succeed(strings.ToLower(email))
+	}
 
 	id, err := s.resolver(r.Context(), email)
 	if err != nil {
@@ -282,14 +356,48 @@ func (s *Strategy) readEmail(r *http.Request) (string, error) {
 func (s *Strategy) buildVerifyURL(r *http.Request, token string) string {
 	scheme, host := s.verifyOrigin(r)
 
+	base := s.verifyBasePath
+	if base == "" {
+		// Nothing pushed a base and none was configured. Fall back to the
+		// path this request arrived on, minus the strategy segment, which is
+		// by construction a route that exists.
+		base = path.Dir(r.URL.Path)
+	}
+
 	u := &url.URL{
 		Scheme:   scheme,
 		Host:     host,
-		Path:     path.Join("/auth/login", s.name),
+		Path:     path.Join(base, s.name),
 		RawQuery: url.Values{"token": {token}}.Encode(),
 	}
 
 	return u.String()
+}
+
+// hashToken is what actually lands in the TokenStore.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+
+	return hex.EncodeToString(sum[:])
+}
+
+// validEmail is a deliberately loose sanity check: exactly one "@", something
+// on either side, a dot in the domain, no spaces. Anything stricter rejects
+// addresses that are legal, and anything looser lets an obvious typo consume
+// a send.
+func validEmail(v string) bool {
+	if v == "" || len(v) > 254 || strings.ContainsAny(v, " \t\r\n") {
+		return false
+	}
+
+	at := strings.IndexByte(v, '@')
+	if at <= 0 || at != strings.LastIndexByte(v, '@') || at == len(v)-1 {
+		return false
+	}
+
+	domain := v[at+1:]
+
+	return strings.Contains(domain, ".") && !strings.HasPrefix(domain, ".") && !strings.HasSuffix(domain, ".")
 }
 
 // verifyOrigin determines the scheme and host for building the verify URL.
@@ -332,14 +440,55 @@ type memoryEntry struct {
 }
 
 // MemoryStore is a default in-memory TokenStore backed by sync.Map with
-// TTL-based expiry.
+// TTL-based expiry and a background sweeper.
+//
+// It is single-process: with more than one replica, a link minted on one and
+// clicked on another will not resolve. Supply a shared TokenStore for those
+// deployments.
 type MemoryStore struct {
-	entries sync.Map // map[token string]memoryEntry
+	entries sync.Map // map[hashedToken string]memoryEntry
+
+	stop   chan struct{}
+	closed sync.Once
 }
 
-// NewMemoryStore returns an in-memory TokenStore.
+// NewMemoryStore returns an in-memory TokenStore and starts its sweeper.
+//
+// Expiry used to happen only on lookup, so a token nobody clicked — the common
+// case for an abuse run — stayed resident for the life of the process.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{}
+	m := &MemoryStore{stop: make(chan struct{})}
+
+	go m.janitor()
+
+	return m
+}
+
+// Close stops the sweeper.
+func (m *MemoryStore) Close() error {
+	m.closed.Do(func() { close(m.stop) })
+
+	return nil
+}
+
+func (m *MemoryStore) janitor() {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-m.stop:
+			return
+		case now := <-t.C:
+			m.entries.Range(func(k, v any) bool {
+				if e, ok := v.(memoryEntry); ok && now.After(e.expiresAt) {
+					m.entries.Delete(k)
+				}
+
+				return true
+			})
+		}
+	}
 }
 
 // Store saves a token -> email mapping with a TTL.
@@ -360,7 +509,11 @@ func (m *MemoryStore) Lookup(_ context.Context, token string) (string, error) {
 		return "", fmt.Errorf("token not found")
 	}
 
-	entry := v.(memoryEntry)
+	entry, ok := v.(memoryEntry)
+	if !ok {
+		return "", fmt.Errorf("token not found")
+	}
+
 	if time.Now().After(entry.expiresAt) {
 		m.entries.Delete(token)
 

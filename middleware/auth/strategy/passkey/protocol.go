@@ -83,7 +83,7 @@ func verifyClientData(raw []byte, expectedType string, expectedChallenge []byte,
 	}
 
 	// We don't enforce cross-origin or topOrigin policies here — the
-	// WebAuthn spec lets the RP decide, and pika's typical deployment
+	// WebAuthn spec lets the RP decide, and the typical deployment
 	// (single-origin admin UI) gets no benefit from enabling them.
 	// If a future use case requires it, add a config knob rather than
 	// silently allowing the value through.
@@ -195,7 +195,7 @@ func parseAuthenticatorData(blob []byte) (*authenticatorData, error) {
 
 	// We silently skip extension data — none of the extensions
 	// emitted by current authenticators (credProps, etc.) affect
-	// pika's authentication flow. A future need to inspect them
+	// this authentication flow. A future need to inspect them
 	// would slot in here.
 	_ = off
 

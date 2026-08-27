@@ -22,8 +22,8 @@ import (
 // "finish" phases by inspecting the request body shape: a body with
 // no assertion field is a begin request; a body carrying an
 // assertion field is a finish request. This keeps the route count
-// small and lets the existing rate-limit middleware (which matches
-// on /login/pass/) cover the passkey path automatically.
+// small and lets a guard matching on /login/pass/ cover the passkey
+// path along with every other interactive strategy.
 //
 // Registration is handled separately by HTTP endpoints the RP
 // mounts itself; ada's auth mux only covers the login flow.

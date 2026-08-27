@@ -11,6 +11,7 @@ import (
 
 	"github.com/rakunlabs/ada"
 	"github.com/rakunlabs/ada/middleware/auth"
+	"github.com/rakunlabs/ada/middleware/auth/cookie"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/session"
 	"github.com/rakunlabs/ada/middleware/auth/strategy/local"
@@ -46,10 +47,10 @@ func Run(ctx context.Context) error {
 			// Theme demo: override the primary button color via a token.
 			// Keys can be bare ("btn-bg") or prefixed ("--auth-btn-bg").
 			Theme: map[string]string{
-				"btn-bg":              "#3b82f6",
-				"btn-bg-hover":        "#2563eb",
-				"input-focus-border":  "#3b82f6",
-				"input-focus-ring":    "rgba(59, 130, 246, 0.18)",
+				"btn-bg":             "#3b82f6",
+				"btn-bg-hover":       "#2563eb",
+				"input-focus-border": "#3b82f6",
+				"input-focus-ring":   "rgba(59, 130, 246, 0.18)",
 			},
 			// Escape-hatch: serve your own stylesheet and point at it. Empty
 			// by default; set AUTH_CUSTOM_CSS_URL=/static/auth.css to try it.
@@ -132,12 +133,15 @@ func Run(ctx context.Context) error {
 }
 
 func sessionCookieDefaults() session.CookieOptions {
+	// HttpOnly is on and Secure follows the request scheme without any of
+	// this; the fields below are here to show where the knobs are.
 	return session.CookieOptions{
 		Path:     "/",
 		MaxAge:   60 * 60 * 24,
-		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   false, // demo runs over HTTP
+		// "auto" keeps the demo working over plain HTTP on localhost while
+		// still setting Secure the moment it is served over TLS.
+		Secure: cookie.SecureAuto,
 	}
 }
 
