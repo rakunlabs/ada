@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -55,6 +56,16 @@ type Config struct {
 
 	// IssuerConfig controls TTLs and rotation for the default issuer.
 	IssuerConfig issuer.Config `cfg:"issuer"`
+
+	// DisableRequestAuth turns off request-credential authentication in
+	// Require(), restoring cookie-only gating.
+	//
+	// By default Require() lets any strategy implementing
+	// strategy.RequestAuthenticator (e.g. apikey) authenticate a protected
+	// request straight from its headers. Disable it if a deployment
+	// registers such a strategy solely to mint sessions at the login
+	// endpoint and wants protected routes to stay browser-only.
+	DisableRequestAuth bool `cfg:"disable_request_auth"`
 }
 
 // UIConfig controls the login UI.
@@ -276,13 +287,70 @@ func (a *Auth) Init(_ context.Context) error {
 }
 
 // Require returns a middleware that gates downstream routes behind a valid
-// session.
+// credential.
+//
+// Two credential families are accepted, in this order:
+//
+//  1. Credentials carried on the request itself, resolved by any registered
+//     strategy implementing strategy.RequestAuthenticator — an API key
+//     header being the usual case. No session is created; the identity is
+//     attached to the request context and that is the end of it.
+//
+//  2. The session cookie, as before. Unauthenticated requests are
+//     redirected to the login UI (or answered with 401 when the request
+//     opted out via session.SetDisableRedirect).
+//
+// Order matters. A programmatic client that presents an API key must not
+// be answered with a redirect to an interactive login page it cannot
+// complete, and a client that presents both a key and a stale cookie
+// should be authorized as the key it deliberately sent.
+//
+// A request that carries request credentials which turn out to be invalid
+// is rejected outright rather than falling through to the cookie: silently
+// downgrading a rejected token to "anonymous" and then redirecting hides
+// the real failure behind a login page.
+//
+// Set Config.DisableRequestAuth to keep the cookie-only behavior.
 func (a *Auth) Require() func(http.Handler) http.Handler {
 	if a.session == nil {
 		panic("auth: Require called before Init")
 	}
 
-	return a.session.Require()
+	sessionMW := a.session.Require()
+	if a.cfg.DisableRequestAuth {
+		return sessionMW
+	}
+
+	return func(next http.Handler) http.Handler {
+		// Build the session chain once, not per request: session.Require
+		// allocates a handler and we would otherwise pay for it on every
+		// request that falls through to the cookie.
+		sessionNext := sessionMW(next)
+
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id, err := a.registry.AuthenticateRequest(r.Context(), r)
+
+			switch {
+			case errors.Is(err, strategy.ErrNoCredentials):
+				sessionNext.ServeHTTP(w, r)
+			case errors.Is(err, strategy.ErrInvalidCredentials):
+				writeUnauthorized(w)
+			case err != nil:
+				slog.Error("auth: request authentication failed", "error", err.Error())
+				writeError(w, http.StatusInternalServerError, "auth_error", "authentication error")
+			default:
+				next.ServeHTTP(w, r.WithContext(identity.WithContext(r.Context(), id)))
+			}
+		})
+	}
+}
+
+// writeUnauthorized rejects a request that presented bad credentials.
+// WWW-Authenticate is set so a client can discover how to authenticate
+// instead of guessing from a bare status code.
+func writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Bearer`)
+	writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing credentials")
 }
 
 // Mount registers /auth/* routes on the given mux.

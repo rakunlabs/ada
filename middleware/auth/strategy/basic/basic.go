@@ -138,6 +138,50 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 // Logout is a no-op for the basic strategy; sessions are stateless.
 func (s *Strategy) Logout(_ context.Context, _ *identity.Identity) error { return nil }
 
+// AuthenticateRequest implements strategy.RequestAuthenticator so Basic
+// credentials authorize a protected route directly.
+//
+// This is what RFC 7617 already describes: the client re-sends the
+// Authorization header on every request. Requiring a login round-trip to
+// convert it into a cookie first would be a protocol pika invented, not
+// one any Basic-auth client implements.
+//
+// Note the WWW-Authenticate challenge is written by Require, not here —
+// AuthenticateRequest must not touch the response — so the realm
+// configured via WithRealm is not advertised on this path.
+func (s *Strategy) AuthenticateRequest(ctx context.Context, r *http.Request) (*identity.Identity, error) {
+	if s.verify == nil {
+		return nil, strategy.ErrNoCredentials
+	}
+
+	username, password, ok := r.BasicAuth()
+	if !ok {
+		return nil, strategy.ErrNoCredentials
+	}
+
+	id, err := s.verify(ctx, username, password)
+	if err != nil {
+		if errors.Is(err, ErrInvalidCredentials) {
+			return nil, strategy.ErrInvalidCredentials
+		}
+
+		slog.Error("basic verifier error", "strategy", s.name, "error", err.Error())
+
+		return nil, err
+	}
+
+	if id == nil {
+		return nil, strategy.ErrInvalidCredentials
+	}
+
+	id.Provider = s.name
+
+	return id, nil
+}
+
+// Interface compliance.
+var _ strategy.RequestAuthenticator = (*Strategy)(nil)
+
 // writeChallenge writes a JSON error response with the WWW-Authenticate header
 // set so the browser shows the native credential dialog.
 func (s *Strategy) writeChallenge(w http.ResponseWriter, status int, code, message string) {

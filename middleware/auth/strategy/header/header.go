@@ -2,6 +2,20 @@
 // information from headers set by an upstream reverse proxy (Traefik, nginx,
 // etc.). The strategy reads configurable request headers, maps them to
 // Identity fields, and returns the resulting Identity to the auth middleware.
+//
+// This strategy deliberately does NOT implement
+// strategy.RequestAuthenticator, so it does not authenticate protected
+// routes straight from the incoming headers.
+//
+// It has no verifier: whoever can set X-Forwarded-User is whoever the
+// request claims to be. That is sound only while every path to the
+// application passes through the proxy that overwrites those headers.
+// Confining the trust to the login endpoint keeps the blast radius of a
+// misrouted deployment to one route instead of every route. Deployments
+// that genuinely terminate all traffic at the proxy should log in through
+// {base}/login/{name} and carry the resulting session, or put an apikey /
+// basic strategy — both of which verify something — in front of their
+// machine clients.
 package header
 
 import (

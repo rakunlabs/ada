@@ -184,6 +184,49 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 // Logout is a no-op for the API key strategy; keys are stateless.
 func (s *Strategy) Logout(_ context.Context, _ *identity.Identity) error { return nil }
 
+// AuthenticateRequest implements strategy.RequestAuthenticator so a caller
+// can present an API key directly on a protected route instead of
+// exchanging it for a session first.
+//
+// This is the same extraction and validation Login performs, minus the
+// response writing — Require renders the error so every request-auth
+// strategy fails identically. A request with no key returns
+// strategy.ErrNoCredentials, which lets the middleware fall through to the
+// session cookie; a request with a key the validator rejects returns an
+// error, which does not.
+func (s *Strategy) AuthenticateRequest(ctx context.Context, r *http.Request) (*identity.Identity, error) {
+	if s.validate == nil {
+		return nil, strategy.ErrNoCredentials
+	}
+
+	key := s.extractKey(r)
+	if key == "" {
+		return nil, strategy.ErrNoCredentials
+	}
+
+	id, err := s.validate(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrInvalidKey) {
+			return nil, strategy.ErrInvalidCredentials
+		}
+
+		slog.Error("apikey validator error", "strategy", s.name, "error", err.Error())
+
+		return nil, err
+	}
+
+	if id == nil {
+		return nil, strategy.ErrInvalidCredentials
+	}
+
+	id.Provider = s.name
+
+	return id, nil
+}
+
+// Interface compliance.
+var _ strategy.RequestAuthenticator = (*Strategy)(nil)
+
 // effectiveHeaders returns the header lookup order, applying the default
 // when nothing was configured.
 func (s *Strategy) effectiveHeaders() []string {
