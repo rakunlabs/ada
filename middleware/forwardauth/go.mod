@@ -1,6 +1,6 @@
 module github.com/rakunlabs/ada/middleware/forwardauth
 
-go 1.24
+go 1.25.0
 
 replace github.com/rakunlabs/ada/middleware/auth => ../auth
 

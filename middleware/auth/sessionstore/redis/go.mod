@@ -1,6 +1,6 @@
 module github.com/rakunlabs/ada/middleware/auth/sessionstore/redis
 
-go 1.24
+go 1.25.0
 
 require (
 	github.com/rakunlabs/ada/middleware/auth v0.4.7

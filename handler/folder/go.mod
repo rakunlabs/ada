@@ -1,6 +1,6 @@
 module github.com/rakunlabs/ada/handler/folder
 
-go 1.24
+go 1.25.0
 
 require github.com/rytsh/mugo v0.9.1
 
@@ -20,6 +20,6 @@ require (
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/tdewolff/minify/v2 v2.24.3 // indirect
 	github.com/tdewolff/parse/v2 v2.8.3 // indirect
-	golang.org/x/crypto v0.36.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
