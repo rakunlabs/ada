@@ -99,10 +99,6 @@ export default withMermaid(defineConfig({
               {
                 text: "Swagger",
                 link: "/guide/handler/swagger.md",
-              },
-              {
-                text: "MCP",
-                link: "/guide/handler/mcp.md",
               }
             ],
           },

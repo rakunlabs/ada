@@ -18,7 +18,6 @@ import (
 	"github.com/rakunlabs/ada/_examples/grpc"
 	"github.com/rakunlabs/ada/_examples/hello"
 	"github.com/rakunlabs/ada/_examples/login"
-	"github.com/rakunlabs/ada/_examples/mcp"
 	"github.com/rakunlabs/ada/_examples/pipeline"
 	"github.com/rakunlabs/ada/_examples/swagger"
 )
@@ -33,7 +32,6 @@ func main() {
 
 var Examples = map[string]func(ctx context.Context) error{
 	"grpc":     grpc.Run,
-	"mcp":      mcp.Run,
 	"hello":    hello.Run,
 	"bind":     bind.Run,
 	"folder":   folder.Run,
