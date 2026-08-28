@@ -87,13 +87,15 @@ func (p *Pipeline) Middleware() MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		target := &rebuildTarget{next: next}
 
-		// Build the initial chain.
+		// Build and register in ONE critical section. Reading the snapshot
+		// outside the lock let a concurrent Set publish its own snapshot and
+		// rebuild every *already registered* target, after which this one was
+		// appended carrying the stale chain — so the middleware just
+		// registered silently never ran, with no panic and no error.
+		p.mu.Lock()
 		snap := p.snapshot.Load()
 		chain := buildChain(snap.entries, next)
 		target.chain.Store(&chain)
-
-		// Register this target so future mutations rebuild its chain.
-		p.mu.Lock()
 		p.targets = append(p.targets, target)
 		p.mu.Unlock()
 

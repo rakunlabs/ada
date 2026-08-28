@@ -21,13 +21,18 @@ var (
 
 type Server struct {
 	*Mux
-	server          *http.Server
 	logger          Logger
-	started         bool
 	shutdownTimeout time.Duration
-	listener        net.Listener
 
-	m sync.Mutex
+	// Guarded by m. server and listener are published only once Serve is
+	// about to run; Stop must not touch them before that. stopping records
+	// a Stop that arrived while start was still binding, so start can back
+	// out instead of serving a socket nobody wants.
+	m        sync.Mutex
+	server   *http.Server
+	listener net.Listener
+	started  bool
+	stopping bool
 }
 
 func NewWithFunc(ctx context.Context, fn func(ctx context.Context, mux *Mux) error, opts ...Option) (*Server, error) {
@@ -46,8 +51,9 @@ func New(opts ...Option) *Server {
 	}, opts...)
 
 	return &Server{
-		Mux:    NewMux(),
-		logger: opt.Logger,
+		Mux:             NewMux(),
+		logger:          opt.Logger,
+		shutdownTimeout: opt.ShutdownTimeout,
 	}
 }
 
@@ -67,15 +73,22 @@ func (s *Server) StartWithContext(ctx context.Context, addr string, opts ...Opti
 func (s *Server) start(addr string, opts ...OptionStart) error {
 	s.m.Lock()
 	if s.started {
+		// Unlock before returning: holding the mutex here deadlocked every
+		// later Start/Stop on this Server.
+		s.m.Unlock()
+
 		return ErrAlreadyStarted
 	}
 
 	s.started = true
+	s.stopping = false
 	s.m.Unlock()
 
 	defer func() {
 		s.m.Lock()
 		s.started = false
+		s.server = nil
+		s.listener = nil
 		s.m.Unlock()
 	}()
 
@@ -86,8 +99,7 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 		baseContext = context.Background()
 	}
 
-	var err error
-	s.listener, err = net.Listen(opt.Network, addr)
+	listener, err := net.Listen(opt.Network, addr)
 	if err != nil {
 		return fmt.Errorf("address cannot listen %s: %w, %w", addr, ErrListen, err)
 	}
@@ -97,49 +109,82 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 	protocols.SetHTTP2(true)
 	protocols.SetUnencryptedHTTP2(true)
 
-	s.server = opt.HTTPServerFunc(
+	server := opt.HTTPServerFunc(
 		&http.Server{
 			ReadHeaderTimeout: opt.ReadHeaderTimeout,
 			BaseContext: func(_ net.Listener) context.Context {
-				return context.WithValue(baseContext, ListenerAddrContextKey, s.listener.Addr())
+				return context.WithValue(baseContext, ListenerAddrContextKey, listener.Addr())
 			},
 			Protocols: protocols,
 			Handler:   s.Mux,
 		},
 	)
 
+	// Publish under the mutex; until this point Stop must not see them.
+	s.m.Lock()
+	stopping := s.stopping
+	if !stopping {
+		s.listener = listener
+		s.server = server
+	}
+	s.m.Unlock()
+
+	if stopping {
+		// Stop arrived while we were still binding — honour it instead of
+		// serving a listener nobody is going to shut down.
+		return listener.Close()
+	}
+
 	if opt.Context != nil {
 		context.AfterFunc(opt.Context, func() {
-			err := s.Stop()
-			if err != nil {
+			if err := s.Stop(); err != nil {
 				s.logger.Error("error stopping server", "error", err)
 			}
 		})
 	}
 
-	s.logger.Info("server started", "addr", s.listener.Addr().String())
+	s.logger.Info("server started", "addr", listener.Addr().String())
 
-	if err := s.server.Serve(s.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", err)
 	}
 
 	return nil
 }
 
+// Stop gracefully shuts the server down, waiting up to the configured
+// shutdown timeout for in-flight requests to finish.
+//   - Safe to call before Start, concurrently with Start, and more than once.
 func (s *Server) Stop() error {
 	s.m.Lock()
-	defer s.m.Unlock()
 
 	if !s.started {
+		s.m.Unlock()
+
 		return nil
 	}
 
-	s.logger.Warn("stopping server", "addr", s.listener.Addr().String())
+	s.stopping = true
+	server, listener, timeout := s.server, s.listener, s.shutdownTimeout
+	s.m.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
+	if server == nil {
+		// Start is still binding; it will observe stopping and back out.
+		return nil
+	}
+
+	if timeout <= 0 {
+		timeout = DefaultShutdownTimeout
+	}
+
+	s.logger.Warn("stopping server", "addr", listener.Addr().String())
+
+	// Shutdown runs WITHOUT the mutex: it blocks until connections drain,
+	// and start's cleanup needs the mutex to mark the server stopped.
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	if err := s.server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 

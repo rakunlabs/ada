@@ -26,11 +26,43 @@ type slotState struct {
 	ctx     context.Context    // generation context; nil when cancel tracking is off
 }
 
+// slotBinding is everything the request path needs, published as one value.
+//
+// Keeping the chain and the generation context together matters: when they
+// lived in two independent atomic pointers a request could load the new
+// generation's context and the old generation's chain (or vice versa), so
+// requests running through the old middleware were not cancellable — the exact
+// inverse of the ReplaceWithTimeout contract.
+type slotBinding struct {
+	// ctx is the generation context; nil when cancel tracking is off.
+	ctx context.Context
+	// chain is the pre-built handler chain, or the bare next handler when
+	// the slot is disabled. Never nil.
+	chain http.Handler
+}
+
 // slotTarget tracks a single registration point where the Slot's
 // pre-built handler chain needs to be maintained.
 type slotTarget struct {
-	next  http.Handler
-	chain atomic.Pointer[http.Handler]
+	next    http.Handler
+	binding atomic.Pointer[slotBinding]
+}
+
+// bind pre-builds this target's binding for the given state.
+//   - A chain is ALWAYS stored — the bare next handler when the slot is
+//     disabled — so the request path never has to test for nil.
+func (t *slotTarget) bind(st *slotState) {
+	binding := &slotBinding{chain: t.next}
+
+	if st != nil {
+		binding.ctx = st.ctx
+
+		if st.enabled {
+			binding.chain = st.mw(t.next)
+		}
+	}
+
+	t.binding.Store(binding)
 }
 
 // Slot wraps a middleware in an atomic pointer, allowing it to be replaced,
@@ -40,8 +72,8 @@ type slotTarget struct {
 // argument. All registration points share the same underlying state; a single
 // Replace/Disable/Enable call affects every location where the Slot was used.
 //
-// Cost: two atomic pointer loads per request (~2 ns). When a WithTimeout
-// variant is active, one context derivation is added per request.
+// Cost: one atomic pointer load per request. When a WithTimeout variant is
+// active, one context derivation is added per request.
 //
 // Example:
 //
@@ -98,35 +130,28 @@ func (s *Slot) Middleware() MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		target := &slotTarget{next: next}
 
-		// Build initial chain.
-		st := s.state.Load()
-		if st != nil && st.enabled {
-			chain := st.mw(next)
-			target.chain.Store(&chain)
-		}
-
-		// Register this target so future mutations rebuild its chain.
+		// Register and build in ONE critical section. Splitting them let a
+		// concurrent mutation rebuild every *already registered* target and
+		// then miss this one, leaving it bound to a stale chain — or, before
+		// a chain was stored at all, to nil.
 		s.mu.Lock()
+		target.bind(s.state.Load())
 		s.targets = append(s.targets, target)
 		s.mu.Unlock()
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			st := s.state.Load()
-			if st == nil || !st.enabled {
-				next.ServeHTTP(w, r)
-				return
-			}
+			binding := target.binding.Load()
 
-			// If this generation has a cancel context (from a WithTimeout variant),
-			// merge it with the request context so cancellation propagates.
-			if st.ctx != nil {
-				merged, cleanup := mergeContexts(r.Context(), st.ctx)
+			// If this generation has a cancel context (from a WithTimeout
+			// variant), merge it with the request context so cancellation
+			// propagates to the chain published alongside it.
+			if binding.ctx != nil {
+				merged, cleanup := mergeContexts(r.Context(), binding.ctx)
 				defer cleanup()
 				r = r.WithContext(merged)
 			}
 
-			h := target.chain.Load()
-			(*h).ServeHTTP(w, r)
+			binding.chain.ServeHTTP(w, r)
 		})
 	}
 }
@@ -139,8 +164,7 @@ func (s *Slot) Replace(mw MiddlewareFunc) {
 		mw = NoOp()
 	}
 
-	s.state.Store(&slotState{mw: mw, enabled: true})
-	s.rebuildTargets(mw)
+	s.storeAndRebuild(&slotState{mw: mw, enabled: true})
 }
 
 // ReplaceWithTimeout atomically swaps the underlying middleware and cancels
@@ -160,16 +184,14 @@ func (s *Slot) ReplaceWithTimeout(mw MiddlewareFunc, grace time.Duration) {
 		mw = NoOp()
 	}
 
-	old := s.state.Load()
-
 	newCtx, newCancel := context.WithCancel(context.Background())
-	s.state.Store(&slotState{
+
+	old := s.storeAndRebuild(&slotState{
 		mw:      mw,
 		enabled: true,
 		cancel:  newCancel,
 		ctx:     newCtx,
 	})
-	s.rebuildTargets(mw)
 
 	cancelOldGeneration(old, grace)
 }
@@ -179,16 +201,7 @@ func (s *Slot) ReplaceWithTimeout(mw MiddlewareFunc, grace time.Duration) {
 // with Enable.
 // In-flight requests using the old middleware finish normally.
 func (s *Slot) Disable() {
-	old := s.state.Load()
-
-	mw := NoOp()
-	if old != nil {
-		mw = old.mw
-	}
-
-	s.state.Store(&slotState{mw: mw, enabled: false})
-	// No rebuildTargets needed — the hot path checks st.enabled first
-	// and short-circuits to next.ServeHTTP.
+	s.mutate(disabledFrom)
 }
 
 // DisableWithTimeout makes the slot a pass-through and cancels in-flight
@@ -196,27 +209,19 @@ func (s *Slot) Disable() {
 //
 // A grace of 0 cancels immediately.
 func (s *Slot) DisableWithTimeout(grace time.Duration) {
-	old := s.state.Load()
-
-	mw := NoOp()
-	if old != nil {
-		mw = old.mw
-	}
-
-	s.state.Store(&slotState{mw: mw, enabled: false})
-	cancelOldGeneration(old, grace)
+	cancelOldGeneration(s.mutate(disabledFrom), grace)
 }
 
 // Enable restores the slot to its previously-set middleware.
 // If the slot is already enabled, this is a no-op.
 func (s *Slot) Enable() {
-	old := s.state.Load()
-	if old == nil || old.enabled {
-		return
-	}
+	s.mutate(func(old *slotState) *slotState {
+		if old == nil || old.enabled {
+			return nil // already enabled, or nothing to restore
+		}
 
-	s.state.Store(&slotState{mw: old.mw, enabled: true})
-	s.rebuildTargets(old.mw)
+		return &slotState{mw: old.mw, enabled: true}
+	})
 }
 
 // Enabled reports whether the slot is currently enabled.
@@ -225,16 +230,57 @@ func (s *Slot) Enabled() bool {
 	return st != nil && st.enabled
 }
 
-// rebuildTargets pre-builds the handler chain for all registration points.
-// Called on Replace, ReplaceWithTimeout, and Enable.
-func (s *Slot) rebuildTargets(mw MiddlewareFunc) {
+// disabledFrom derives the disabled state that preserves old's middleware, so
+// Enable can restore it.
+func disabledFrom(old *slotState) *slotState {
+	mw := NoOp()
+	if old != nil {
+		mw = old.mw
+	}
+
+	return &slotState{mw: mw, enabled: false}
+}
+
+// storeAndRebuild publishes a new state and rebinds every registration point
+// in one critical section, returning the state it replaced.
+//
+// Publishing outside the lock — as this used to — let two concurrent mutations
+// interleave so that the stored state and the built chains disagreed
+// permanently: Enabled() reported one middleware while requests ran another,
+// with no way to resync.
+func (s *Slot) storeAndRebuild(state *slotState) *slotState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.storeAndRebuildLocked(state)
+}
+
+func (s *Slot) storeAndRebuildLocked(state *slotState) *slotState {
+	old := s.state.Load()
+	s.state.Store(state)
+
 	for _, t := range s.targets {
-		chain := mw(t.next)
-		t.chain.Store(&chain)
+		t.bind(state)
 	}
+
+	return old
+}
+
+// mutate applies fn to the current state and publishes the result atomically,
+// so a read-modify-write mutator (Disable, Enable) cannot clobber a concurrent
+// Replace. Returning nil from fn makes the call a no-op.
+func (s *Slot) mutate(fn func(old *slotState) *slotState) *slotState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	old := s.state.Load()
+
+	state := fn(old)
+	if state == nil {
+		return old
+	}
+
+	return s.storeAndRebuildLocked(state)
 }
 
 // cancelOldGeneration cancels the old generation's context after the grace period.

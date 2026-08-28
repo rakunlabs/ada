@@ -6,19 +6,48 @@ The routing system doesn't use http Method, so you can use any method you want.
 
 ## Route Patterns
 
-Routing system follows a specific priority order when matching routes:
+Within a single path segment, the router prefers the most specific alternative:
 
-1. **Static routes** - Exact matches have highest priority
+1. **Static routes** - Exact matches are tried first
 2. **Parameterized routes** - Routes with path parameters
 3. **Wildcard routes** - Routes with `*` or `{name...}` captures
 
 ```go
-server.GET("/users/new", newUserForm)      // Highest priority
-server.GET("/users/{id}", getUser)         // Medium priority
-server.GET("/users/*", catchAllUsers)      // Lowest priority
+server.GET("/users/new", newUserForm)      // tried first
+server.GET("/users/{id}", getUser)         // then this
+server.GET("/users/*", catchAllUsers)      // then this
 ```
 
-A request to `/users/new` will match the static route, not the parameterized route.
+A request to `/users/new` matches the static route, not the parameterized one.
+
+### How a path is matched
+
+The ordering is a preference, not an irrevocable choice. The router follows the
+most specific branch first. If that branch fails at a later segment, it
+backtracks to the nearest untried parameterized or wildcard alternative:
+
+```go
+server.GET("/foo/bar", handlerA)
+server.GET("/{x}/baz", handlerB)
+
+// GET /foo/bar  -> handlerA
+// GET /foo/baz  -> handlerB with x = "foo"
+```
+
+This also lets a static alias coexist with a parameterized subtree:
+
+```go
+server.GET("/users/me", currentUser)
+server.GET("/users/{id}/posts", userPosts)
+
+// GET /users/me        -> currentUser
+// GET /users/42/posts  -> userPosts, id = "42"
+// GET /users/me/posts  -> userPosts, id = "me"
+```
+
+The result does not depend on registration order. A trailing `*` or
+`{name...}` is also remembered as a fallback while more specific branches are
+tried, which makes SPA and proxy catch-alls work as expected.
 
 ### Static Routes
 

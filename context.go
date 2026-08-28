@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,6 +43,7 @@ func wrap(handler HandlerFunc, errHandler func(c *Context, err error)) http.Hand
 		c := NewContext(w, r)
 
 		if err := handler(c); err != nil {
+			c.prepareError(err)
 			errHandler(c, err)
 		}
 	}
@@ -53,7 +55,8 @@ type Context struct {
 	Request  *http.Request
 	Response http.ResponseWriter
 
-	code int
+	code      int
+	committed bool
 }
 
 func NewContext(w http.ResponseWriter, r *http.Request) *Context {
@@ -62,6 +65,49 @@ func NewContext(w http.ResponseWriter, r *http.Request) *Context {
 		Response: w,
 
 		code: http.StatusOK,
+	}
+}
+
+// commit claims the right to write the response, returning false if some
+// earlier Send* already did.
+//
+// Without this, a handler that writes a response and then returns an error
+// produced two concatenated bodies and a "superfluous WriteHeader" from
+// net/http, with the status of whichever write happened to land first.
+//
+// Note this only tracks writes made through the Send* methods. A handler that
+// writes to c.Response directly is invisible to it.
+func (c *Context) commit() bool {
+	if c.committed {
+		return false
+	}
+
+	c.committed = true
+
+	return true
+}
+
+// Committed reports whether the response has already been written through one
+// of the Send* methods.
+func (c *Context) Committed() bool {
+	return c.committed
+}
+
+// prepareError normalises the status before the error handler runs, so an
+// error can never be reported with a 2xx.
+//   - An HTTPError anywhere in the chain supplies the status.
+//   - Otherwise a status below 400 is promoted to 500; an explicit 4xx/5xx
+//     already set with SetStatus is preserved.
+func (c *Context) prepareError(err error) {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.Code != 0 {
+		c.code = httpErr.Code
+
+		return
+	}
+
+	if c.code < 400 {
+		c.code = http.StatusInternalServerError
 	}
 }
 
@@ -109,6 +155,10 @@ func (c *Context) SendJSON(data any) error {
 
 // SendJSONP sends a json pretty-printed response.
 func (c *Context) SendJSONP(data any, indent string) error {
+	if !c.commit() {
+		return ErrAlreadyCommitted
+	}
+
 	c.Response.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
 	c.Response.WriteHeader(c.code)
 
@@ -119,6 +169,10 @@ func (c *Context) SendJSONP(data any, indent string) error {
 }
 
 func (c *Context) SendJSONRaw(data io.Reader) error {
+	if !c.commit() {
+		return ErrAlreadyCommitted
+	}
+
 	c.Response.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
 	c.Response.WriteHeader(c.code)
 
@@ -129,12 +183,20 @@ func (c *Context) SendJSONRaw(data io.Reader) error {
 
 // SendNoContent always sends a 204 No Content response without body.
 func (c *Context) SendNoContent() error {
+	if !c.commit() {
+		return ErrAlreadyCommitted
+	}
+
 	c.Response.WriteHeader(http.StatusNoContent)
 
 	return nil
 }
 
 func (c *Context) SendString(s string) error {
+	if !c.commit() {
+		return ErrAlreadyCommitted
+	}
+
 	c.Response.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
 	c.Response.WriteHeader(c.code)
 
@@ -146,6 +208,10 @@ func (c *Context) SendString(s string) error {
 // SendBlob streams data from an io.Reader to the response.
 //   - The caller is responsible for setting appropriate headers (e.g., Content-Type).
 func (c *Context) SendBlob(reader io.Reader) error {
+	if !c.commit() {
+		return ErrAlreadyCommitted
+	}
+
 	c.Response.WriteHeader(c.code)
 
 	_, err := io.Copy(c.Response, reader)
@@ -155,6 +221,10 @@ func (c *Context) SendBlob(reader io.Reader) error {
 
 // SendFile sends a single file to the client.
 func (c *Context) SendFile(name string, reader io.Reader) error {
+	if !c.commit() {
+		return ErrAlreadyCommitted
+	}
+
 	c.Response.Header().Set(HeaderContentType, MIMEOctetStream)
 	c.Response.Header().Set(HeaderContentDisposition, `attachment; filename="`+escaper.Replace(name)+`"`)
 	c.Response.WriteHeader(c.code)
@@ -167,6 +237,10 @@ func (c *Context) SendFile(name string, reader io.Reader) error {
 // SendZip sends files to the client as a zip file.
 //   - If name is empty, defaults to "files.zip".
 func (c *Context) SendZip(name string, files map[string]io.Reader) error {
+	if !c.commit() {
+		return ErrAlreadyCommitted
+	}
+
 	if name == "" {
 		name = "files.zip"
 	}

@@ -5,8 +5,8 @@ package ada
 // output (status, Allow header, matched pattern, bound path values) must be
 // identical. This locks the documented routing semantics:
 //
-//   - per-segment greedy matching: static first, then {param}, then wildcard
-//   - no backtracking across segments
+//   - per-segment preference: static first, then {param}, then wildcard
+//   - cross-segment backtracking when a preferred branch dead-ends
 //   - single trailing-wildcard fallback ("possible")
 //   - auto-HEAD (GET fallback), auto-OPTIONS, 405 with Allow header
 //
@@ -92,6 +92,9 @@ func refInsert(root *refNode, method, pattern string, ok *bool) {
 	var params []paramInfo
 	var lastType typeNode
 	current := root
+	// segIdx counts EMITTED segments so the indices line up with the
+	// matcher's segment numbering, which never sees collapsed empties.
+	segIdx := 0
 	for i, segment := range segments {
 		if segment == "" {
 			continue
@@ -108,25 +111,27 @@ func refInsert(root *refNode, method, pattern string, ok *bool) {
 			}
 			current = current.static[segment]
 		case typeNodeWildcard:
-			params = append(params, paramInfo{Index: i, Name: "*"})
+			params = append(params, paramInfo{Index: segIdx, Name: "*"})
 			if current.wildcard == nil {
 				current.wildcard = &refNode{}
 			}
 			current = current.wildcard
 		case typeNodeWildcardParam:
 			name := segment[1 : len(segment)-4]
-			params = append(params, paramInfo{Index: i, Name: name})
+			params = append(params, paramInfo{Index: segIdx, Name: name})
 			if current.wildcard == nil {
 				current.wildcard = &refNode{}
 			}
 			current = current.wildcard
 		case typeNodeParam:
-			params = append(params, paramInfo{Index: i, Name: strings.Trim(segment, "{}")})
+			params = append(params, paramInfo{Index: segIdx, Name: strings.Trim(segment, "{}")})
 			if current.param == nil {
 				current.param = &refNode{}
 			}
 			current = current.param
 		}
+
+		segIdx++
 
 		if i != len(segments)-1 {
 			if current.segment == nil {
@@ -153,28 +158,6 @@ func refInsert(root *refNode, method, pattern string, ok *bool) {
 	*ok = true
 }
 
-func (n *refNode) find(segment string) (*refNode, typeNode) {
-	if segment == "" {
-		if n.hasHandler() {
-			return n, typeNodeSelf
-		}
-
-		return nil, typeNodeSelf
-	}
-
-	if child, ok := n.static[segment]; ok {
-		return child, typeNodeStatic
-	}
-	if n.param != nil {
-		return n.param, typeNodeParam
-	}
-	if n.wildcard != nil {
-		return n.wildcard, typeNodeWildcard
-	}
-
-	return nil, typeNodeSelf
-}
-
 type refResult struct {
 	status  int
 	allow   string
@@ -182,46 +165,93 @@ type refResult struct {
 	values  map[string]string
 }
 
+// refWalk resolves a request path against the reference trie, trying static,
+// then param, then wildcard at every segment and backtracking when a branch
+// dead-ends. This mirrors ada's choicePoint stack.
+type refWalk struct {
+	segments    []string
+	possible    *refNode
+	possibleIdx int
+}
+
+// resolve returns the terminal node for segments[i:] starting from the
+// segment-dispatch node n, or nil when no branch below n matches.
+func (w *refWalk) resolve(n *refNode, i int) *refNode {
+	if n == nil {
+		return nil
+	}
+
+	// The greedy fallback is recorded and never rewound: like ada, it
+	// describes a matched prefix of the URL rather than the branch taken.
+	if n.wildcard != nil && n.wildcard.trailing {
+		w.possible = n.wildcard
+		w.possibleIdx = i
+	}
+
+	if i == len(w.segments) {
+		if n.hasHandler() {
+			return n
+		}
+
+		return nil
+	}
+
+	segment := w.segments[i]
+
+	// An empty segment binds to nothing; only a node that already holds a
+	// handler can terminate here.
+	if segment == "" {
+		if !n.hasHandler() {
+			return nil
+		}
+
+		return w.advance(n, i)
+	}
+
+	if child, ok := n.static[segment]; ok {
+		if found := w.advance(child, i); found != nil {
+			return found
+		}
+	}
+
+	for _, child := range []*refNode{n.param, n.wildcard} {
+		if child == nil {
+			continue
+		}
+
+		if found := w.advance(child, i); found != nil {
+			return found
+		}
+	}
+
+	return nil
+}
+
+// advance steps from a node that consumed segment i to the rest of the path.
+func (w *refWalk) advance(nd *refNode, i int) *refNode {
+	if i == len(w.segments)-1 {
+		if nd.hasHandler() {
+			return nd
+		}
+
+		return nil
+	}
+
+	return w.resolve(nd.segment, i+1)
+}
+
 func refServe(root *refNode, method, path string) refResult {
 	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 
-	current := root
-	var possible *refNode
-	possibleIdx := 0
-	captured := map[int]string{}
+	walk := &refWalk{segments: segments}
 
-	for i, segment := range segments {
-		if current.wildcard != nil && current.wildcard.trailing {
-			possible = current.wildcard
-			possibleIdx = i
-		}
-
-		nd, kind := current.find(segment)
-		if nd == nil {
-			current = possible
-
-			break
-		}
-
-		if kind == typeNodeParam || kind == typeNodeWildcard {
-			captured[i] = segment
-		}
-
-		if i != len(segments)-1 {
-			if nd.segment == nil {
-				current = possible
-
-				break
-			}
-			current = nd.segment
-		} else {
-			if nd.hasHandler() {
-				current = nd
-			} else {
-				current = possible
-			}
-		}
+	current := walk.resolve(root, 0)
+	if current == nil {
+		current = walk.possible
 	}
+
+	possible := walk.possible
+	possibleIdx := walk.possibleIdx
 
 	if current == nil {
 		return refResult{status: http.StatusNotFound}
@@ -268,21 +298,15 @@ func refServe(root *refNode, method, path string) refResult {
 			values["*"] = wildcard
 		}
 	}
-	// Iterate captured segments in index order: ada writes them in walk
-	// order, so with repeated param names the later segment wins.
-	capturedIdx := make([]int, 0, len(captured))
-	for idx := range captured {
-		capturedIdx = append(capturedIdx, idx)
-	}
-	sort.Ints(capturedIdx)
-	for _, idx := range capturedIdx {
-		if current.trailing && possibleIdx <= idx {
-			continue
+	// Single-segment captures follow the URL: a parameter at pattern segment
+	// i binds URL segment i, because every pattern segment except a trailing
+	// greedy consumes exactly one URL segment.
+	for _, p := range entry.params {
+		if current.trailing && p.Index >= possibleIdx {
+			continue // folded into the greedy value above
 		}
-		for _, p := range entry.params {
-			if p.Index == idx {
-				values[p.Name] = captured[idx]
-			}
+		if p.Index < len(segments) {
+			values[p.Name] = segments[p.Index]
 		}
 	}
 
