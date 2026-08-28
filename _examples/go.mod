@@ -1,6 +1,6 @@
 module github.com/rakunlabs/ada/_examples
 
-go 1.25.0
+go 1.27.0
 
 require (
 	connectrpc.com/connect v1.18.1

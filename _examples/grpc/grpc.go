@@ -45,7 +45,7 @@ func Run(ctx context.Context) error {
 			mcors.Middleware(),
 			mtelemetry.Middleware(),
 		)
-		mux.POST("/hello", mux.Wrap(SayHello))
+		mux.POST("/hello", SayHello)
 
 		return nil
 	})

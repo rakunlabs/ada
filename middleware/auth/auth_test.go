@@ -22,26 +22,27 @@ type fakeMux struct {
 
 func newFakeMux() *fakeMux { return &fakeMux{mu: http.NewServeMux()} }
 
-func (f *fakeMux) GET(p string, h http.HandlerFunc, _ ...func(http.Handler) http.Handler) {
-	f.routes = append(f.routes, "GET "+p)
-	f.mu.HandleFunc("GET "+p, h)
-}
-func (f *fakeMux) POST(p string, h http.HandlerFunc, _ ...func(http.Handler) http.Handler) {
-	f.routes = append(f.routes, "POST "+p)
-	f.mu.HandleFunc("POST "+p, h)
-}
-func (f *fakeMux) HandleFunc(p string, h http.HandlerFunc, _ ...func(http.Handler) http.Handler) {
-	f.routes = append(f.routes, p)
+// HandleWithMethod mirrors ada.Mux: an empty method registers a catch-all
+// handler, otherwise the route is scoped to that method.
+func (f *fakeMux) HandleWithMethod(method, p string, h http.HandlerFunc, _ ...func(http.Handler) http.Handler) {
+	if method == "" {
+		f.routes = append(f.routes, p)
 
-	// ada.Mux spells a subtree as "/x/*"; http.ServeMux spells it "/x/" and
-	// would otherwise treat the star as a literal path segment.
-	if strings.HasSuffix(p, "/*") {
-		f.mu.HandleFunc(strings.TrimSuffix(p, "*"), h)
+		// ada.Mux spells a subtree as "/x/*"; http.ServeMux spells it "/x/" and
+		// would otherwise treat the star as a literal path segment.
+		if strings.HasSuffix(p, "/*") {
+			f.mu.HandleFunc(strings.TrimSuffix(p, "*"), h)
+
+			return
+		}
+
+		f.mu.HandleFunc(p, h)
 
 		return
 	}
 
-	f.mu.HandleFunc(p, h)
+	f.routes = append(f.routes, method+" "+p)
+	f.mu.HandleFunc(method+" "+p, h)
 }
 func (f *fakeMux) HandleFuncWildcard(p string, h http.HandlerFunc, _ ...func(http.Handler) http.Handler) {
 	f.routes = append(f.routes, "WILDCARD "+p)

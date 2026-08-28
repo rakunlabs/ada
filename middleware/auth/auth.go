@@ -27,10 +27,14 @@ import (
 // Mux is the minimal subset of *ada.Mux that Auth depends on. Defining it here
 // keeps middleware/auth from importing the parent module while remaining
 // drop-in compatible.
+//
+// It is expressed in terms of HandleWithMethod rather than the GET/POST/
+// HandleFunc verbs because those are generic on *ada.Mux, and Go interfaces can
+// neither declare generic methods nor be satisfied by them. HandleWithMethod is
+// the non-generic primitive kept for exactly this purpose; an empty method
+// registers a catch-all handler, matching ada.Mux.HandleFunc.
 type Mux interface {
-	GET(pattern string, handler http.HandlerFunc, mw ...func(http.Handler) http.Handler)
-	POST(pattern string, handler http.HandlerFunc, mw ...func(http.Handler) http.Handler)
-	HandleFunc(pattern string, handler http.HandlerFunc, mw ...func(http.Handler) http.Handler)
+	HandleWithMethod(method, pattern string, handler http.HandlerFunc, mw ...func(http.Handler) http.Handler)
 }
 
 // Config configures an Auth instance.
@@ -433,27 +437,27 @@ func (a *Auth) Mount(mux Mux) {
 		}
 	}
 
-	mux.GET(p.Info, a.handleInfo)
-	mux.GET(p.Me, a.handleMe)
-	mux.GET(p.Login, a.handleLogin)
-	mux.POST(p.Login, a.handleLogin)
-	mux.POST(p.Register, a.handleRegister)
-	mux.GET(p.Callback, a.handleLogin)
-	mux.POST(p.Refresh, a.handleRefresh)
-	mux.POST(p.MFA, a.handleMFA)
-	mux.POST(p.Logout, a.handleLogout)
-	mux.GET(p.Status, a.handleStatus)
+	mux.HandleWithMethod(http.MethodGet, p.Info, a.handleInfo)
+	mux.HandleWithMethod(http.MethodGet, p.Me, a.handleMe)
+	mux.HandleWithMethod(http.MethodGet, p.Login, a.handleLogin)
+	mux.HandleWithMethod(http.MethodPost, p.Login, a.handleLogin)
+	mux.HandleWithMethod(http.MethodPost, p.Register, a.handleRegister)
+	mux.HandleWithMethod(http.MethodGet, p.Callback, a.handleLogin)
+	mux.HandleWithMethod(http.MethodPost, p.Refresh, a.handleRefresh)
+	mux.HandleWithMethod(http.MethodPost, p.MFA, a.handleMFA)
+	mux.HandleWithMethod(http.MethodPost, p.Logout, a.handleLogout)
+	mux.HandleWithMethod(http.MethodGet, p.Status, a.handleStatus)
 
 	if a.cfg.UI.ExternalFolder {
 		// External folder: leave the base path to the parent mux. Nothing to do.
 		return
 	}
 
-	mux.HandleFunc(strings.TrimSuffix(p.Root, "/")+"/login", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleWithMethod("", strings.TrimSuffix(p.Root, "/")+"/login", func(w http.ResponseWriter, r *http.Request) {
 		// redirect to the same path with trailing slash, so the folder handler can serve the index.html for /login.
 		http.Redirect(w, r, p.UI+"/", http.StatusFound)
 	})
-	mux.HandleFunc(strings.TrimSuffix(p.Root, "/")+"/login/*", a.handleUI)
+	mux.HandleWithMethod("", strings.TrimSuffix(p.Root, "/")+"/login/*", a.handleUI)
 }
 
 // Issuer exposes the issuer for advanced callers (e.g. CLI tools that need to

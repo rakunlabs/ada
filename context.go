@@ -16,19 +16,33 @@ type HandlerFunc func(c *Context) error
 
 var escaper = strings.NewReplacer(`"`, `\"`, `\`, `\\`)
 
-// Wrap converts ada.HandlerFunc to http.HandlerFunc.
-func (m *Mux) Wrap(handler HandlerFunc) func(http.ResponseWriter, *http.Request) {
+// Wrap converts HandlerFunc to http.HandlerFunc using the Mux error handler.
+//   - The routing methods accept a HandlerFunc directly and bind it to the Mux
+//     for you, so this is only needed to hand an ada handler to another router.
+func (m *Mux) Wrap(handler HandlerFunc) http.HandlerFunc {
+	return wrap(handler, func(c *Context, err error) {
+		if m.errHandler != nil {
+			m.errHandler(c, err)
+
+			return
+		}
+
+		defaultErrHandler(c, err)
+	})
+}
+
+func defaultErrHandler(c *Context, err error) {
+	if DefaultErrHandler != nil {
+		DefaultErrHandler(c, err)
+	}
+}
+
+func wrap(handler HandlerFunc, errHandler func(c *Context, err error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c := NewContext(w, r)
 
 		if err := handler(c); err != nil {
-			if m.errHandler == nil {
-				if DefaultErrHandler != nil {
-					DefaultErrHandler(c, err)
-				}
-			} else {
-				m.errHandler(c, err)
-			}
+			errHandler(c, err)
 		}
 	}
 }

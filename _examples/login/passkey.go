@@ -114,11 +114,10 @@ func PasskeyDemo() (*passkey.Strategy, func(*ada.Mux), error) {
 		// can enroll an additional credential; the demo accepts a
 		// "username" form field instead to keep the flow standalone.
 		//
-		// We use mux.Wrap to bridge the ada.Context-style handler
-		// (terse Bind / SendJSON helpers) onto the http.HandlerFunc
-		// signature mux.POST expects.
-		mux.POST("/passkey/register/begin", mux.Wrap(passkeyBeginHandler(engine, store)))
-		mux.POST("/passkey/register/finish", mux.Wrap(passkeyFinishHandler(engine, store)))
+		// The ada.Context-style handlers (terse Bind / SendJSON helpers)
+		// are accepted by mux.POST directly.
+		mux.POST("/passkey/register/begin", passkeyBeginHandler(engine, store))
+		mux.POST("/passkey/register/finish", passkeyFinishHandler(engine, store))
 	}
 
 	return strategy, mountRegistration, nil

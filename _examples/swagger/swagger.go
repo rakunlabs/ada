@@ -42,7 +42,7 @@ func Run(ctx context.Context) error {
 
 		mux.HandleFunc("/swagger/*", swagger.Handler(swagger.WithVersion("v0.1.0")))
 
-		mux.GET("/hello/info", mux.Wrap(helloHandler.Info))
+		mux.GET("/hello/info", helloHandler.Info)
 
 		return nil
 	})

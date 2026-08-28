@@ -47,9 +47,9 @@ func Run(ctx context.Context) error {
 			},
 		)
 		mux.GET("/", helloHandler.Main)
-		mux.GET("/hello/info", mux.Wrap(helloHandler.Info))
-		mux.GET("/hello/zip", mux.Wrap(helloHandler.Zip))
-		mux.GET("/hello/file", mux.Wrap(helloHandler.File))
+		mux.GET("/hello/info", helloHandler.Info)
+		mux.GET("/hello/zip", helloHandler.Zip)
+		mux.GET("/hello/file", helloHandler.File)
 
 		return nil
 	})

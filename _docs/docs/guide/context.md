@@ -14,6 +14,30 @@ func myHandler(c *ada.Context) error {
 }
 ```
 
+## Registering Handlers
+
+The routing methods accept plain `net/http` handlers and `ada.HandlerFunc` alike, so both styles can be mixed freely — no wrapping needed:
+
+```go
+server.GET("/plain", func(w http.ResponseWriter, r *http.Request) { ... })
+server.GET("/data", myHandler) // func(c *ada.Context) error
+```
+
+A `ada.Context` handler is bound to the mux it is registered on, so that mux's [error handler](#error-handling) receives the returned error. Groups carry their own error handler, and binding follows the group the route was registered on:
+
+```go
+api := server.Group("/api")
+api.ErrorHandler(func(c *ada.Context, err error) { ... })
+
+api.GET("/data", myHandler) // errors go to the group's handler
+```
+
+To hand an ada handler to a different router, convert it with `Wrap`, which produces an `http.HandlerFunc` bound to that mux:
+
+```go
+otherRouter.Get("/data", server.Wrap(myHandler))
+```
+
 ## Response Methods
 
 ### JSON Responses

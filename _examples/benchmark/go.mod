@@ -1,6 +1,6 @@
 module github.com/rakunlabs/ada/_examples/benchmark
 
-go 1.25.0
+go 1.27.0
 
 replace github.com/rakunlabs/ada => ../../
 

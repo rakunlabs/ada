@@ -1,6 +1,7 @@
 package ada
 
 import (
+	"fmt"
 	"net/http"
 	"path"
 	"sort"
@@ -517,6 +518,43 @@ func (m *Mux) rebuildErrorChains() {
 	m.methodNotAllowedChain = Chain(m.middlewares...)(methodNotAllowed)
 }
 
+// RouteHandler lists the handler shapes the routing methods accept.
+//
+// Both plain net/http handlers and ada's Context-style handlers are allowed.
+// Context-style handlers are bound to the Mux they are registered on, so that
+// Mux's ErrorHandler receives their returned errors:
+//
+//	mux.GET("/a", func(w http.ResponseWriter, r *http.Request) { ... })
+//	mux.GET("/b", func(c *ada.Context) error { ... })
+type RouteHandler interface {
+	func(http.ResponseWriter, *http.Request) |
+		http.HandlerFunc |
+		func(*Context) error |
+		HandlerFunc
+}
+
+// resolveHandler converts any RouteHandler shape into an http.HandlerFunc.
+//   - Context-style handlers are wrapped against this Mux, so ErrorHandler applies.
+//   - Runs at registration time only; the request path is unaffected.
+func (m *Mux) resolveHandler(handler any) http.HandlerFunc {
+	switch h := handler.(type) {
+	case func(http.ResponseWriter, *http.Request):
+		return h
+	case http.HandlerFunc:
+		return h
+	case func(*Context) error:
+		return m.Wrap(h)
+	case HandlerFunc:
+		return m.Wrap(h)
+	default:
+		panic(fmt.Sprintf("ada: unsupported handler type %T", handler))
+	}
+}
+
+// HandleWithMethod registers an http.HandlerFunc for the given method.
+//   - This is the non-generic primitive: it is the method to embed in an
+//     interface when abstracting over *Mux, because Go interfaces cannot
+//     declare (nor be satisfied by) generic methods.
 func (m *Mux) HandleWithMethod(method, path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
 	handlerFunc := Chain(append(m.middlewares, middlewares...)...)(handler)
 
@@ -532,54 +570,54 @@ func (m *Mux) HandleWithMethod(method, path string, handler http.HandlerFunc, mi
 	m.root.Insert(method, path, handlerFunc.ServeHTTP)
 }
 
-func (m *Mux) GET(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodGet, path, handler, middlewares...)
+func (m *Mux) GET[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodGet, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) POST(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodPost, path, handler, middlewares...)
+func (m *Mux) POST[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodPost, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) PUT(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodPut, path, handler, middlewares...)
+func (m *Mux) PUT[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodPut, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) PATCH(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodPatch, path, handler, middlewares...)
+func (m *Mux) PATCH[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodPatch, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) DELETE(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodDelete, path, handler, middlewares...)
+func (m *Mux) DELETE[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodDelete, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) HEAD(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodHead, path, handler, middlewares...)
+func (m *Mux) HEAD[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodHead, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) OPTIONS(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodOptions, path, handler, middlewares...)
+func (m *Mux) OPTIONS[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodOptions, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) TRACE(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodTrace, path, handler, middlewares...)
+func (m *Mux) TRACE[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodTrace, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) CONNECT(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(http.MethodConnect, path, handler, middlewares...)
+func (m *Mux) CONNECT[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(http.MethodConnect, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
 // QUERY registers a handler for the QUERY HTTP method, a safe and idempotent
 // method with a request body carrying the query (RFC 10008).
-func (m *Mux) QUERY(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod(MethodQuery, path, handler, middlewares...)
+func (m *Mux) QUERY[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod(MethodQuery, path, m.resolveHandler(any(handler)), middlewares...)
 }
 
-func (m *Mux) HandleFunc(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	m.HandleWithMethod("", path, handler, middlewares...)
+func (m *Mux) HandleFunc[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
+	m.HandleWithMethod("", path, m.resolveHandler(any(handler)), middlewares...)
 }
 
 // HandleFuncWildcard is registering all paths under the given path.
-func (m *Mux) HandleFuncWildcard(path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
+func (m *Mux) HandleFuncWildcard[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
 	if path[len(path)-1] == '/' {
 		path += "*"
 	}

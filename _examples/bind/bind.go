@@ -24,7 +24,7 @@ func Run(ctx context.Context) error {
 			mcors.Middleware(),
 			mtelemetry.Middleware(),
 		)
-		mux.POST("/bind/{name}", mux.Wrap(func(c *ada.Context) error {
+		mux.POST("/bind/{name}", func(c *ada.Context) error {
 			var req struct {
 				Name string `param:"name"`
 				ID   int    `json:"id"`
@@ -37,7 +37,7 @@ func Run(ctx context.Context) error {
 				"message": "Hello, " + req.Name,
 				"id":      req.ID,
 			})
-		}))
+		})
 
 		return nil
 	})
