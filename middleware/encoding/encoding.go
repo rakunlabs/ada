@@ -3,6 +3,7 @@ package encoding
 import (
 	"compress/gzip"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -33,54 +34,111 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 				return
 			}
 
-			ae := r.Header.Get("Accept-Encoding")
-			if ae == "" {
-				next.ServeHTTP(w, r)
-				return
-			}
+			addVary(w.Header(), "Accept-Encoding")
 
-			// Find the first supported encoding that the client accepts
-			var selectedEncoding string
+			selectedEncoding, selectedQuality := "", float64(0)
 			for _, enc := range opt.Config.Encoding {
-				if strings.Contains(ae, enc) {
-					selectedEncoding = enc
-					break
+				if quality := encodingQuality(r.Header.Values("Accept-Encoding"), enc); quality > selectedQuality {
+					selectedEncoding, selectedQuality = enc, quality
 				}
 			}
 
-			// If no supported encoding is accepted by client
 			if selectedEncoding == "" {
+				if !identityAccepted(r.Header.Values("Accept-Encoding")) {
+					http.Error(w, "no acceptable content encoding", http.StatusNotAcceptable)
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			switch selectedEncoding {
 			case "gzip":
-				// Create gzip writer from pool
 				gz := gzipWriterPool.Get().(*gzip.Writer)
-				defer gzipWriterPool.Put(gz)
-				gz.Reset(w)
-				defer gz.Close()
-
-				// Wrap response writer
 				gzw := &gzipResponseWriter{
 					ResponseWriter: w,
-					Writer:         gz,
+					writer:         gz,
+					requestMethod:  r.Method,
 				}
-
-				// Set content encoding header
-				w.Header().Set("Content-Encoding", selectedEncoding)
-				w.Header().Del("Content-Length")
-
+				defer func() {
+					gzw.close()
+					gzipWriterPool.Put(gz)
+				}()
 				next.ServeHTTP(gzw, r)
 			default:
-				// Unsupported encoding
 				next.ServeHTTP(w, r)
-				return
 			}
-
 		})
 	}
+}
+
+func encodingQuality(headerValues []string, encoding string) float64 {
+	qualities := parseEncodingQualities(headerValues)
+	if quality, ok := qualities[strings.ToLower(encoding)]; ok {
+		return quality
+	}
+	return qualities["*"]
+}
+
+func identityAccepted(headerValues []string) bool {
+	qualities := parseEncodingQualities(headerValues)
+	if quality, ok := qualities["identity"]; ok {
+		return quality > 0
+	}
+	if quality, ok := qualities["*"]; ok {
+		return quality > 0
+	}
+
+	// Identity is acceptable by default even when the client lists other
+	// encodings but says nothing about identity.
+	return true
+}
+
+func parseEncodingQualities(headerValues []string) map[string]float64 {
+	qualities := make(map[string]float64)
+	for _, headerValue := range headerValues {
+		for token := range strings.SplitSeq(headerValue, ",") {
+			parts := strings.Split(token, ";")
+			name := strings.ToLower(strings.TrimSpace(parts[0]))
+			if name == "" {
+				continue
+			}
+
+			quality := float64(1)
+			for _, parameter := range parts[1:] {
+				key, value, ok := strings.Cut(parameter, "=")
+				if !ok || !strings.EqualFold(strings.TrimSpace(key), "q") {
+					continue
+				}
+				parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+				if err != nil || parsed < 0 || parsed > 1 {
+					quality = 0
+				} else {
+					quality = parsed
+				}
+			}
+			qualities[name] = quality
+		}
+	}
+
+	return qualities
+}
+
+func addVary(header http.Header, value string) {
+	values := header.Values("Vary")
+	for _, existing := range values {
+		for token := range strings.SplitSeq(existing, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), value) || strings.TrimSpace(token) == "*" {
+				return
+			}
+		}
+	}
+
+	if len(values) == 0 {
+		header.Set("Vary", value)
+		return
+	}
+	header.Set("Vary", strings.Join(values, ", ")+", "+value)
 }
 
 // ////////////////////////////////////////////////////////////////////

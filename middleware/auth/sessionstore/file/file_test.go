@@ -203,6 +203,74 @@ func TestTamperedCookieIsIgnored(t *testing.T) {
 	}
 }
 
+func TestGetPropagatesCorruptSessionFile(t *testing.T) {
+	s, dir := newStore(t)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	sess, _ := s.Get(r, "auth_session")
+
+	rec := httptest.NewRecorder()
+	if err := s.Save(r, rec, sess); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "session_*.json"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("session files = %v, err = %v", matches, err)
+	}
+	if err := os.WriteFile(matches[0], []byte("{"), 0o600); err != nil {
+		t.Fatalf("corrupt session: %v", err)
+	}
+
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.AddCookie(rec.Result().Cookies()[0])
+	if got, err := s.Get(r2, "auth_session"); err == nil || got != nil {
+		t.Fatalf("Get() = (%v, %v), want nil session and corruption error", got, err)
+	}
+}
+
+func TestGetMissingSessionReturnsFreshSession(t *testing.T) {
+	s, dir := newStore(t)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	sess, _ := s.Get(r, "auth_session")
+
+	rec := httptest.NewRecorder()
+	if err := s.Save(r, rec, sess); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(dir, "session_*.json"))
+	if err := os.Remove(matches[0]); err != nil {
+		t.Fatalf("remove session: %v", err)
+	}
+
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.AddCookie(rec.Result().Cookies()[0])
+	got, err := s.Get(r2, "auth_session")
+	if err != nil || !got.IsNew {
+		t.Fatalf("Get() = (%v, %v), want fresh session", got, err)
+	}
+}
+
+func TestAtomicSaveCleansTemporaryFileOnRenameFailure(t *testing.T) {
+	s, dir := newStore(t)
+	target := filepath.Join(dir, "session_blocked.json")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("create blocking target: %v", err)
+	}
+
+	if err := s.SaveByID(context.Background(), "blocked", map[string]any{"a": "b"}, time.Hour); err == nil {
+		t.Fatal("expected rename failure")
+	}
+
+	temps, err := filepath.Glob(filepath.Join(dir, ".session-*.tmp"))
+	if err != nil {
+		t.Fatalf("glob temporary files: %v", err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("temporary files were not cleaned up: %v", temps)
+	}
+}
+
 func TestNewFailsOnUnwritableDir(t *testing.T) {
 	// A directory that cannot be created used to be swallowed: os.MkdirAll's
 	// error was discarded and every later write failed one at a time.

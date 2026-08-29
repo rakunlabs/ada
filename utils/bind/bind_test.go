@@ -72,6 +72,63 @@ type ExampleUser struct {
 	CustomField CustomType `query:"custom_field"`
 }
 
+func TestBindRejectsNonStructTarget(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "/?value=1", nil)
+	target := 0
+
+	if err := Bind(req, &target); err == nil {
+		t.Fatal("Bind accepted a pointer to a non-struct target")
+	}
+}
+
+func TestBindRejectsNarrowIntegerOverflow(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		bind  func(*http.Request) error
+	}{
+		{
+			name:  "int8 overflow",
+			query: "value=128",
+			bind: func(req *http.Request) error {
+				var target struct {
+					Value int8 `query:"value"`
+				}
+				return Bind(req, &target)
+			},
+		},
+		{
+			name:  "int8 underflow",
+			query: "value=-129",
+			bind: func(req *http.Request) error {
+				var target struct {
+					Value int8 `query:"value"`
+				}
+				return Bind(req, &target)
+			},
+		},
+		{
+			name:  "uint8 overflow",
+			query: "value=256",
+			bind: func(req *http.Request) error {
+				var target struct {
+					Value uint8 `query:"value"`
+				}
+				return Bind(req, &target)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, "/?"+tt.query, nil)
+			if err := tt.bind(req); err == nil {
+				t.Fatal("Bind accepted an out-of-range integer")
+			}
+		})
+	}
+}
+
 type CustomType struct {
 	Value string
 }

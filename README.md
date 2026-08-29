@@ -39,6 +39,38 @@ func SayHello(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
+Context-style handlers may also use `func(c *ada.Context) error`. Handler
+contexts are pooled and are valid only until the handler returns; copy the
+request data needed by background work instead of retaining `*ada.Context`.
+`mux.WrapUnpooled` is available for compatibility when retaining the Context
+itself is unavoidable.
+
+## Runtime Route Reload
+
+Add and remove routes on a running server. A request keeps the routing table it
+started with, so in-flight work is never disturbed:
+
+```go
+server.GET("/beta/feature", betaHandler)   // add at runtime
+server.Remove(http.MethodGet, "/beta/feature") // remove at runtime
+
+for _, r := range server.Routes() {
+    log.Println(r.Method, r.Pattern)
+}
+```
+
+Groups share their parent's routing table and resolve `Remove` against their own
+prefix:
+
+```go
+api := server.Group("/api")
+api.GET("/users", listUsers)
+api.Remove(http.MethodGet, "/users") // removes /api/users
+```
+
+Middlewares (`Use`, `Group`, `NotFound`, …) stay setup-time; use a `Slot` or
+`Pipeline` below to change those at runtime.
+
 ## Runtime Middleware Reload
 
 Replace, disable, or add middlewares at runtime without restarting:

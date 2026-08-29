@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
+	"sync"
 
 	"github.com/rakunlabs/ada/utils/bind"
 )
@@ -21,15 +23,32 @@ var escaper = strings.NewReplacer(`"`, `\"`, `\`, `\\`)
 //   - The routing methods accept a HandlerFunc directly and bind it to the Mux
 //     for you, so this is only needed to hand an ada handler to another router.
 func (m *Mux) Wrap(handler HandlerFunc) http.HandlerFunc {
-	return wrap(handler, func(c *Context, err error) {
-		if m.errHandler != nil {
-			m.errHandler(c, err)
+	return wrap(handler, m.handleContextError)
+}
 
-			return
+// WrapUnpooled converts HandlerFunc to http.HandlerFunc without recycling its
+// Context after the handler returns. Prefer Wrap for normal request handling;
+// use this compatibility path only when code must retain the Context itself
+// after return. The Request and Response can be retained independently without
+// opting out of pooling.
+func (m *Mux) WrapUnpooled(handler HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c := NewContext(w, r)
+		if err := handler(c); err != nil {
+			c.prepareError(err)
+			m.handleContextError(c, err)
 		}
+	}
+}
 
-		defaultErrHandler(c, err)
-	})
+func (m *Mux) handleContextError(c *Context, err error) {
+	if m.errHandler != nil {
+		m.errHandler(c, err)
+
+		return
+	}
+
+	defaultErrHandler(c, err)
 }
 
 func defaultErrHandler(c *Context, err error) {
@@ -38,19 +57,72 @@ func defaultErrHandler(c *Context, err error) {
 	}
 }
 
+// contextPool recycles the per-request Context. A Context is three words plus
+// two flags, but allocating one per request was the single largest source of
+// garbage on the Context-handler path — it was one of only four allocations in
+// a JSON response, and the only one ada controls.
+//
+// A Context recovered from the pool is fully reinitialised by acquireContext,
+// so no state can leak between requests.
+var contextPool = sync.Pool{
+	New: func() any { return new(Context) },
+}
+
+// acquireContext returns a Context bound to this request, taken from the pool
+// when one is available.
+func acquireContext(w http.ResponseWriter, r *http.Request) *Context {
+	c, _ := contextPool.Get().(*Context)
+
+	c.Request = r
+	c.Response = w
+	c.code = http.StatusOK
+	c.committed = false
+
+	return c
+}
+
+// releaseContext clears the request references and returns the Context to the
+// pool.
+//
+// The references must be dropped before the Put: a pooled Context that still
+// points at a finished request keeps that request, its body and its
+// ResponseWriter alive for as long as the Context sits in the pool.
+func releaseContext(c *Context) {
+	c.Request = nil
+	c.Response = nil
+
+	contextPool.Put(c)
+}
+
 func wrap(handler HandlerFunc, errHandler func(c *Context, err error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c := NewContext(w, r)
+		c := acquireContext(w, r)
 
 		if err := handler(c); err != nil {
 			c.prepareError(err)
 			errHandler(c, err)
 		}
+
+		// Deliberately not deferred, and deliberately skipped when the
+		// handler panics: an escaping panic unwinds past this point and
+		// the Context is simply left to the garbage collector rather
+		// than recycled while a recover middleware may still be reading
+		// it.
+		releaseContext(c)
 	}
 }
 
 // ////////////////////////////////////////////
 
+// Context carries the request and response for one handler invocation.
+//
+// A Context handed to a HandlerFunc is pooled and recycled once that handler
+// returns. It is valid for the duration of the call only: do not store it in a
+// struct, capture it in a goroutine that outlives the handler, or otherwise use
+// it after returning. Copy whatever you need out of it instead — c.Request and
+// c.Response stay valid on their own.
+//
+// Contexts built with NewContext are not pooled and have no such restriction.
 type Context struct {
 	Request  *http.Request
 	Response http.ResponseWriter
@@ -59,6 +131,8 @@ type Context struct {
 	committed bool
 }
 
+// NewContext returns a standalone Context. It is not drawn from (nor returned
+// to) the pool, so the result outlives the handler that made it.
 func NewContext(w http.ResponseWriter, r *http.Request) *Context {
 	return &Context{
 		Request:  r,
@@ -146,6 +220,18 @@ func (c *Context) Err(err error) error {
 	return err
 }
 
+// contentType sets the response Content-Type unless one is already set.
+//
+// A handler that picked its own type — `c.SetHeader("Content-Type",
+// "application/problem+json").SendJSON(...)` is the usual case — used to have
+// it silently replaced by the Send* method's default.
+func (c *Context) contentType(value string) {
+	header := c.Response.Header()
+	if header.Get(HeaderContentType) == "" {
+		header.Set(HeaderContentType, value)
+	}
+}
+
 // //////////////////////////////////////////
 
 // SendJSON sends a json response.
@@ -159,7 +245,7 @@ func (c *Context) SendJSONP(data any, indent string) error {
 		return ErrAlreadyCommitted
 	}
 
-	c.Response.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
+	c.contentType(MIMEApplicationJSONCharsetUTF8)
 	c.Response.WriteHeader(c.code)
 
 	encoder := json.NewEncoder(c.Response)
@@ -173,7 +259,7 @@ func (c *Context) SendJSONRaw(data io.Reader) error {
 		return ErrAlreadyCommitted
 	}
 
-	c.Response.Header().Set(HeaderContentType, MIMEApplicationJSONCharsetUTF8)
+	c.contentType(MIMEApplicationJSONCharsetUTF8)
 	c.Response.WriteHeader(c.code)
 
 	_, err := io.Copy(c.Response, data)
@@ -197,7 +283,7 @@ func (c *Context) SendString(s string) error {
 		return ErrAlreadyCommitted
 	}
 
-	c.Response.Header().Set(HeaderContentType, MIMETextPlainCharsetUTF8)
+	c.contentType(MIMETextPlainCharsetUTF8)
 	c.Response.WriteHeader(c.code)
 
 	_, err := c.Response.Write([]byte(s))
@@ -225,7 +311,7 @@ func (c *Context) SendFile(name string, reader io.Reader) error {
 		return ErrAlreadyCommitted
 	}
 
-	c.Response.Header().Set(HeaderContentType, MIMEOctetStream)
+	c.contentType(MIMEOctetStream)
 	c.Response.Header().Set(HeaderContentDisposition, `attachment; filename="`+escaper.Replace(name)+`"`)
 	c.Response.WriteHeader(c.code)
 
@@ -237,7 +323,7 @@ func (c *Context) SendFile(name string, reader io.Reader) error {
 // SendZip sends files to the client as a zip file.
 //   - If name is empty, defaults to "files.zip".
 func (c *Context) SendZip(name string, files map[string]io.Reader) error {
-	if !c.commit() {
+	if c.Committed() {
 		return ErrAlreadyCommitted
 	}
 
@@ -250,7 +336,14 @@ func (c *Context) SendZip(name string, files map[string]io.Reader) error {
 	zipWriter := zip.NewWriter(buf)
 
 	for filename, reader := range files {
-		fileWriter, err := zipWriter.Create(escaper.Replace(filename))
+		entryName, err := cleanZipEntryName(filename)
+		if err != nil {
+			_ = zipWriter.Close()
+
+			return err
+		}
+
+		fileWriter, err := zipWriter.Create(entryName)
 		if err != nil {
 			zipWriter.Close()
 
@@ -267,12 +360,35 @@ func (c *Context) SendZip(name string, files map[string]io.Reader) error {
 	if err := zipWriter.Close(); err != nil {
 		return fmt.Errorf("failed to close zip writer: %w", err)
 	}
+	if !c.commit() {
+		return ErrAlreadyCommitted
+	}
 
-	c.Response.Header().Set(HeaderContentType, MIMEOctetStream)
+	c.contentType(MIMEOctetStream)
 	c.Response.Header().Set(HeaderContentDisposition, `attachment; filename="`+escaper.Replace(name)+`"`)
 	c.Response.WriteHeader(c.code)
 
 	_, err := io.Copy(c.Response, buf)
 
 	return err
+}
+
+// cleanZipEntryName validates an archive member name independently from HTTP
+// Content-Disposition escaping. ZIP names always use forward slashes and must
+// be relative; accepting traversal, absolute or drive-qualified paths creates
+// archives that unsafe extractors can write outside their destination.
+func cleanZipEntryName(name string) (string, error) {
+	if name == "" || strings.IndexByte(name, 0) >= 0 {
+		return "", fmt.Errorf("invalid zip entry name %q", name)
+	}
+
+	name = strings.ReplaceAll(name, `\`, "/")
+	clean := path.Clean(name)
+
+	if clean == "." || clean == ".." || path.IsAbs(clean) || strings.HasPrefix(clean, "../") ||
+		(len(clean) >= 2 && clean[1] == ':') {
+		return "", fmt.Errorf("unsafe zip entry name %q", name)
+	}
+
+	return clean, nil
 }

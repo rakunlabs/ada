@@ -138,7 +138,11 @@ func New(ctx context.Context, cfg Config, opts sessionstore.Options) (*Store, er
 func (s *Store) Get(r *http.Request, name string) (*sessionstore.Session, error) {
 	cookieValue, err := sessionstore.ReadSessionCookie(r, name)
 	if err != nil {
-		return sessionstore.NewSession(s, name, &s.options), nil
+		if errors.Is(err, http.ErrNoCookie) {
+			return sessionstore.NewSession(s, name, &s.options), nil
+		}
+
+		return nil, fmt.Errorf("redis: read session cookie: %w", err)
 	}
 
 	sessionID, err := s.codec.Decode(name, cookieValue)
@@ -151,7 +155,11 @@ func (s *Store) Get(r *http.Request, name string) (*sessionstore.Session, error)
 
 	data, err := s.load(r.Context(), sessionID)
 	if err != nil {
-		return sessionstore.NewSession(s, name, &s.options), nil
+		if errors.Is(err, redis.Nil) {
+			return sessionstore.NewSession(s, name, &s.options), nil
+		}
+
+		return nil, fmt.Errorf("redis: load session: %w", err)
 	}
 
 	session.Values = data

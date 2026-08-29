@@ -12,7 +12,9 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/rakunlabs/ada/middleware/auth/cookie"
@@ -170,7 +172,13 @@ type Auth struct {
 
 	// deferred holds the first error produced by a chained With* call, so the
 	// builder can stay fluent and still fail loudly at Init.
-	deferred error
+	deferred  error
+	closeOnce sync.Once
+	closeErr  error
+	closing   atomic.Bool
+	retiredMu sync.Mutex
+	retired   []strategy.Authenticator
+	closed    []strategy.Authenticator
 
 	resolvedPaths paths
 }
@@ -209,6 +217,7 @@ func New(cfg Config) *Auth {
 		cfg:      cfg,
 		registry: strategy.NewRegistry(),
 	}
+	a.registry.SetRemovalHook(a.retainStrategy)
 
 	uiCopy := cfg.UI
 	a.liveUI.Store(&uiCopy)
@@ -469,6 +478,80 @@ func (a *Auth) Session() *session.Session { return a.session }
 
 // Registry exposes the strategy registry.
 func (a *Auth) Registry() *strategy.Registry { return a.registry }
+
+// Close releases resources owned by registered strategies and the configured
+// second factor. Injected issuers, backends, and session stores remain owned by
+// their callers. It is safe to call Close more than once.
+func (a *Auth) Close() error {
+	a.closeOnce.Do(func() {
+		a.closing.Store(true)
+		var errs []error
+		a.retiredMu.Lock()
+		all := append([]strategy.Authenticator(nil), a.retired...)
+		a.retiredMu.Unlock()
+		all = append(all, a.registry.List()...)
+
+		for _, s := range all {
+			if err := a.closeStrategy(s); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if c, ok := a.secondFactor.(interface{ Close() error }); ok {
+			errs = append(errs, c.Close())
+		}
+		a.closeErr = errors.Join(errs...)
+	})
+
+	return a.closeErr
+}
+
+func (a *Auth) retainStrategy(s strategy.Authenticator) {
+	if _, ok := s.(interface{ Close() error }); !ok {
+		return
+	}
+
+	a.retiredMu.Lock()
+	for _, previous := range a.retired {
+		if sameStrategyInstance(previous, s) {
+			a.retiredMu.Unlock()
+			return
+		}
+	}
+	if a.closing.Load() {
+		a.retiredMu.Unlock()
+		_ = a.closeStrategy(s)
+		return
+	}
+	a.retired = append(a.retired, s)
+	a.retiredMu.Unlock()
+}
+
+func (a *Auth) closeStrategy(s strategy.Authenticator) error {
+	c, ok := s.(interface{ Close() error })
+	if !ok {
+		return nil
+	}
+
+	a.retiredMu.Lock()
+	for _, previous := range a.closed {
+		if sameStrategyInstance(previous, s) {
+			a.retiredMu.Unlock()
+			return nil
+		}
+	}
+	a.closed = append(a.closed, s)
+	a.retiredMu.Unlock()
+
+	return c.Close()
+}
+
+func sameStrategyInstance(a, b strategy.Authenticator) bool {
+	if a == nil || b == nil || reflect.TypeOf(a) != reflect.TypeOf(b) {
+		return false
+	}
+	t := reflect.TypeOf(a)
+	return t.Comparable() && reflect.ValueOf(a).Interface() == reflect.ValueOf(b).Interface()
+}
 
 // SetUI replaces the UI configuration read by handleInfo. The update is
 // atomic: in-flight /login/info requests observe either the old or the new

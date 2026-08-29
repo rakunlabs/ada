@@ -1,6 +1,8 @@
 package ratelimit_test
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +15,38 @@ import (
 
 	"github.com/rakunlabs/ada/middleware/ratelimit"
 )
+
+type errorStore struct {
+	getErr error
+	setErr error
+	gets   atomic.Int32
+	sets   atomic.Int32
+}
+
+type waitStore struct {
+	once sync.Once
+	got  chan struct{}
+}
+
+func (s *waitStore) Get(context.Context, string) (*ratelimit.Bucket, bool, error) {
+	s.once.Do(func() { close(s.got) })
+	return &ratelimit.Bucket{Attempts: []time.Time{time.Now()}}, true, nil
+}
+
+func (*waitStore) Set(context.Context, string, *ratelimit.Bucket) error { return nil }
+
+func (s *errorStore) Get(context.Context, string) (*ratelimit.Bucket, bool, error) {
+	s.gets.Add(1)
+	if s.getErr != nil {
+		return nil, false, s.getErr
+	}
+	return nil, false, nil
+}
+
+func (s *errorStore) Set(context.Context, string, *ratelimit.Bucket) error {
+	s.sets.Add(1)
+	return s.setErr
+}
 
 // newStore constructs an in-memory ratelimit store for tests. Wraps the
 // package's public constructor so tests exercise the same path as
@@ -420,5 +454,228 @@ func TestPanicsOnMissingRequiredConfig(t *testing.T) {
 			}()
 			_ = ratelimit.Middleware(tc.cfg)
 		})
+	}
+}
+
+func TestStoreGetErrorFailsClosedAndIsObservable(t *testing.T) {
+	sentinel := errors.New("get failed")
+	store := &errorStore{getErr: sentinel}
+	cfg := defaultConfig(store)
+	var observed error
+	cfg.OnError = func(_ *http.Request, err error) { observed = err }
+
+	var handlerCalls atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handlerCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	rec := send(ratelimit.Middleware(cfg)(handler))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if handlerCalls.Load() != 0 {
+		t.Fatal("downstream handler ran after Store.Get failure")
+	}
+	if !errors.Is(observed, sentinel) {
+		t.Fatalf("OnError error = %v, want wrapping %v", observed, sentinel)
+	}
+	var storeErr *ratelimit.StoreError
+	if !errors.As(observed, &storeErr) || storeErr.Operation != ratelimit.StoreOperationGet || storeErr.Key != "static" {
+		t.Fatalf("OnError error = %#v, want get operation and static key", observed)
+	}
+}
+
+func TestStoreSetErrorFailsClosedWithoutOnAttempt(t *testing.T) {
+	sentinel := errors.New("set failed")
+	store := &errorStore{setErr: sentinel}
+	cfg := defaultConfig(store)
+	var attempts atomic.Int32
+	var observed error
+	cfg.OnAttempt = func(*http.Request, ratelimit.Decision, int) { attempts.Add(1) }
+	cfg.OnError = func(_ *http.Request, err error) { observed = err }
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Downstream", "must-not-leak")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("downstream response"))
+	})
+	rec := send(ratelimit.Middleware(cfg)(handler))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if rec.Header().Get("X-Downstream") != "" || strings.Contains(rec.Body.String(), "downstream response") {
+		t.Fatalf("failed-closed response exposed downstream response: headers=%v body=%q", rec.Header(), rec.Body.String())
+	}
+	if attempts.Load() != 0 {
+		t.Fatalf("OnAttempt called %d times after failed persistence", attempts.Load())
+	}
+	if !errors.Is(observed, sentinel) {
+		t.Fatalf("OnError error = %v, want wrapping %v", observed, sentinel)
+	}
+	var storeErr *ratelimit.StoreError
+	if !errors.As(observed, &storeErr) || storeErr.Operation != ratelimit.StoreOperationSet {
+		t.Fatalf("OnError error = %#v, want set operation", observed)
+	}
+}
+
+func TestStoreErrorFailOpenPolicy(t *testing.T) {
+	t.Run("get", func(t *testing.T) {
+		store := &errorStore{getErr: errors.New("get failed")}
+		cfg := defaultConfig(store)
+		cfg.ErrorPolicy = ratelimit.ErrorPolicyFailOpen
+
+		rec := send(ratelimit.Middleware(cfg)(failingHandler()))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want downstream 401", rec.Code)
+		}
+		if store.sets.Load() != 0 {
+			t.Fatalf("Store.Set called %d times after failed-open Get", store.sets.Load())
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		store := &errorStore{setErr: errors.New("set failed")}
+		cfg := defaultConfig(store)
+		cfg.ErrorPolicy = ratelimit.ErrorPolicyFailOpen
+		var attempts atomic.Int32
+		cfg.OnAttempt = func(*http.Request, ratelimit.Decision, int) { attempts.Add(1) }
+
+		rec := send(ratelimit.Middleware(cfg)(failingHandler()))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want downstream 401", rec.Code)
+		}
+		if attempts.Load() != 0 {
+			t.Fatalf("OnAttempt called %d times after failed persistence", attempts.Load())
+		}
+	})
+}
+
+func TestBackoffWaitHonorsRequestCancellation(t *testing.T) {
+	store := &waitStore{got: make(chan struct{})}
+	cfg := defaultConfig(store)
+	cfg.SoftThreshold = 1
+	cfg.BackoffBase = time.Hour
+	cfg.BackoffMax = time.Hour
+
+	var handlerCalls atomic.Int32
+	handler := ratelimit.Middleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handlerCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/login", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-store.got:
+	case <-time.After(time.Second):
+		t.Fatal("middleware did not read the seeded bucket")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("middleware did not stop its backoff wait after cancellation")
+	}
+	if handlerCalls.Load() != 0 {
+		t.Fatal("downstream handler ran after cancellation")
+	}
+}
+
+func TestMiddlewarePanicDoesNotPoisonKeyLock(t *testing.T) {
+	store := newStore(t)
+	var calls atomic.Int32
+
+	handler := ratelimit.Middleware(ratelimit.Config{
+		Window:        time.Minute,
+		HardThreshold: 10,
+		KeyFunc:       func(*http.Request) []string { return []string{"same-key"} },
+		ShouldCount:   func(*http.Request, int) bool { return false },
+		Store:         store,
+	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			panic("boom")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	func() {
+		defer func() { _ = recover() }()
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	}()
+
+	done := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		done <- rec.Code
+	}()
+
+	select {
+	case code := <-done:
+		if code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d", code, http.StatusNoContent)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second request blocked on a lock left held by the panic")
+	}
+}
+
+func TestFailClosedResponseBufferIsBounded(t *testing.T) {
+	store := newStore(t)
+	handler := ratelimit.Middleware(ratelimit.Config{
+		Window:              time.Minute,
+		HardThreshold:       10,
+		ResponseBufferLimit: 8,
+		KeyFunc:             func(*http.Request) []string { return []string{"key"} },
+		ShouldCount:         func(_ *http.Request, status int) bool { return status == http.StatusUnauthorized },
+		Store:               store,
+	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("response larger than eight bytes"))
+	}))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	bucket, ok, err := store.Get(t.Context(), "key")
+	if err != nil || !ok || len(bucket.Attempts) != 1 {
+		t.Fatalf("oversized failed response was not counted: bucket=%+v ok=%v err=%v", bucket, ok, err)
+	}
+}
+
+func TestFailClosedBufferIgnoresInformationalStatus(t *testing.T) {
+	store := newStore(t)
+	handler := ratelimit.Middleware(ratelimit.Config{
+		Window:        time.Minute,
+		HardThreshold: 10,
+		KeyFunc:       func(*http.Request) []string { return []string{"key"} },
+		ShouldCount:   func(_ *http.Request, status int) bool { return status == http.StatusUnauthorized },
+		Store:         store,
+	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusEarlyHints)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized"))
+	}))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	bucket, ok, err := store.Get(t.Context(), "key")
+	if err != nil || !ok || len(bucket.Attempts) != 1 {
+		t.Fatalf("final failure status was not counted: bucket=%+v ok=%v err=%v", bucket, ok, err)
 	}
 }

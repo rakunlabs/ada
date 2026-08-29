@@ -30,8 +30,9 @@ var hopByHopHeaders = map[string]struct{}{
 	"Keep-Alive":          {},
 	"Proxy-Authenticate":  {},
 	"Proxy-Authorization": {},
+	"Proxy-Connection":    {},
 	"Te":                  {},
-	"Trailers":            {},
+	"Trailer":             {},
 	"Transfer-Encoding":   {},
 	"Upgrade":             {},
 }
@@ -207,8 +208,12 @@ func (f *ForwardAuth) Validate() error {
 		return errors.New("forwardauth: Address is required")
 	}
 
-	if _, err := url.Parse(f.Address); err != nil {
+	address, err := url.Parse(f.Address)
+	if err != nil {
 		return fmt.Errorf("forwardauth: invalid Address: %w", err)
+	}
+	if !address.IsAbs() || (address.Scheme != "http" && address.Scheme != "https") || address.Host == "" {
+		return errors.New("forwardauth: Address must be an absolute HTTP(S) URL with a host")
 	}
 
 	if f.RedirectCode != 0 && (f.RedirectCode < 300 || f.RedirectCode > 399) {
@@ -481,11 +486,24 @@ func (f *ForwardAuth) setForwardedHeaders(authReq *http.Request, origReq *http.R
 // response onto the original request so they are visible to downstream
 // handlers. Multi-value headers are preserved.
 func (f *ForwardAuth) copyAuthResponseHeaders(origReq *http.Request, authResp *http.Response) {
+	extraHop := connectionHopHeaders(authResp.Header)
+	canCopy := func(name string) bool {
+		name = http.CanonicalHeaderKey(name)
+		_, standardHop := hopByHopHeaders[name]
+		_, nominatedHop := extraHop[name]
+
+		return !standardHop && !nominatedHop
+	}
+
 	for _, h := range f.DeleteRequestHeaders {
 		origReq.Header.Del(h)
 	}
 
 	for _, h := range f.AuthResponseHeaders {
+		if !canCopy(h) {
+			continue
+		}
+
 		values := authResp.Header.Values(h)
 		if len(values) == 0 {
 			continue
@@ -499,7 +517,7 @@ func (f *ForwardAuth) copyAuthResponseHeaders(origReq *http.Request, authResp *h
 
 	if f.responseHeadersRegex != nil {
 		for name, values := range authResp.Header {
-			if !f.responseHeadersRegex.MatchString(name) {
+			if !f.responseHeadersRegex.MatchString(name) || !canCopy(name) {
 				continue
 			}
 
@@ -514,7 +532,16 @@ func (f *ForwardAuth) copyAuthResponseHeaders(origReq *http.Request, authResp *h
 // writeAuthResponse writes the auth service's response (status, headers, body)
 // back to the client.
 func (f *ForwardAuth) writeAuthResponse(w http.ResponseWriter, authResp *http.Response) {
+	extraHop := connectionHopHeaders(authResp.Header)
 	for name, values := range authResp.Header {
+		canonicalName := http.CanonicalHeaderKey(name)
+		if _, ok := hopByHopHeaders[canonicalName]; ok {
+			continue
+		}
+		if _, ok := extraHop[canonicalName]; ok {
+			continue
+		}
+
 		for _, v := range values {
 			w.Header().Add(name, v)
 		}

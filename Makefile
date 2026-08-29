@@ -1,6 +1,8 @@
 .DEFAULT_GOAL := help
 .ONESHELL:
 
+MODULE_DIRS := . $(sort $(patsubst %/go.mod,%,$(shell git ls-files '*/go.mod')))
+
 .PHONY: tag
 tag: ## Tags the repo with new version and tag all sub modules same time than push all
 	@latest=$$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 || echo "none"); \
@@ -38,6 +40,30 @@ lint: ## Lint Go files
 .PHONY: test
 test: ## Run unit tests
 	@go test -v -race ./...
+
+.PHONY: test-all
+test-all: ## Run race tests in every Go module
+	@set -e; \
+	for dir in $(MODULE_DIRS); do \
+		printf '\n==> %s\n' "$$dir"; \
+		go -C "$$dir" test -race ./...; \
+	done
+
+.PHONY: vet-all
+vet-all: ## Run go vet in every Go module
+	@set -e; \
+	for dir in $(MODULE_DIRS); do \
+		printf '\n==> %s\n' "$$dir"; \
+		go -C "$$dir" vet ./...; \
+	done
+
+.PHONY: examples-check
+examples-check: ## Compile and test example modules
+	@go -C _examples test ./...
+
+.PHONY: benchmarks-check
+benchmarks-check: ## Compile comparative benchmarks without running them
+	@go -C _examples/benchmark test -run '^$$' ./...
 
 .PHONY: coverage
 coverage: ## Run unit tests with coverage

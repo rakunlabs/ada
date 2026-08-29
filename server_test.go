@@ -203,3 +203,46 @@ func TestServer_RestartAfterStop(t *testing.T) {
 		}
 	}
 }
+
+// TestServer_OldContextCannotStopRestart pins that the cancellation callback
+// from a completed run is deregistered before the Server becomes reusable.
+func TestServer_OldContextCannotStopRestart(t *testing.T) {
+	s := New()
+	s.GET("/ping", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("pong"))
+	})
+
+	oldCtx, cancelOld := context.WithCancel(context.Background())
+	_, firstErr := startTestServer(t, s, WithContext(oldCtx))
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("stop first run: %v", err)
+	}
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	base, secondErr := startTestServer(t, s)
+
+	// This context belonged to the completed first run. Cancelling it must
+	// not call Stop on the second run.
+	cancelOld()
+
+	resp, err := http.Get(base + "/ping")
+	if err != nil {
+		t.Fatalf("second run stopped by old context: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if string(body) != "pong" {
+		t.Fatalf("body = %q, want %q", body, "pong")
+	}
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("stop second run: %v", err)
+	}
+	if err := <-secondErr; err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+}

@@ -62,15 +62,15 @@ func (s *CookieStore) MaxAge(age int) {
 // registry is installed (see Middleware).
 func (s *CookieStore) Get(r *http.Request, name string) (*Session, error) {
 	if reg := GetRegistry(r); reg != nil {
-		if sess := reg.get(name); sess != nil {
-			return sess, nil
+		if sess, err, ok := reg.get(s, name); ok {
+			return sess, err
 		}
 	}
 
 	sess, err := s.New(r, name)
 
 	if reg := GetRegistry(r); reg != nil {
-		reg.set(name, sess)
+		reg.set(s, name, sess, err)
 	}
 
 	return sess, err

@@ -26,14 +26,16 @@ type slotState struct {
 	ctx     context.Context    // generation context; nil when cancel tracking is off
 }
 
-// slotBinding is everything the request path needs, published as one value.
+// reloadBinding is everything a reloadable middleware request path needs,
+// published as one value. Slot and Pipeline both use it so neither can pair a
+// chain from one generation with the cancellation context from another.
 //
 // Keeping the chain and the generation context together matters: when they
 // lived in two independent atomic pointers a request could load the new
 // generation's context and the old generation's chain (or vice versa), so
 // requests running through the old middleware were not cancellable — the exact
 // inverse of the ReplaceWithTimeout contract.
-type slotBinding struct {
+type reloadBinding struct {
 	// ctx is the generation context; nil when cancel tracking is off.
 	ctx context.Context
 	// chain is the pre-built handler chain, or the bare next handler when
@@ -45,14 +47,14 @@ type slotBinding struct {
 // pre-built handler chain needs to be maintained.
 type slotTarget struct {
 	next    http.Handler
-	binding atomic.Pointer[slotBinding]
+	binding atomic.Pointer[reloadBinding]
 }
 
 // bind pre-builds this target's binding for the given state.
 //   - A chain is ALWAYS stored — the bare next handler when the slot is
 //     disabled — so the request path never has to test for nil.
 func (t *slotTarget) bind(st *slotState) {
-	binding := &slotBinding{chain: t.next}
+	binding := &reloadBinding{chain: t.next}
 
 	if st != nil {
 		binding.ctx = st.ctx
@@ -321,14 +323,8 @@ func mergeContexts(parent, cancel context.Context) (context.Context, func()) {
 		stop()
 	})
 
-	// When the parent (request) is done, stop watching the cancel context.
-	s2 := context.AfterFunc(parent, func() {
-		stop()
-	})
-
 	cleanup := func() {
 		s1()   // deregister from cancel context's children map
-		s2()   // deregister from parent context's children map
 		stop() // cancel the merged context (idempotent)
 	}
 

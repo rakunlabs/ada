@@ -133,6 +133,9 @@ func Bind(req *http.Request, obj any, opts ...Option) (err error) {
 	if !rv.CanSet() {
 		return fmt.Errorf("binding target must be settable")
 	}
+	if rv.Kind() != reflect.Struct {
+		return fmt.Errorf("binding target must point to a struct")
+	}
 
 	rt := rv.Type()
 	cache := getFieldCache(rt)
@@ -453,13 +456,13 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 	case reflect.String:
 		field.SetString(value)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if intVal, err := strconv.ParseInt(value, 10, 64); err != nil {
+		if intVal, err := strconv.ParseInt(value, 10, field.Type().Bits()); err != nil {
 			return err
 		} else {
 			field.SetInt(intVal)
 		}
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if uintVal, err := strconv.ParseUint(value, 10, 64); err != nil {
+		if uintVal, err := strconv.ParseUint(value, 10, field.Type().Bits()); err != nil {
 			return err
 		} else {
 			field.SetUint(uintVal)

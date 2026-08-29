@@ -226,6 +226,7 @@ type usedCodes struct {
 	entries map[string]time.Time
 
 	stop   chan struct{}
+	done   chan struct{}
 	closed sync.Once
 }
 
@@ -233,6 +234,7 @@ func newUsedCodes() *usedCodes {
 	u := &usedCodes{
 		entries: make(map[string]time.Time),
 		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 
 	go u.janitor()
@@ -257,6 +259,7 @@ func (u *usedCodes) claim(subject, code string, until time.Time) bool {
 
 func (u *usedCodes) Close() error {
 	u.closed.Do(func() { close(u.stop) })
+	<-u.done
 
 	return nil
 }
@@ -264,6 +267,7 @@ func (u *usedCodes) Close() error {
 func (u *usedCodes) janitor() {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
+	defer close(u.done)
 
 	for {
 		select {

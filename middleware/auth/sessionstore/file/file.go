@@ -134,7 +134,11 @@ func (s *Store) Close() error {
 func (s *Store) Get(r *http.Request, name string) (*sessionstore.Session, error) {
 	cookieValue, err := sessionstore.ReadSessionCookie(r, name)
 	if err != nil {
-		return sessionstore.NewSession(s, name, &s.options), nil
+		if errors.Is(err, http.ErrNoCookie) {
+			return sessionstore.NewSession(s, name, &s.options), nil
+		}
+
+		return nil, fmt.Errorf("file: read session cookie: %w", err)
 	}
 
 	sessionID, err := s.codec.Decode(name, cookieValue)
@@ -144,7 +148,11 @@ func (s *Store) Get(r *http.Request, name string) (*sessionstore.Session, error)
 
 	data, err := s.load(sessionID)
 	if err != nil {
-		return sessionstore.NewSession(s, name, &s.options), nil
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, sessionstore.ErrNoSession) {
+			return sessionstore.NewSession(s, name, &s.options), nil
+		}
+
+		return nil, fmt.Errorf("file: load session: %w", err)
 	}
 
 	session := sessionstore.NewSession(s, name, &s.options)
@@ -296,7 +304,25 @@ func (s *Store) save(sessionID string, values map[string]any, ttl time.Duration)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return os.WriteFile(s.filePath(sessionID), data, 0o600)
+	tmp, err := os.CreateTemp(s.path, ".session-*.tmp")
+	if err != nil {
+		return err
+	}
+
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+
+		return err
+	}
+
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpName, s.filePath(sessionID))
 }
 
 func (s *Store) delete(sessionID string) {

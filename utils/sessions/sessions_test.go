@@ -176,6 +176,51 @@ func TestRegistry_CachesSession(t *testing.T) {
 	}
 }
 
+func TestRegistry_SeparatesStoresWithSameSessionName(t *testing.T) {
+	firstStore := newStore()
+	secondStore := newStore()
+
+	var first, second *sessions.Session
+	h := sessions.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		first, _ = firstStore.Get(r, "auth")
+		second, _ = secondStore.Get(r, "auth")
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if first == second {
+		t.Fatal("different stores must not share a cached session")
+	}
+	if first.Store() != firstStore || second.Store() != secondStore {
+		t.Fatal("cached sessions were returned from the wrong store")
+	}
+}
+
+func TestRegistry_PreservesCachedDecodeError(t *testing.T) {
+	store := newStore()
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(&http.Cookie{Name: "auth", Value: "invalid"})
+
+	var firstSession, secondSession *sessions.Session
+	var firstErr, secondErr error
+	h := sessions.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		firstSession, firstErr = store.Get(r, "auth")
+		secondSession, secondErr = store.Get(r, "auth")
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	if firstErr == nil || secondErr == nil {
+		t.Fatalf("decode errors = (%v, %v), want both non-nil", firstErr, secondErr)
+	}
+	if firstErr != secondErr {
+		t.Fatal("cached Get did not preserve the original decode error")
+	}
+	if firstSession != secondSession {
+		t.Fatal("cached Get returned a different session after a decode error")
+	}
+}
+
 func TestSave_FlushesRegistry(t *testing.T) {
 	store := newStore()
 

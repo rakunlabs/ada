@@ -424,6 +424,26 @@ func TestValidate_RejectsMissingAddress(t *testing.T) {
 	}
 }
 
+func TestValidate_RejectsNonAbsoluteHTTPAddress(t *testing.T) {
+	for _, address := range []string{"auth.local/check", "/check", "ftp://auth.local/check", "http:///check"} {
+		t.Run(address, func(t *testing.T) {
+			f := forwardauth.New(forwardauth.WithAddress(address))
+			if err := f.Validate(); err == nil {
+				t.Fatalf("Validate() accepted %q", address)
+			}
+		})
+	}
+}
+
+func TestValidate_AcceptsAbsoluteHTTPAddresses(t *testing.T) {
+	for _, address := range []string{"http://auth.local/check", "https://auth.local/check"} {
+		f := forwardauth.New(forwardauth.WithAddress(address))
+		if err := f.Validate(); err != nil {
+			t.Errorf("Validate(%q): %v", address, err)
+		}
+	}
+}
+
 func TestValidate_RejectsNon3xxRedirectCode(t *testing.T) {
 	f := forwardauth.New(
 		forwardauth.WithAddress("http://auth"),
@@ -485,6 +505,78 @@ func TestAuthResponseHeadersRegex_Matches(t *testing.T) {
 
 	if seen.Get("X-Other") != "" {
 		t.Errorf("X-Other leaked = %q", seen.Get("X-Other"))
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
+
+func TestAuthResponseHeaders_StripsHopByHopHeaders(t *testing.T) {
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Connection":     {"X-Response-Hop"},
+				"Keep-Alive":     {"timeout=5"},
+				"Trailer":        {"X-Checksum"},
+				"X-Response-Hop": {"private"},
+				"X-Auth-User":    {"alice"},
+			},
+			Body: io.NopCloser(strings.NewReader("")),
+		}, nil
+	})
+
+	mw := forwardauth.Middleware(
+		forwardauth.WithAddress("http://auth.local"),
+		forwardauth.WithTransport(transport),
+		forwardauth.WithAuthResponseHeaders("Connection", "Keep-Alive", "X-Response-Hop", "X-Auth-User"),
+	)
+	backend, seen := recordingHandler()
+	mw(backend).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	for _, name := range []string{"Connection", "Keep-Alive", "Trailer", "X-Response-Hop"} {
+		if got := seen.Get(name); got != "" {
+			t.Errorf("backend received %s = %q", name, got)
+		}
+	}
+	if got := seen.Get("X-Auth-User"); got != "alice" {
+		t.Errorf("X-Auth-User = %q, want alice", got)
+	}
+}
+
+func TestDeniedAuthResponse_StripsHopByHopHeaders(t *testing.T) {
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header: http.Header{
+				"Connection":     {"X-Response-Hop"},
+				"Keep-Alive":     {"timeout=5"},
+				"Trailer":        {"X-Checksum"},
+				"X-Response-Hop": {"private"},
+				"X-Challenge":    {"login"},
+			},
+			Body: io.NopCloser(strings.NewReader("denied")),
+		}, nil
+	})
+
+	mw := forwardauth.Middleware(
+		forwardauth.WithAddress("http://auth.local"),
+		forwardauth.WithTransport(transport),
+	)
+	rec := httptest.NewRecorder()
+	mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(
+		rec,
+		httptest.NewRequest(http.MethodPost, "/", nil),
+	)
+
+	for _, name := range []string{"Connection", "Keep-Alive", "Trailer", "X-Response-Hop"} {
+		if got := rec.Header().Get(name); got != "" {
+			t.Errorf("client received %s = %q", name, got)
+		}
+	}
+	if got := rec.Header().Get("X-Challenge"); got != "login" {
+		t.Errorf("X-Challenge = %q, want login", got)
 	}
 }
 

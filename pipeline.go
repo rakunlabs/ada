@@ -28,8 +28,20 @@ type pipelineSnapshot struct {
 // rebuildTarget tracks a single registration point where the pipeline's
 // pre-built chain needs to be maintained.
 type rebuildTarget struct {
-	next  http.Handler
-	chain atomic.Pointer[http.Handler]
+	next    http.Handler
+	binding atomic.Pointer[reloadBinding]
+}
+
+// bind publishes the pre-built chain and its generation context together.
+// They must never be loaded independently: doing so can run an old chain with
+// a new generation context (or vice versa), defeating ApplyWithTimeout.
+func (t *rebuildTarget) bind(snap *pipelineSnapshot) {
+	binding := &reloadBinding{
+		chain: buildChain(snap.entries, t.next),
+		ctx:   snap.ctx,
+	}
+
+	t.binding.Store(binding)
 }
 
 // Pipeline is a dynamically-managed ordered set of middlewares keyed by string.
@@ -37,8 +49,11 @@ type rebuildTarget struct {
 // re-registering routes.
 //
 // The Pipeline is registered once via Pipeline.Middleware(); subsequent Set/Remove/Apply
-// calls take effect on the next request. In-flight requests always observe a consistent
-// snapshot.
+// calls take effect on the next request. Each registration point publishes its
+// chain and cancellation context atomically. If the same Pipeline is stacked at
+// multiple points (for example root and route), a mutation may land between
+// those points during one request; this is the same boundary as independently
+// registered ordinary middleware.
 //
 // Cost: one atomic pointer load per request (chain is pre-built on mutation).
 //
@@ -94,24 +109,22 @@ func (p *Pipeline) Middleware() MiddlewareFunc {
 		// registered silently never ran, with no panic and no error.
 		p.mu.Lock()
 		snap := p.snapshot.Load()
-		chain := buildChain(snap.entries, next)
-		target.chain.Store(&chain)
+		target.bind(snap)
 		p.targets = append(p.targets, target)
 		p.mu.Unlock()
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			h := target.chain.Load()
-
-			snap := p.snapshot.Load()
+			binding := target.binding.Load()
 			// If this generation has a cancel context (from ApplyWithTimeout),
-			// merge it with the request context so cancellation propagates.
-			if snap != nil && snap.ctx != nil {
-				merged, cleanup := mergeContexts(r.Context(), snap.ctx)
+			// merge it with the request context so cancellation propagates to
+			// the chain published in the same binding.
+			if binding.ctx != nil {
+				merged, cleanup := mergeContexts(r.Context(), binding.ctx)
 				defer cleanup()
 				r = r.WithContext(merged)
 			}
 
-			(*h).ServeHTTP(w, r)
+			binding.chain.ServeHTTP(w, r)
 		})
 	}
 }
@@ -359,8 +372,7 @@ func (p *Pipeline) storeAndRebuild(snap *pipelineSnapshot) {
 	p.snapshot.Store(snap)
 
 	for _, t := range p.targets {
-		chain := buildChain(snap.entries, t.next)
-		t.chain.Store(&chain)
+		t.bind(snap)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sort"
 	"sync"
 
@@ -115,9 +116,10 @@ type Registerer interface {
 // Registry holds the active strategies keyed by Name(). Safe for concurrent
 // reads after Init; writes (Add) are serialized.
 type Registry struct {
-	mu    sync.RWMutex
-	items map[string]Authenticator
-	order []string
+	mu       sync.RWMutex
+	items    map[string]Authenticator
+	order    []string
+	onRemove func(Authenticator)
 }
 
 // NewRegistry returns an empty Registry.
@@ -163,9 +165,10 @@ func (r *Registry) Get(name string) Authenticator {
 // lookups observe either the before- or after-state, never partial.
 func (r *Registry) Remove(name string) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
-	if _, exists := r.items[name]; !exists {
+	removed, exists := r.items[name]
+	if !exists {
+		r.mu.Unlock()
 		return false
 	}
 
@@ -175,6 +178,12 @@ func (r *Registry) Remove(name string) bool {
 			r.order = append(r.order[:i], r.order[i+1:]...)
 			break
 		}
+	}
+	hook := r.onRemove
+	r.mu.Unlock()
+
+	if hook != nil {
+		hook(removed)
 	}
 
 	return true
@@ -188,7 +197,7 @@ func (r *Registry) Remove(name string) bool {
 // the input keep the first occurrence.
 func (r *Registry) Replace(strategies ...Authenticator) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	old := r.items
 
 	r.items = make(map[string]Authenticator, len(strategies))
 	r.order = r.order[:0]
@@ -207,15 +216,42 @@ func (r *Registry) Replace(strategies ...Authenticator) {
 		r.items[name] = s
 		r.order = append(r.order, name)
 	}
+	hook := r.onRemove
+	var removed []Authenticator
+	if hook != nil {
+		for name, previous := range old {
+			if current, exists := r.items[name]; !exists || !sameAuthenticator(previous, current) {
+				removed = append(removed, previous)
+			}
+		}
+	}
+	r.mu.Unlock()
+
+	for _, previous := range removed {
+		hook(previous)
+	}
 }
 
 // Clear removes every strategy. Equivalent to Replace() with no arguments.
 func (r *Registry) Clear() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.Replace()
+}
 
-	r.items = make(map[string]Authenticator)
-	r.order = r.order[:0]
+// SetRemovalHook installs a lifecycle hook invoked after a strategy is removed
+// or displaced by Replace/Clear. Configure it during setup, before concurrent
+// registry use. Auth uses this to retain owned resources for shutdown.
+func (r *Registry) SetRemovalHook(hook func(Authenticator)) {
+	r.mu.Lock()
+	r.onRemove = hook
+	r.mu.Unlock()
+}
+
+func sameAuthenticator(a, b Authenticator) bool {
+	if a == nil || b == nil || reflect.TypeOf(a) != reflect.TypeOf(b) {
+		return false
+	}
+	t := reflect.TypeOf(a)
+	return t.Comparable() && reflect.ValueOf(a).Interface() == reflect.ValueOf(b).Interface()
 }
 
 // List returns all strategies in registration order.

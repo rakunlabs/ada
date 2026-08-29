@@ -333,7 +333,7 @@ func patternParamNames(pattern string) []string {
 
 func TestMuxMatchesReference(t *testing.T) {
 	staticSegs := []string{"a", "b", "ab", "files", "v1", "users"}
-	paramNames := []string{"id", "name", "p"}
+	paramNames := []string{"id", "name", "p", "slug"}
 	methods := []string{http.MethodGet, http.MethodPost, ""} // "" = catch-all
 	reqMethods := []string{
 		http.MethodGet, http.MethodPost, http.MethodPut,
@@ -362,13 +362,13 @@ func TestMuxMatchesReference(t *testing.T) {
 				case p < 6:
 					segs = append(segs, staticSegs[rng.Intn(len(staticSegs))])
 				case p < 8:
-					segs = append(segs, "{"+paramNames[rng.Intn(len(paramNames))]+"}")
+					segs = append(segs, "{"+paramNames[d]+"}")
 				case p < 9 && !usedStar && last:
 					segs = append(segs, "*")
 					usedStar = true
 				default:
 					if last {
-						segs = append(segs, "{"+paramNames[rng.Intn(len(paramNames))]+"...}")
+						segs = append(segs, "{"+paramNames[d]+"...}")
 					} else {
 						segs = append(segs, staticSegs[rng.Intn(len(staticSegs))])
 					}

@@ -1,11 +1,23 @@
 package ada
 
 import (
+	"archive/zip"
+	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 )
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
+}
 
 func TestMuxWrap_UsesMuxErrorHandler(t *testing.T) {
 	mux := NewMux()
@@ -217,5 +229,249 @@ func TestHandleWithMethod_StaysInterfaceable(t *testing.T) {
 
 	if rec.Code != http.StatusOK || rec.Body.String() != "iface" {
 		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPooledContext_NoStateLeak pins that a Context recycled through the pool
+// carries nothing over from the request that used it before. The first request
+// dirties every mutable field (status, committed flag); the second must still
+// observe the defaults.
+func TestPooledContext_NoStateLeak(t *testing.T) {
+	mux := NewMux()
+
+	var (
+		seenCode      int
+		seenCommitted bool
+	)
+
+	mux.GET("/leak", func(c *Context) error {
+		seenCode = c.code
+		seenCommitted = c.committed
+
+		c.SetStatus(http.StatusTeapot)
+
+		return c.SendString("dirty")
+	})
+
+	for i := range 2 {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/leak", nil))
+
+		if seenCode != http.StatusOK {
+			t.Fatalf("request %d: entered handler with code %d, want %d", i, seenCode, http.StatusOK)
+		}
+		if seenCommitted {
+			t.Fatalf("request %d: entered handler already committed", i)
+		}
+		if rec.Code != http.StatusTeapot {
+			t.Fatalf("request %d: status = %d, want %d", i, rec.Code, http.StatusTeapot)
+		}
+	}
+}
+
+// TestPooledContext_ReleasedContextDropsRequest pins that returning a Context
+// to the pool clears its request and response references, so a pooled Context
+// cannot pin a finished request (and its body) in memory.
+func TestPooledContext_ReleasedContextDropsRequest(t *testing.T) {
+	var captured *Context
+
+	mux := NewMux()
+	mux.GET("/capture", func(c *Context) error {
+		captured = c
+
+		return c.SendString("ok")
+	})
+
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/capture", nil))
+
+	if captured == nil {
+		t.Fatal("handler did not run")
+	}
+	if captured.Request != nil || captured.Response != nil {
+		t.Fatal("released Context still references the request/response")
+	}
+}
+
+func TestWrapUnpooledContextRemainsValidAfterReturn(t *testing.T) {
+	mux := NewMux()
+	var captured *Context
+	handler := mux.WrapUnpooled(func(c *Context) error {
+		captured = c
+		return c.SendString("ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if captured == nil || captured.Request != req || captured.Response != rec {
+		t.Fatal("unpooled Context was cleared or replaced after return")
+	}
+}
+
+// TestPooledContext_SurvivesConcurrentRequests exercises the pool from many
+// goroutines at once; run under -race this is what catches a Context being
+// shared between two in-flight requests.
+func TestPooledContext_SurvivesConcurrentRequests(t *testing.T) {
+	mux := NewMux()
+	mux.GET("/users/{id}", func(c *Context) error {
+		return c.SendString(c.Request.PathValue("id"))
+	})
+
+	const workers = 32
+
+	var wg sync.WaitGroup
+
+	wg.Add(workers)
+
+	for i := range workers {
+		go func() {
+			defer wg.Done()
+
+			want := strconv.Itoa(i)
+
+			for range 100 {
+				rec := httptest.NewRecorder()
+				mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/"+want, nil))
+
+				if rec.Body.String() != want {
+					t.Errorf("body = %q, want %q", rec.Body.String(), want)
+
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestSendDoesNotOverrideContentType pins that the Send* helpers only supply a
+// Content-Type when the handler (or a middleware) has not already chosen one.
+// Overriding it silently broke handlers answering with a more specific media
+// type, application/problem+json above all.
+func TestSendDoesNotOverrideContentType(t *testing.T) {
+	tests := []struct {
+		name string
+		send func(c *Context) error
+		set  string
+		want string
+	}{
+		{
+			name: "json keeps explicit type",
+			send: func(c *Context) error { return c.SendJSON(map[string]string{"a": "b"}) },
+			set:  "application/problem+json",
+			want: "application/problem+json",
+		},
+		{
+			name: "json defaults when unset",
+			send: func(c *Context) error { return c.SendJSON(map[string]string{"a": "b"}) },
+			want: MIMEApplicationJSONCharsetUTF8,
+		},
+		{
+			name: "string keeps explicit type",
+			send: func(c *Context) error { return c.SendString("<p>hi</p>") },
+			set:  "text/html; charset=utf-8",
+			want: "text/html; charset=utf-8",
+		},
+		{
+			name: "string defaults when unset",
+			send: func(c *Context) error { return c.SendString("hi") },
+			want: MIMETextPlainCharsetUTF8,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := NewMux()
+			mux.GET("/ct", func(c *Context) error {
+				if tt.set != "" {
+					c.SetHeader(HeaderContentType, tt.set)
+				}
+
+				return tt.send(c)
+			})
+
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ct", nil))
+
+			if got := rec.Header().Get(HeaderContentType); got != tt.want {
+				t.Fatalf("Content-Type = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSendZipPreparationErrorRemainsUncommitted(t *testing.T) {
+	mux := NewMux()
+	mux.GET("/zip", func(c *Context) error {
+		return c.SendZip("archive.zip", map[string]io.Reader{"broken.txt": failingReader{}})
+	})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/zip", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(rec.Body.String(), "read failed") {
+		t.Fatalf("body = %q, want read error", rec.Body.String())
+	}
+}
+
+func TestSendZipAlreadyCommittedDoesNotConsumeReaders(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c := NewContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if err := c.SendString("first"); err != nil {
+		t.Fatalf("SendString: %v", err)
+	}
+
+	reader := &countingReader{Reader: strings.NewReader("archive data")}
+	if err := c.SendZip("archive.zip", map[string]io.Reader{"file.txt": reader}); !errors.Is(err, ErrAlreadyCommitted) {
+		t.Fatalf("SendZip error = %v, want ErrAlreadyCommitted", err)
+	}
+	if reader.reads != 0 {
+		t.Fatalf("already-committed SendZip consumed its reader %d times", reader.reads)
+	}
+}
+
+type countingReader struct {
+	io.Reader
+	reads int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.reads++
+	return r.Reader.Read(p)
+}
+
+func TestSendZipRejectsUnsafeEntryNames(t *testing.T) {
+	for _, name := range []string{"../secret", "/etc/passwd", `..\secret`, `C:\secret`} {
+		t.Run(name, func(t *testing.T) {
+			c := NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+			if err := c.SendZip("archive.zip", map[string]io.Reader{name: strings.NewReader("x")}); err == nil {
+				t.Fatalf("SendZip accepted unsafe entry %q", name)
+			}
+			if c.Committed() {
+				t.Fatal("Context committed after rejecting an entry name")
+			}
+		})
+	}
+}
+
+func TestSendZipUsesNormalizedSafeNames(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c := NewContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if err := c.SendZip("archive.zip", map[string]io.Reader{`dir\file.txt`: strings.NewReader("ok")}); err != nil {
+		t.Fatalf("SendZip: %v", err)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	if len(zr.File) != 1 || zr.File[0].Name != "dir/file.txt" {
+		t.Fatalf("entries = %#v, want dir/file.txt", zr.File)
 	}
 }

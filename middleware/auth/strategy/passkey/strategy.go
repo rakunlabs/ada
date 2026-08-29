@@ -39,7 +39,9 @@ type Strategy struct {
 	// store with TTL-based eviction; callers that need cluster-wide
 	// sharing (multiple ada instances behind a load balancer) can
 	// inject a shared backend by satisfying ChallengeStore.
-	store ChallengeStore
+	store      ChallengeStore
+	ownedStore bool
+	closeOnce  sync.Once
 
 	// lookup resolves a credential id to the stored credential and
 	// the corresponding identity. Wraps the RP's persistent
@@ -71,10 +73,12 @@ type Strategy struct {
 // otherwise expired challenges accumulate forever and become a DoS
 // vector. The default in-memory store evicts on access plus on a
 // background tick.
+//
+// Consume MUST atomically retrieve and remove a session so concurrent finish
+// requests cannot both verify against the same challenge.
 type ChallengeStore interface {
 	Save(ctx context.Context, sessionID string, data *SessionData) error
-	Load(ctx context.Context, sessionID string) (*SessionData, error)
-	Delete(ctx context.Context, sessionID string) error
+	Consume(ctx context.Context, sessionID string) (*SessionData, error)
 }
 
 // CredentialLookup resolves a credential id (the rawId field from
@@ -192,10 +196,13 @@ func NewStrategy(name string, w *WebAuthn, lookup CredentialLookup, opts ...Opti
 		label:  name,
 		w:      w,
 		lookup: lookup,
-		store:  newMemoryChallengeStore(),
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.store == nil {
+		s.store = newMemoryChallengeStore()
+		s.ownedStore = true
 	}
 	return s, nil
 }
@@ -290,6 +297,19 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 // there's no provider-side state to clean up.
 func (s *Strategy) Logout(_ context.Context, _ *identity.Identity) error { return nil }
 
+// Close releases resources created by the strategy. Injected challenge stores
+// are caller-owned and are not closed.
+func (s *Strategy) Close() error {
+	var err error
+	s.closeOnce.Do(func() {
+		if s.ownedStore {
+			err = s.store.(*memoryChallengeStore).Close()
+		}
+	})
+
+	return err
+}
+
 func (s *Strategy) handleBegin(w http.ResponseWriter, r *http.Request, body []byte) (*identity.Identity, strategy.Outcome, error) {
 	var req beginRequest
 	if len(body) > 0 {
@@ -368,16 +388,11 @@ func (s *Strategy) handleFinish(w http.ResponseWriter, r *http.Request, body []b
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	session, err := s.store.Load(r.Context(), req.SessionID)
+	session, err := s.store.Consume(r.Context(), req.SessionID)
 	if err != nil || session == nil {
 		writeJSONError(w, http.StatusUnauthorized, "invalid_session", "no such session")
 		return nil, strategy.OutcomeFailed, nil
 	}
-	// One-shot: delete eagerly so a replay can't reuse it even if
-	// the rest of verification fails. The challenge bytes are
-	// already in `session`.
-	_ = s.store.Delete(r.Context(), req.SessionID)
-
 	rawID, err := decodeBase64URL(req.Assertion.RawID)
 	if err != nil || len(rawID) == 0 {
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "missing rawId")
@@ -479,12 +494,15 @@ type memoryChallengeStore struct {
 	mu      sync.Mutex
 	entries map[string]*SessionData
 	stopCh  chan struct{}
+	doneCh  chan struct{}
+	closed  sync.Once
 }
 
 func newMemoryChallengeStore() *memoryChallengeStore {
 	s := &memoryChallengeStore{
 		entries: make(map[string]*SessionData),
 		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
 	}
 	go s.gc()
 	return s
@@ -497,25 +515,18 @@ func (s *memoryChallengeStore) Save(_ context.Context, id string, d *SessionData
 	return nil
 }
 
-func (s *memoryChallengeStore) Load(_ context.Context, id string) (*SessionData, error) {
+func (s *memoryChallengeStore) Consume(_ context.Context, id string) (*SessionData, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, ok := s.entries[id]
 	if !ok {
 		return nil, errors.New("not found")
 	}
+	delete(s.entries, id)
 	if d.expired(time.Now()) {
-		delete(s.entries, id)
 		return nil, errors.New("expired")
 	}
 	return d, nil
-}
-
-func (s *memoryChallengeStore) Delete(_ context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.entries, id)
-	return nil
 }
 
 // gc runs in the background, periodically evicting expired entries
@@ -525,6 +536,7 @@ func (s *memoryChallengeStore) Delete(_ context.Context, id string) error {
 func (s *memoryChallengeStore) gc() {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	defer close(s.doneCh)
 	for {
 		select {
 		case <-s.stopCh:
@@ -541,8 +553,10 @@ func (s *memoryChallengeStore) gc() {
 	}
 }
 
-// Close stops the GC goroutine. Optional — only required by
-// long-running tests that want to avoid leaked goroutines.
-func (s *memoryChallengeStore) Close() {
-	close(s.stopCh)
+// Close stops the GC goroutine and waits for it to exit.
+func (s *memoryChallengeStore) Close() error {
+	s.closed.Do(func() { close(s.stopCh) })
+	<-s.doneCh
+
+	return nil
 }

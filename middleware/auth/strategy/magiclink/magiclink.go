@@ -43,9 +43,12 @@ type Resolver func(ctx context.Context, email string) (*identity.Identity, error
 // email, never the token itself. A store is a database row or a Redis key;
 // treating a login credential the way a password is treated means a leaked
 // dump is not a stack of usable logins.
+//
+// Consume MUST atomically retrieve and remove a token so concurrent requests
+// cannot both authenticate with the same link.
 type TokenStore interface {
 	Store(ctx context.Context, token, email string, ttl time.Duration) error
-	Lookup(ctx context.Context, token string) (email string, err error)
+	Consume(ctx context.Context, token string) (email string, err error)
 	Delete(ctx context.Context, token string) error
 }
 
@@ -56,9 +59,11 @@ type Strategy struct {
 	priority int
 	hidden   bool
 
-	sender   Sender
-	resolver Resolver
-	store    TokenStore
+	sender     Sender
+	resolver   Resolver
+	store      TokenStore
+	ownedStore bool
+	closeOnce  sync.Once
 
 	tokenTTL    time.Duration
 	tokenLength int
@@ -152,6 +157,7 @@ func New(name string, sender Sender, resolver Resolver, opts ...Option) *Strateg
 
 	if s.store == nil {
 		s.store = NewMemoryStore()
+		s.ownedStore = true
 	}
 
 	return s
@@ -214,6 +220,19 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 
 // Logout is a no-op for the magic-link strategy; the issuer revokes the session.
 func (s *Strategy) Logout(_ context.Context, _ *identity.Identity) error { return nil }
+
+// Close releases resources created by the strategy. Injected token stores are
+// caller-owned and are not closed.
+func (s *Strategy) Close() error {
+	var err error
+	s.closeOnce.Do(func() {
+		if s.ownedStore {
+			err = s.store.(*MemoryStore).Close()
+		}
+	})
+
+	return err
+}
 
 // handleSendLink reads the email from the request body, generates a token,
 // stores it, builds the verify URL, calls the Sender, and writes a 200 JSON
@@ -289,15 +308,12 @@ func (s *Strategy) handleSendLink(w http.ResponseWriter, r *http.Request) (*iden
 func (s *Strategy) handleVerifyToken(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
 	hashed := hashToken(r.URL.Query().Get("token"))
 
-	email, err := s.store.Lookup(r.Context(), hashed)
+	email, err := s.store.Consume(r.Context(), hashed)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid_token", "token is invalid or expired")
 
 		return nil, strategy.OutcomeFailed, nil
 	}
-
-	// Delete the token so it cannot be reused.
-	_ = s.store.Delete(r.Context(), hashed)
 
 	if s.limiter != nil {
 		s.limiter.Succeed(strings.ToLower(email))
@@ -449,6 +465,7 @@ type MemoryStore struct {
 	entries sync.Map // map[hashedToken string]memoryEntry
 
 	stop   chan struct{}
+	done   chan struct{}
 	closed sync.Once
 }
 
@@ -457,16 +474,17 @@ type MemoryStore struct {
 // Expiry used to happen only on lookup, so a token nobody clicked — the common
 // case for an abuse run — stayed resident for the life of the process.
 func NewMemoryStore() *MemoryStore {
-	m := &MemoryStore{stop: make(chan struct{})}
+	m := &MemoryStore{stop: make(chan struct{}), done: make(chan struct{})}
 
 	go m.janitor()
 
 	return m
 }
 
-// Close stops the sweeper.
+// Close stops the sweeper and waits for it to exit.
 func (m *MemoryStore) Close() error {
 	m.closed.Do(func() { close(m.stop) })
+	<-m.done
 
 	return nil
 }
@@ -474,6 +492,7 @@ func (m *MemoryStore) Close() error {
 func (m *MemoryStore) janitor() {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
+	defer close(m.done)
 
 	for {
 		select {
@@ -501,10 +520,10 @@ func (m *MemoryStore) Store(_ context.Context, token, email string, ttl time.Dur
 	return nil
 }
 
-// Lookup retrieves the email for a token. Returns an error if the token does
-// not exist or has expired.
-func (m *MemoryStore) Lookup(_ context.Context, token string) (string, error) {
-	v, ok := m.entries.Load(token)
+// Consume atomically retrieves and removes a token. Returns an error if the
+// token does not exist or has expired.
+func (m *MemoryStore) Consume(_ context.Context, token string) (string, error) {
+	v, ok := m.entries.LoadAndDelete(token)
 	if !ok {
 		return "", fmt.Errorf("token not found")
 	}
@@ -515,8 +534,6 @@ func (m *MemoryStore) Lookup(_ context.Context, token string) (string, error) {
 	}
 
 	if time.Now().After(entry.expiresAt) {
-		m.entries.Delete(token)
-
 		return "", fmt.Errorf("token expired")
 	}
 

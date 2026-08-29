@@ -43,7 +43,7 @@ func TestMatch_WalkResult(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var res matchResult
-			mux.match(tc.path, &res)
+			mux.match(mux.routes.load(), tc.path, &res)
 
 			if got := res.node != nil; got != tc.matched {
 				t.Fatalf("matched = %v, want %v", got, tc.matched)
@@ -66,6 +66,55 @@ func TestMatch_WalkResult(t *testing.T) {
 				t.Errorf("wildcardOffset = %d, want %d", res.wildcardOffset, tc.wildcardOffset)
 			}
 		})
+	}
+}
+
+func TestRoutePatternRejectsMalformedSegments(t *testing.T) {
+	patterns := []string{
+		"/docs/v{id}",
+		"/x/{",
+		"/x/}",
+		"/x/{}",
+		"/x/{...}",
+		"/x/{id}}",
+		"/x/{{id}",
+		"/x/{*}",
+		"/x/{*...}",
+		"/{id}/{id}",
+	}
+
+	for _, pattern := range patterns {
+		t.Run(pattern, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("registering malformed pattern %q did not panic", pattern)
+				}
+			}()
+
+			NewMux().GET(pattern, func(http.ResponseWriter, *http.Request) {})
+		})
+	}
+}
+
+func TestEmptyWildcardPathTargetsMuxRoot(t *testing.T) {
+	mux := NewMux()
+	mux.HandleFuncWildcard("", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.PathValue("*")))
+	})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/a/b", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "a/b" {
+		t.Fatalf("status = %d body = %q, want 200 / a/b", rec.Code, rec.Body.String())
+	}
+
+	if !mux.RemoveWildcard("") {
+		t.Fatal("RemoveWildcard did not remove the root wildcard")
+	}
+
+	if code, _ := statusOf(t, mux, http.MethodGet, "/a/b"); code != http.StatusNotFound {
+		t.Fatalf("status after removal = %d, want 404", code)
 	}
 }
 

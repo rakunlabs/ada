@@ -763,15 +763,16 @@ func TestMux(t *testing.T) {
 
 func TestInsertStatic(t *testing.T) {
 	mux := NewMux()
-	mux.root.insertNodeTypeStatic("static")
-	mux.root.insertNodeTypeStatic("stat")
-	mux.root.insertNodeTypeStatic("alpha")
+	root := mux.routes.live
+	root.insertNodeTypeStatic("static")
+	root.insertNodeTypeStatic("stat")
+	root.insertNodeTypeStatic("alpha")
 
-	if mux.root.StaticKey != "" {
-		t.Errorf("expected root.StaticKey to be '', got '%s'", mux.root.StaticKey)
+	if root.StaticKey != "" {
+		t.Errorf("expected root.StaticKey to be '', got '%s'", root.StaticKey)
 	}
 
-	for _, c := range mux.root.StaticChildren {
+	for _, c := range root.StaticChildren {
 		switch c.char {
 		case 's':
 			node := c.node

@@ -15,25 +15,37 @@ const registryKey ctxKey = iota
 // Store.Get calls return the same instance and Save can flush them all at once.
 type Registry struct {
 	mu       sync.Mutex
-	sessions map[string]*Session
+	sessions map[sessionKey]registryEntry
+}
+
+type sessionKey struct {
+	store Store
+	name  string
+}
+
+type registryEntry struct {
+	session *Session
+	err     error
 }
 
 func newRegistry() *Registry {
-	return &Registry{sessions: make(map[string]*Session)}
+	return &Registry{sessions: make(map[sessionKey]registryEntry)}
 }
 
-func (reg *Registry) get(name string) *Session {
+func (reg *Registry) get(store Store, name string) (*Session, error, bool) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 
-	return reg.sessions[name]
+	entry, ok := reg.sessions[sessionKey{store: store, name: name}]
+
+	return entry.session, entry.err, ok
 }
 
-func (reg *Registry) set(name string, s *Session) {
+func (reg *Registry) set(store Store, name string, s *Session, err error) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 
-	reg.sessions[name] = s
+	reg.sessions[sessionKey{store: store, name: name}] = registryEntry{session: s, err: err}
 }
 
 // NewContext returns a copy of ctx carrying a fresh, empty session registry.
@@ -71,8 +83,8 @@ func Save(r *http.Request, w http.ResponseWriter) error {
 	defer reg.mu.Unlock()
 
 	var errs []error
-	for _, s := range reg.sessions {
-		if err := s.store.Save(r, w, s); err != nil {
+	for _, entry := range reg.sessions {
+		if err := entry.session.store.Save(r, w, entry.session); err != nil {
 			errs = append(errs, err)
 		}
 	}

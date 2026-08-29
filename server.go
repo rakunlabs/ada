@@ -28,11 +28,12 @@ type Server struct {
 	// about to run; Stop must not touch them before that. stopping records
 	// a Stop that arrived while start was still binding, so start can back
 	// out instead of serving a socket nobody wants.
-	m        sync.Mutex
-	server   *http.Server
-	listener net.Listener
-	started  bool
-	stopping bool
+	m          sync.Mutex
+	server     *http.Server
+	listener   net.Listener
+	started    bool
+	stopping   bool
+	generation uint64
 }
 
 func NewWithFunc(ctx context.Context, fn func(ctx context.Context, mux *Mux) error, opts ...Option) (*Server, error) {
@@ -82,6 +83,8 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 
 	s.started = true
 	s.stopping = false
+	s.generation++
+	generation := s.generation
 	s.m.Unlock()
 
 	defer func() {
@@ -136,11 +139,15 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 	}
 
 	if opt.Context != nil {
-		context.AfterFunc(opt.Context, func() {
-			if err := s.Stop(); err != nil {
+		stopAfter := context.AfterFunc(opt.Context, func() {
+			if err := s.stopGeneration(generation); err != nil {
 				s.logger.Error("error stopping server", "error", err)
 			}
 		})
+		// A Server can be started again after Serve returns. Deregister this
+		// run's callback before start's state cleanup makes the Server
+		// reusable, otherwise cancelling an old context can stop a later run.
+		defer stopAfter()
 	}
 
 	s.logger.Info("server started", "addr", listener.Addr().String())
@@ -156,9 +163,16 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 // shutdown timeout for in-flight requests to finish.
 //   - Safe to call before Start, concurrently with Start, and more than once.
 func (s *Server) Stop() error {
+	return s.stopGeneration(0)
+}
+
+// stopGeneration stops the current run when generation is zero, or only the
+// specified run otherwise. Context callbacks use the latter form so a delayed
+// callback from a completed run cannot stop a restarted Server.
+func (s *Server) stopGeneration(generation uint64) error {
 	s.m.Lock()
 
-	if !s.started {
+	if !s.started || (generation != 0 && s.generation != generation) {
 		s.m.Unlock()
 
 		return nil

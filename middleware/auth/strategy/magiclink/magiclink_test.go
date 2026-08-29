@@ -120,7 +120,7 @@ func TestTokenIsStoredHashed(t *testing.T) {
 
 	sendLink(t, s, "alice@example.com")
 
-	if _, err := store.Lookup(context.Background(), c.token); err == nil {
+	if _, err := store.Consume(context.Background(), c.token); err == nil {
 		t.Fatal("the raw token must not be a key in the store")
 	}
 }
@@ -162,6 +162,75 @@ func TestTokenIsSingleUse(t *testing.T) {
 	second := httptest.NewRequest(http.MethodGet, c.url, nil)
 	if _, outcome, _ := s.Login(httptest.NewRecorder(), second); outcome != strategy.OutcomeFailed {
 		t.Fatal("a magic link must not work twice")
+	}
+}
+
+func TestTokenConcurrentConsumptionIsAtomic(t *testing.T) {
+	s, c, _ := newStrategy(t)
+	s.SetCallbackBasePath("/auth/login/callback")
+	sendLink(t, s, "alice@example.com")
+
+	const requests = 32
+	start := make(chan struct{})
+	outcomes := make(chan strategy.Outcome, requests)
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			r := httptest.NewRequest(http.MethodGet, c.url, nil)
+			_, outcome, _ := s.Login(httptest.NewRecorder(), r)
+			outcomes <- outcome
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(outcomes)
+
+	succeeded := 0
+	for outcome := range outcomes {
+		if outcome == strategy.OutcomeContinue {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("successful concurrent uses = %d, want 1", succeeded)
+	}
+}
+
+type trackingStore struct {
+	*magiclink.MemoryStore
+	closes int
+}
+
+func (s *trackingStore) Close() error {
+	s.closes++
+	return s.MemoryStore.Close()
+}
+
+func TestStrategyCloseOwnsOnlyDefaultStore(t *testing.T) {
+	custom := &trackingStore{MemoryStore: magiclink.NewMemoryStore()}
+	t.Cleanup(func() { _ = custom.MemoryStore.Close() })
+
+	s := magiclink.New("mail", (&capture{}).send, resolver, magiclink.WithTokenStore(custom))
+	if err := s.Close(); err != nil {
+		t.Fatalf("close custom strategy: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second close custom strategy: %v", err)
+	}
+	if custom.closes != 0 {
+		t.Fatalf("custom store closed %d times, want 0", custom.closes)
+	}
+
+	owned := magiclink.New("owned", (&capture{}).send, resolver)
+	if err := owned.Close(); err != nil {
+		t.Fatalf("close default strategy: %v", err)
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatalf("second close default strategy: %v", err)
 	}
 }
 

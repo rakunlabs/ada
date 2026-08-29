@@ -109,8 +109,8 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 
 			meter.Record(ctx, MetricData{
 				Request:              r,
-				ResponseSize:         bw.BytesRead(),
-				RequestSize:          m.Written,
+				RequestSize:          bw.BytesRead(),
+				ResponseSize:         m.Written,
 				ElapsedTime:          float64(time.Since(requestStartTime)) / float64(time.Millisecond),
 				StatusCode:           m.Code,
 				AdditionalAttributes: labelerAttrs,
