@@ -2,8 +2,10 @@ package browser
 
 import (
 	"fmt"
+	"html"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 
@@ -11,7 +13,6 @@ import (
 
 	_ "github.com/rytsh/mugo/fstore/registry/cast"
 	_ "github.com/rytsh/mugo/fstore/registry/codec"
-	_ "github.com/rytsh/mugo/fstore/registry/html2"
 	_ "github.com/rytsh/mugo/fstore/registry/humanize"
 	_ "github.com/rytsh/mugo/fstore/registry/minify"
 	_ "github.com/rytsh/mugo/fstore/registry/sprig"
@@ -28,7 +29,7 @@ func init() {
 func Browser(w http.ResponseWriter, r *http.Request, opt folder.BrowserOption) error {
 	dirs, err := opt.Folder.Readdir(-1)
 	if err != nil {
-		return fmt.Errorf("Error reading directory")
+		return fmt.Errorf("error reading directory: %w", err)
 	}
 	folderDirs := []fs.FileInfo{}
 	folderFiles := []fs.FileInfo{}
@@ -48,10 +49,22 @@ func Browser(w http.ResponseWriter, r *http.Request, opt folder.BrowserOption) e
 	sort.Slice(folderFiles, sortTable(sortField, sortDesc, folderFiles))
 
 	dirs = append(folderDirs, folderFiles...)
+	entries := make([]browserEntry, 0, len(dirs))
+	for _, entry := range dirs {
+		href := "./" + url.PathEscape(entry.Name())
+		if entry.IsDir() {
+			href += "/"
+		}
+		entries = append(entries, browserEntry{
+			FileInfo: entry,
+			NameHTML: html.EscapeString(entry.Name()),
+			HrefHTML: html.EscapeString(href),
+		})
+	}
 
 	values := map[string]any{
 		"basePath":  opt.BasePath,
-		"dirs":      dirs,
+		"dirs":      entries,
 		"url":       r.URL.Path,
 		"utc":       opt.UTC,
 		"sortField": sortField,
@@ -108,7 +121,7 @@ table tr:hover a, th a {
 	{{- end }}
 	{{- range .dirs }}
 	<tr>
-		<td>{{ ternary "📁" "📄" .IsDir }} <a href="./{{ .Name }}{{ ternary "/" "" .IsDir }}" {{ ternary "" "download" .IsDir }}>{{ html2.EscapeString .Name }}{{ ternary "/" "" .IsDir }}</a></td>
+		<td>{{ ternary "📁" "📄" .IsDir }} <a href="{{ .HrefHTML }}" {{ ternary "" "download" .IsDir }}>{{ .NameHTML }}{{ ternary "/" "" .IsDir }}</a></td>
 		<td>{{ .Size | cast.ToUint64 | humanize.Bytes }}</td>
 		<td>{{ time.Format time.RFC3339 (ternary (time.UTC .ModTime) .ModTime $.utc) }}</td>
 	</tr>
@@ -131,6 +144,12 @@ table tr:hover a, th a {
 	_, err = w.Write(v)
 
 	return err
+}
+
+type browserEntry struct {
+	fs.FileInfo
+	NameHTML string
+	HrefHTML string
 }
 
 func sortTable(sortField string, sortDesc bool, fs []fs.FileInfo) func(i, j int) bool {

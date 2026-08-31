@@ -24,15 +24,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
+	"github.com/rakunlabs/ada/utils/proxy"
 )
 
 // ErrNoUserHeader is returned when the configured user header is missing or
@@ -85,9 +83,10 @@ type Strategy struct {
 	hidden    bool
 	headerMap HeaderMap
 
-	trustedProxies []*net.IPNet
+	trustedProxies *proxy.Policy
 	secretHeader   string
 	secretValue    string
+	unsafeTrustAll bool
 }
 
 // Option configures a Strategy.
@@ -125,13 +124,13 @@ func WithHeaderMap(m HeaderMap) Option {
 // The peer address is r.RemoteAddr, never X-Forwarded-For — an attacker sets
 // that as easily as the header it is supposed to guard.
 func WithTrustedProxies(cidrs ...string) Option {
-	return func(s *Strategy) {
-		nets, err := guard.ParseCIDRs(cidrs)
-		if err != nil {
-			panic(fmt.Errorf("header: trusted proxies: %w", err))
-		}
+	policy, err := proxy.New(cidrs...)
+	if err != nil {
+		panic(fmt.Errorf("header: trusted proxies: %w", err))
+	}
 
-		s.trustedProxies = nets
+	return func(s *Strategy) {
+		s.trustedProxies = &policy
 	}
 }
 
@@ -142,17 +141,32 @@ func WithTrustedProxies(cidrs ...string) Option {
 // time. It is a weaker control than WithTrustedProxies and composes with it.
 func WithSharedSecret(headerName, value string) Option {
 	return func(s *Strategy) {
-		s.secretHeader = headerName
+		if !validHeaderName(headerName) {
+			panic(fmt.Errorf("header: shared secret header name %q is invalid", headerName))
+		}
+		if !validHeaderValue(value) || strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
+			panic(fmt.Errorf("header: shared secret value must be a non-empty HTTP header value"))
+		}
+
+		s.secretHeader = http.CanonicalHeaderKey(headerName)
 		s.secretValue = value
 	}
 }
 
+// WithUnsafeTrustAll permits every caller to supply identity headers. It
+// restores the legacy behavior for deployments with a separately enforced
+// network boundary, but cannot verify that such a boundary exists.
+//
+// Prefer WithTrustedProxies, WithSharedSecret, or both.
+func WithUnsafeTrustAll() Option {
+	return func(s *Strategy) { s.unsafeTrustAll = true }
+}
+
 // New returns a header-auth strategy with the given name.
 //
-// With neither WithTrustedProxies nor WithSharedSecret, the strategy accepts
-// whatever the caller claims. It logs a warning once at construction rather
-// than refusing, because a genuinely closed network is a legitimate
-// deployment — but silence would have been the wrong default.
+// With neither WithTrustedProxies nor WithSharedSecret, the strategy fails
+// closed. Deployments whose trust boundary is enforced entirely outside the
+// process must opt into the legacy behavior with WithUnsafeTrustAll.
 func New(name string, opts ...Option) *Strategy {
 	s := &Strategy{
 		name:      name,
@@ -163,13 +177,6 @@ func New(name string, opts ...Option) *Strategy {
 
 	for _, opt := range opts {
 		opt(s)
-	}
-
-	if len(s.trustedProxies) == 0 && s.secretValue == "" {
-		slog.Warn("header strategy has no trust boundary; any client that can reach this endpoint can claim any identity",
-			"strategy", name,
-			"hint", "set WithTrustedProxies or WithSharedSecret",
-		)
 	}
 
 	return s
@@ -184,27 +191,40 @@ func (s *Strategy) trusted(r *http.Request) bool {
 		}
 	}
 
-	if len(s.trustedProxies) == 0 {
-		return true
+	if s.trustedProxies == nil {
+		return s.secretValue != "" || s.unsafeTrustAll
 	}
 
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
+	return s.trustedProxies.TrustedPeer(r)
+}
 
-	ip := net.ParseIP(host)
-	if ip == nil {
+func validHeaderName(name string) bool {
+	if name == "" {
 		return false
 	}
 
-	for _, n := range s.trustedProxies {
-		if n.Contains(ip) {
-			return true
+	for i := range len(name) {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		if !strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c)) {
+			return false
 		}
 	}
 
-	return false
+	return true
+}
+
+func validHeaderValue(value string) bool {
+	for i := range len(value) {
+		c := value[i]
+		if c == '\r' || c == '\n' || c == 0x7f || (c < 0x20 && c != '\t') {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Name returns the strategy's URL key.

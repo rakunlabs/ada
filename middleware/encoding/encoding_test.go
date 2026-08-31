@@ -181,7 +181,11 @@ func responseBody(t *testing.T, recorder *httptest.ResponseRecorder) string {
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v", err)
 	}
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("close gzip reader: %v", err)
+		}
+	}()
 	body, err := io.ReadAll(reader)
 	if err != nil {
 		t.Fatalf("read gzip body: %v", err)

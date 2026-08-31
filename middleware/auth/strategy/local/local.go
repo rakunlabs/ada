@@ -110,12 +110,12 @@ func WithHidden() Option {
 // key for parsing.
 func WithFields(fields ...strategy.Field) Option {
 	return func(s *Strategy) {
-		s.fields = fields
-		if len(fields) >= 1 {
-			s.usernameField = fields[0].Name
+		s.fields = append([]strategy.Field(nil), fields...)
+		if len(s.fields) >= 1 {
+			s.usernameField = s.fields[0].Name
 		}
-		if len(fields) >= 2 {
-			s.passwordField = fields[1].Name
+		if len(s.fields) >= 2 {
+			s.passwordField = s.fields[1].Name
 		}
 	}
 }
@@ -146,7 +146,7 @@ func WithRegistrar(fn Registrar) Option {
 // the password field and a mismatch yields 400 password_mismatch; the value
 // is never forwarded to the Registrar.
 func WithRegisterFields(fields ...strategy.Field) Option {
-	return func(s *Strategy) { s.registerFields = fields }
+	return func(s *Strategy) { s.registerFields = append([]strategy.Field(nil), fields...) }
 }
 
 // WithAutoLogin, when true, issues a session immediately after a successful
@@ -188,7 +188,7 @@ func (s *Strategy) Descriptor() strategy.Descriptor {
 		Label: s.label,
 		// LoginURL is resolved by the auth middleware from cfg.Base; leave
 		// it empty here so there is a single source of truth.
-		Fields:   s.fields,
+		Fields:   append([]strategy.Field(nil), s.fields...),
 		Priority: s.priority,
 		Hidden:   s.hidden,
 	}
@@ -196,7 +196,7 @@ func (s *Strategy) Descriptor() strategy.Descriptor {
 	if s.register != nil {
 		d.Register = &strategy.RegisterInfo{
 			// URL is resolved by the auth middleware from cfg.Base.
-			Fields: s.effectiveRegisterFields(),
+			Fields: append([]strategy.Field(nil), s.effectiveRegisterFields()...),
 		}
 	}
 

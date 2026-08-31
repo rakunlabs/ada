@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 
@@ -51,10 +53,26 @@ func (m *Mux) handleContextError(c *Context, err error) {
 	defaultErrHandler(c, err)
 }
 
+// defaultErrHandler runs when neither the Mux nor the package has a handler
+// able to write the response.
+//
+// DefaultErrHandler is a package variable, so it can be nil — an application
+// that clears it used to get a 200 with an empty body, because nothing wrote
+// anything and net/http defaults the status. The failure was reported to the
+// client as a success. The fallback writes the already-normalised status
+// instead, so a nil handler degrades to a bare status line rather than a lie.
 func defaultErrHandler(c *Context, err error) {
 	if DefaultErrHandler != nil {
 		DefaultErrHandler(c, err)
+
+		return
 	}
+
+	if !c.commit() {
+		return
+	}
+
+	http.Error(c.Response, http.StatusText(c.code), c.code)
 }
 
 // contextPool recycles the per-request Context. A Context is three words plus
@@ -169,12 +187,16 @@ func (c *Context) Committed() bool {
 
 // prepareError normalises the status before the error handler runs, so an
 // error can never be reported with a 2xx.
-//   - An HTTPError anywhere in the chain supplies the status.
+//   - An HTTPError anywhere in the chain supplies the status, but only when its
+//     Code is itself an error status (>= 400). A zero, 1xx, 2xx or 3xx Code is
+//     not a way to report a failure — NewHTTPError(http.StatusOK, ...) used to
+//     answer 200 with an error body — so those fall through to the promotion
+//     below.
 //   - Otherwise a status below 400 is promoted to 500; an explicit 4xx/5xx
 //     already set with SetStatus is preserved.
 func (c *Context) prepareError(err error) {
 	var httpErr *HTTPError
-	if errors.As(err, &httpErr) && httpErr.Code != 0 {
+	if errors.As(err, &httpErr) && httpErr.Code >= 400 {
 		c.code = httpErr.Code
 
 		return
@@ -187,8 +209,10 @@ func (c *Context) prepareError(err error) {
 
 // Bind binds the request data to the provided struct based on content type and struct tags.
 //   - The obj parameter must be a pointer.
-func (c *Context) Bind(obj any) error {
-	return bind.Bind(c.Request, obj)
+//   - Options are forwarded to bind.Bind, so a handler can opt out of the
+//     package defaults per request, e.g. c.Bind(&obj, bind.WithBodyLimit(0)).
+func (c *Context) Bind(obj any, opts ...bind.Option) error {
+	return bind.Bind(c.Request, obj, opts...)
 }
 
 // SetHeader sets a response header.
@@ -241,17 +265,32 @@ func (c *Context) SendJSON(data any) error {
 
 // SendJSONP sends a json pretty-printed response.
 func (c *Context) SendJSONP(data any, indent string) error {
+	if c.Committed() {
+		return ErrAlreadyCommitted
+	}
+
+	var (
+		body []byte
+		err  error
+	)
+	if indent == "" {
+		body, err = json.Marshal(data)
+	} else {
+		body, err = json.MarshalIndent(data, "", indent)
+	}
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
 	if !c.commit() {
 		return ErrAlreadyCommitted
 	}
 
 	c.contentType(MIMEApplicationJSONCharsetUTF8)
 	c.Response.WriteHeader(c.code)
+	_, err = c.Response.Write(body)
 
-	encoder := json.NewEncoder(c.Response)
-	encoder.SetIndent("", indent)
-
-	return encoder.Encode(data)
+	return err
 }
 
 func (c *Context) SendJSONRaw(data io.Reader) error {
@@ -322,6 +361,11 @@ func (c *Context) SendFile(name string, reader io.Reader) error {
 
 // SendZip sends files to the client as a zip file.
 //   - If name is empty, defaults to "files.zip".
+//   - Entries are written in ascending order of their map key, so the same
+//     input always produces the same archive. Ranging over the map directly
+//     made the byte stream depend on Go's randomised map order, which breaks
+//     checksums, caching and byte-for-byte comparisons between two responses
+//     built from identical data.
 func (c *Context) SendZip(name string, files map[string]io.Reader) error {
 	if c.Committed() {
 		return ErrAlreadyCommitted
@@ -335,7 +379,9 @@ func (c *Context) SendZip(name string, files map[string]io.Reader) error {
 	buf := &bytes.Buffer{}
 	zipWriter := zip.NewWriter(buf)
 
-	for filename, reader := range files {
+	for _, filename := range slices.Sorted(maps.Keys(files)) {
+		reader := files[filename]
+
 		entryName, err := cleanZipEntryName(filename)
 		if err != nil {
 			_ = zipWriter.Close()
@@ -345,13 +391,13 @@ func (c *Context) SendZip(name string, files map[string]io.Reader) error {
 
 		fileWriter, err := zipWriter.Create(entryName)
 		if err != nil {
-			zipWriter.Close()
+			_ = zipWriter.Close()
 
 			return fmt.Errorf("failed to create zip entry for %s: %w", filename, err)
 		}
 		_, err = io.Copy(fileWriter, reader)
 		if err != nil {
-			zipWriter.Close()
+			_ = zipWriter.Close()
 
 			return fmt.Errorf("failed to copy data for %s: %w", filename, err)
 		}

@@ -274,7 +274,7 @@ func (r *Registry) Descriptors() []Descriptor {
 
 	out := make([]Descriptor, 0, len(all))
 	for _, s := range all {
-		d := s.Descriptor()
+		d := cloneDescriptor(s.Descriptor())
 		if d.Hidden {
 			continue
 		}
@@ -290,4 +290,15 @@ func (r *Registry) Descriptors() []Descriptor {
 	})
 
 	return out
+}
+
+func cloneDescriptor(d Descriptor) Descriptor {
+	d.Fields = append([]Field(nil), d.Fields...)
+	if d.Register != nil {
+		register := *d.Register
+		register.Fields = append([]Field(nil), d.Register.Fields...)
+		d.Register = &register
+	}
+
+	return d
 }

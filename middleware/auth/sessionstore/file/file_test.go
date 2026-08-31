@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,6 +57,101 @@ func TestDirectRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAtomicTransactionAcrossStoreInstances(t *testing.T) {
+	first, dir := newStore(t)
+	second, err := file.New(file.Config{
+		SessionKey: "0123456789abcdef0123456789abcdef",
+		Path:       dir,
+		GCInterval: -1,
+	}, sessionstore.Options{Path: "/", MaxAge: 3600})
+	if err != nil {
+		t.Fatalf("second store: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	firstAtomic, ok := any(first).(sessionstore.AtomicDirectStore)
+	if !ok {
+		t.Skip("atomic file transactions are not available on this platform")
+	}
+	secondAtomic := any(second).(sessionstore.AtomicDirectStore)
+	if err := first.SaveByID(context.Background(), "atomic", map[string]any{"count": 0}, time.Hour); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	const updates = 50
+	var wg sync.WaitGroup
+	errs := make(chan error, updates)
+	for i := range updates {
+		store := firstAtomic
+		if i%2 != 0 {
+			store = secondAtomic
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.TransactByID(context.Background(), "atomic", time.Hour,
+				func(current map[string]any) (map[string]any, bool, error) {
+					count := 0
+					switch value := current["count"].(type) {
+					case int:
+						count = value
+					case float64:
+						count = int(value)
+					}
+					current["count"] = count + 1
+
+					return current, true, nil
+				})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("transaction: %v", err)
+		}
+	}
+
+	values, err := first.LoadByID(context.Background(), "atomic")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := int(values["count"].(float64)); got != updates {
+		t.Fatalf("count = %d, want %d", got, updates)
+	}
+}
+
+func TestTransactionLockFilesAreBounded(t *testing.T) {
+	s, dir := newStore(t)
+	atomic, ok := any(s).(sessionstore.AtomicDirectStore)
+	if !ok {
+		t.Skip("atomic file transactions are not available on this platform")
+	}
+
+	const sessions = 128
+	for i := range sessions {
+		id := "bounded-" + strconv.Itoa(i)
+		if err := s.SaveByID(context.Background(), id, map[string]any{"value": i}, time.Hour); err != nil {
+			t.Fatalf("save %q: %v", id, err)
+		}
+		if _, err := atomic.TransactByID(context.Background(), id, time.Hour,
+			func(map[string]any) (map[string]any, bool, error) {
+				return nil, false, nil
+			}); err != nil {
+			t.Fatalf("transaction %q: %v", id, err)
+		}
+	}
+
+	locks, err := filepath.Glob(filepath.Join(dir, ".transaction-*.lock"))
+	if err != nil {
+		t.Fatalf("glob transaction locks: %v", err)
+	}
+	if len(locks) > 64 {
+		t.Fatalf("transaction lock files = %d, want at most 64", len(locks))
+	}
+}
+
 func TestLoadMissingIsErrNoSession(t *testing.T) {
 	s, _ := newStore(t)
 
@@ -79,6 +177,96 @@ func TestDeleteByID(t *testing.T) {
 	// Deleting twice is not an error.
 	if err := s.DeleteByID(ctx, "sid"); err != nil {
 		t.Fatalf("second delete: %v", err)
+	}
+}
+
+func TestDeleteByIDPropagatesRemoveError(t *testing.T) {
+	s, dir := newStore(t)
+	target := filepath.Join(dir, "session_blocked-delete.json")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("create blocking directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "child"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("create blocking child: %v", err)
+	}
+
+	if err := s.DeleteByID(context.Background(), "blocked-delete"); err == nil {
+		t.Fatal("DeleteByID() unexpectedly ignored remove error")
+	}
+}
+
+func TestMissingDirectorySaveFailsAndDeleteSucceeds(t *testing.T) {
+	s, dir := newStore(t)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SaveByID(context.Background(), "missing", map[string]any{"value": "lost"}, time.Hour); err == nil {
+		t.Fatal("SaveByID() unexpectedly succeeded without a store directory")
+	}
+	if err := s.DeleteByID(context.Background(), "missing"); err != nil {
+		t.Fatalf("DeleteByID() error = %v, want missing path to be successful", err)
+	}
+}
+
+func TestSaveDeletionPropagatesRemoveError(t *testing.T) {
+	s, dir := newStore(t)
+	target := filepath.Join(dir, "session_blocked-save-delete.json")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("create blocking directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "child"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("create blocking child: %v", err)
+	}
+
+	session, err := s.Get(httptest.NewRequest(http.MethodGet, "/", nil), "auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.ID = "blocked-save-delete"
+	session.Options.MaxAge = -1
+	recorder := httptest.NewRecorder()
+	err = s.Save(httptest.NewRequest(http.MethodGet, "/", nil), recorder, session)
+	if err == nil {
+		t.Fatal("Save() unexpectedly ignored remove error")
+	}
+	if cookie := recorder.Header().Get("Set-Cookie"); !strings.Contains(cookie, "auth=") || !strings.Contains(cookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want deletion tombstone", cookie)
+	}
+}
+
+func TestTransactionPropagatesDeleteError(t *testing.T) {
+	s, dir := newStore(t)
+	atomic, ok := any(s).(sessionstore.AtomicDirectStore)
+	if !ok {
+		t.Skip("atomic file transactions are not available on this platform")
+	}
+	ctx := context.Background()
+	if err := s.SaveByID(ctx, "blocked-transaction-delete", map[string]any{"value": "original"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "session_blocked-transaction-delete.json")
+
+	var setupErr error
+	_, err := atomic.TransactByID(ctx, "blocked-transaction-delete", time.Hour,
+		func(map[string]any) (map[string]any, bool, error) {
+			if setupErr = os.Remove(target); setupErr != nil {
+				return nil, false, setupErr
+			}
+			if setupErr = os.Mkdir(target, 0o700); setupErr != nil {
+				return nil, false, setupErr
+			}
+			if setupErr = os.WriteFile(filepath.Join(target, "child"), []byte("x"), 0o600); setupErr != nil {
+				return nil, false, setupErr
+			}
+
+			return nil, true, nil
+		})
+	if setupErr != nil {
+		t.Fatalf("set up delete failure: %v", setupErr)
+	}
+	if err == nil {
+		t.Fatal("TransactByID() unexpectedly ignored delete error")
 	}
 }
 
@@ -132,6 +320,10 @@ func TestPathTraversalIsRefused(t *testing.T) {
 		if _, err := s.LoadByID(ctx, id); !errors.Is(err, sessionstore.ErrNoSession) {
 			t.Errorf("LoadByID(%q) = %v", id, err)
 		}
+
+		if err := s.DeleteByID(ctx, id); err == nil {
+			t.Errorf("DeleteByID(%q) should have been refused", id)
+		}
 	}
 
 	entries, _ := os.ReadDir(dir)
@@ -178,6 +370,32 @@ func TestHTTPRoundTrip(t *testing.T) {
 
 	if got.IsNew || got.Values["k"] != "v" {
 		t.Fatalf("session did not round-trip: %+v", got)
+	}
+}
+
+func TestGetClonesOptionsPerSession(t *testing.T) {
+	s, _ := newStore(t)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	first, err := s.Get(r, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Get(r, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Options == second.Options {
+		t.Fatal("sessions share an options pointer")
+	}
+
+	first.Options.MaxAge = -1
+	third, err := s.Get(r, "third")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Options.MaxAge != 3600 || third.Options.MaxAge != 3600 {
+		t.Fatalf("mutating one session changed defaults: second=%d third=%d", second.Options.MaxAge, third.Options.MaxAge)
 	}
 }
 

@@ -56,7 +56,7 @@ func handleError(w http.ResponseWriter, err error) {
 	} else {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(response{
-			Message: err.Error(),
+			Message: http.StatusText(http.StatusInternalServerError),
 		})
 	}
 }

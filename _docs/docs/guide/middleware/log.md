@@ -15,10 +15,32 @@ Add middleware to directly mux, group or handle; usually placed in the top of th
 mlog.Middleware()
 ```
 
+By default, `remote_ip` is the immediate peer from `r.RemoteAddr`. Forwarding
+headers such as `X-Forwarded-For`, `X-Real-IP`, and `True-Client-IP` are ignored
+so a direct client cannot spoof the logged address.
+
+When Ada is behind a reverse proxy, list the proxy networks explicitly:
+
+```go
+mlog.Middleware(
+    mlog.WithTrustedProxies("10.0.0.0/8", "fd00::/8"),
+)
+```
+
+Only a matching immediate peer may supply forwarding headers. Ensure that the
+proxy overwrites incoming forwarding headers rather than appending untrusted
+values. `mlog.WithUnsafeProxyHeaders()` restores the old trust-all behavior for
+compatibility, but should only be used when an external network boundary is
+already enforced.
+
+The same rules apply to the helpers: `mlog.RealIP` ignores forwarding headers,
+while `mlog.TrustedRealIP(cidrs...)` returns a helper with an explicit proxy
+policy.
+
 Example output:
 
 ```sh
-2025-11-01 18:35:33 CET DBG log/log.go:101 request user="" route=/ request_id=01K907T8BP43F4S0M30QE37J07 remote_ip=[::1]:34186 host=localhost:8080 method=GET uri=/ user_agent=Mozilla/5.0 status=200 latency=276713 latency_human=276.713µs bytes_in="" bytes_out=29
+2025-11-01 18:35:33 CET DBG log/log.go:101 request user="" route=/ request_id=01K907T8BP43F4S0M30QE37J07 remote_ip=::1 host=localhost:8080 method=GET uri=/ user_agent=Mozilla/5.0 status=200 latency=276713 latency_human=276.713µs bytes_in="" bytes_out=29
 ```
 
 ## Configuration

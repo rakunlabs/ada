@@ -7,6 +7,7 @@ import (
 	"github.com/felixge/httpsnoop"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/semconv/v1.34.0/httpconv"
@@ -60,12 +61,16 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 			}
 
 			requestStartTime := time.Now()
+			var metricAttrs []attribute.KeyValue
+			if cfg.MetricAttributesFn != nil {
+				metricAttrs = cfg.MetricAttributesFn(r)
+			}
 
 			ctx := r.Context()
 
 			ctx = cfg.Propagators.Extract(ctx, propagation.HeaderCarrier(r.Header))
 			opts := []trace.SpanStartOption{
-				trace.WithAttributes(RequestTraceAttrs(r)...),
+				trace.WithAttributes(requestTraceAttrs(r, cfg.proxyPolicy, cfg.unsafeProxyHeader)...),
 				trace.WithSpanKind(trace.SpanKindServer),
 			}
 
@@ -92,12 +97,15 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 				ctx = otelhttp.ContextWithLabeler(ctx, labeler)
 			}
 
-			labelerAttrs := labeler.Get()
-
-			meter.requestActive.Add(ctx, 1, httpconv.RequestMethodAttr(r.Method), r.URL.Scheme, labelerAttrs...)
-			defer meter.requestActive.Add(ctx, -1, httpconv.RequestMethodAttr(r.Method), r.URL.Scheme, labelerAttrs...)
+			requestScheme := serverScheme(r)
+			meter.requestActive.Add(ctx, 1, httpconv.RequestMethodAttr(r.Method), requestScheme, metricAttrs...)
+			defer meter.requestActive.Add(ctx, -1, httpconv.RequestMethodAttr(r.Method), requestScheme, metricAttrs...)
 
 			m := httpsnoop.CaptureMetrics(next, w, r.WithContext(ctx))
+			labelerAttrs := labeler.Get()
+			completedMetricAttrs := make([]attribute.KeyValue, 0, len(metricAttrs)+len(labelerAttrs))
+			completedMetricAttrs = append(completedMetricAttrs, metricAttrs...)
+			completedMetricAttrs = append(completedMetricAttrs, labelerAttrs...)
 
 			span.SetStatus(metricStatus(m.Code))
 			span.SetAttributes(ResponseTraceAttrs(ResponseTelemetry{
@@ -113,7 +121,7 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 				ResponseSize:         m.Written,
 				ElapsedTime:          float64(time.Since(requestStartTime)) / float64(time.Millisecond),
 				StatusCode:           m.Code,
-				AdditionalAttributes: labelerAttrs,
+				AdditionalAttributes: completedMetricAttrs,
 			})
 		})
 	}

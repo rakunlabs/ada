@@ -85,7 +85,7 @@ AllowMethods: []string{"GET", "POST", "PUT", "DELETE"}
 Determines the value of the `Access-Control-Allow-Headers` response header. This header is used in response to a preflight request to indicate which HTTP headers can be used when making the actual request.
 
 - **Type:** `[]string`
-- **Default:** `[]string{}` (empty, will echo back requested headers)
+- **Default:** `[]string{}` (empty, secure deny-by-default behavior)
 
 **Example:**
 
@@ -93,7 +93,18 @@ Determines the value of the `Access-Control-Allow-Headers` response header. This
 AllowHeaders: []string{"Content-Type", "Authorization", "X-Request-ID"}
 ```
 
-If left empty, the middleware will automatically allow headers requested by the client in the preflight request.
+If left empty, a preflight with `Access-Control-Request-Headers` is rejected and
+the requested names are never reflected. A preflight without requested headers
+can still succeed. List the accepted headers explicitly, or deliberately set
+`[]string{"*"}` to allow any requested header.
+
+The `Authorization` header is the wildcard exception: browsers require it to be
+named explicitly when `*` is returned. If requests can carry credentials in
+that header, use `[]string{"*", "Authorization"}`.
+
+For credentialed requests, wildcard methods and headers are returned as the
+concrete requested values rather than `*`, because browsers treat those
+wildcards as literal values when credentials are included.
 
 **MDN Reference:** [Access-Control-Allow-Headers](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers)
 
@@ -111,14 +122,19 @@ AllowCredentials: true
 ```
 
 ::: danger Security Warning
-Avoid using `AllowCredentials: true` with `AllowOrigins: []string{"*"}`. This is a security vulnerability. See [Exploiting CORS Misconfigurations](https://blog.portswigger.net/2016/10/exploiting-cors-misconfigurations-for.html).
+`AllowCredentials: true` requires explicit origins. Combining it with the
+default or explicit `AllowOrigins: []string{"*"}` fails at middleware
+construction unless `UnsafeWildcardOriginWithAllowCredentials` is also set.
+Prefer a concrete allowlist. See [Exploiting CORS Misconfigurations](https://blog.portswigger.net/2016/10/exploiting-cors-misconfigurations-for.html).
 :::
 
 **MDN Reference:** [Access-Control-Allow-Credentials](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Credentials)
 
 ### UnsafeWildcardOriginWithAllowCredentials
 
-**⚠️ UNSAFE/INSECURE:** Allows wildcard `*` origin to be used with `AllowCredentials` flag. When enabled, any origin is considered allowed and sent back to the client with the `Access-Control-Allow-Origin` header.
+**Unsafe/insecure:** allows wildcard `*` origin with `AllowCredentials`. The
+middleware reflects the concrete request origin because browsers reject
+`Access-Control-Allow-Origin: *` on credentialed requests.
 
 - **Type:** `bool`
 - **Default:** `false`
@@ -293,7 +309,7 @@ Patterns are converted to regular expressions internally for efficient matching.
 
 1. **Be Specific:** Avoid using `*` in production. List specific allowed origins.
 
-2. **Credentials Security:** Never combine `AllowOrigins: ["*"]` with `AllowCredentials: true`.
+2. **Credentials Security:** Use explicit origins with `AllowCredentials`. The wildcard combination is rejected unless the explicitly unsafe override is enabled.
 
 3. **Minimize Allowed Methods:** Only allow HTTP methods that your API actually uses.
 

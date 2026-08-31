@@ -43,21 +43,16 @@ func requiredHTTPPort(https bool, port int) int {
 	return -1
 }
 
-func scheme(https bool) attribute.KeyValue {
-	if https {
-		return semconv.URLScheme("https")
-	}
-	return semconv.URLScheme("http")
+func schemeReq(req *http.Request) attribute.KeyValue {
+	return semconv.URLScheme(serverScheme(req))
 }
 
-func schemeReq(req *http.Request) attribute.KeyValue {
-	if req.URL != nil && req.URL.Scheme != "" {
-		return semconv.URLScheme(req.URL.Scheme)
-	}
+func serverScheme(req *http.Request) string {
 	if req.TLS != nil {
-		return semconv.URLScheme("https")
+		return "https"
 	}
-	return semconv.URLScheme("http")
+
+	return "http"
 }
 
 func metricStatus(code int) (codes.Code, string) {
@@ -68,13 +63,6 @@ func metricStatus(code int) (codes.Code, string) {
 		return codes.Error, ""
 	}
 	return codes.Unset, ""
-}
-
-func serverClientIP(xForwardedFor string) string {
-	if idx := strings.IndexByte(xForwardedFor, ','); idx >= 0 {
-		xForwardedFor = xForwardedFor[:idx]
-	}
-	return xForwardedFor
 }
 
 func netProtocol(proto string) (name string, version string) {

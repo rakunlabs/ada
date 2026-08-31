@@ -6,9 +6,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
+
+var _ string = ListenerAddrContextKey
 
 // startTestServer boots a server on an ephemeral port and returns its base URL
 // plus the channel carrying Start's return value.
@@ -79,8 +82,18 @@ func TestServer_ShutdownTimeoutIsApplied(t *testing.T) {
 
 				return
 			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(resp.Body)
+			closeErr := resp.Body.Close()
+			if readErr != nil {
+				respCh <- "error reading body: " + readErr.Error()
+
+				return
+			}
+			if closeErr != nil {
+				respCh <- "error closing body: " + closeErr.Error()
+
+				return
+			}
 			respCh <- string(body)
 		}()
 
@@ -104,6 +117,106 @@ func TestServer_ShutdownTimeoutIsApplied(t *testing.T) {
 			t.Errorf("Start returned %v", err)
 		}
 	})
+}
+
+// TestServer_ShutdownDeadlineForceClosesConnections guards the bug where a
+// Stop that ran out of drain time returned the error and gave up: Shutdown
+// leaves active connections open by design, and start's deferred cleanup then
+// nils s.server/s.listener, so no caller could ever force them shut. The
+// listener and the stuck connection stayed alive for the process lifetime.
+func TestServer_ShutdownDeadlineForceClosesConnections(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	s := New(WithShutdownTimeout(100 * time.Millisecond))
+	s.GET("/block", func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		_, _ = w.Write([]byte("late"))
+	})
+
+	base, errCh := startTestServer(t, s)
+	addr := strings.TrimPrefix(base, "http://")
+
+	// A dedicated transport keeps this connection out of the shared pool, so
+	// the only thing that can end the request is the server closing it.
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+
+	reqErr := make(chan error, 1)
+	go func() {
+		resp, err := client.Get(base + "/block")
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			err = resp.Body.Close()
+			if err == nil {
+				err = errors.New("request completed instead of being force-closed")
+			}
+		}
+		reqErr <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("handler was never entered")
+	}
+
+	stopErr := s.Stop()
+	if stopErr == nil {
+		close(release)
+		t.Fatal("Stop returned nil, want the drain-deadline error")
+	}
+	if !errors.Is(stopErr, context.DeadlineExceeded) {
+		t.Errorf("Stop error = %v, want it to wrap context.DeadlineExceeded", stopErr)
+	}
+
+	// The blocked connection must actually be gone, not merely un-drained.
+	select {
+	case err := <-reqErr:
+		if err == nil {
+			t.Error("in-flight connection was not closed by the forced shutdown")
+		}
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("in-flight connection still open after the shutdown deadline expired")
+	}
+
+	// The listener must be closed too.
+	if conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond); err == nil {
+		_ = conn.Close()
+		close(release)
+		t.Fatalf("listener on %s still accepting after forced shutdown", addr)
+	}
+
+	close(release)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("Start returned %v, want nil after a forced shutdown", err)
+	}
+
+	// And the Server must be reusable.
+	base, errCh = startTestServer(t, s)
+
+	resp, err := http.Get(base + "/ping")
+	if err != nil {
+		t.Fatalf("restart after forced shutdown: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 from the restarted server", resp.StatusCode)
+	}
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop after restart: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Start after restart returned %v", err)
+	}
 }
 
 // TestServer_DoubleStartDoesNotDeadlock guards the bug where the early return
@@ -149,6 +262,42 @@ func TestServer_StopBeforeStart(t *testing.T) {
 	}
 }
 
+func TestServerListenerAddressContextCompatibility(t *testing.T) {
+	s := New()
+	s.GET("/", func(w http.ResponseWriter, r *http.Request) {
+		private, privateOK := r.Context().Value(listenerAddrContextKey).(net.Addr)
+		exported, exportedOK := r.Context().Value(ListenerAddrContextKey).(net.Addr)
+		legacy, legacyOK := r.Context().Value("listener_addr").(net.Addr)
+		if !privateOK || !exportedOK || !legacyOK ||
+			private.String() != exported.String() || exported.String() != legacy.String() {
+			http.Error(w, "listener address context mismatch", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	//nolint:staticcheck // SA1029: intentionally seed the legacy public string key to test compatibility.
+	baseContext := context.WithValue(context.Background(), ListenerAddrContextKey, "colliding value")
+	base, errCh := startTestServer(t, s, WithBaseContext(baseContext))
+	resp, err := http.Get(base + "/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close response: %v", err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+}
+
 // TestServer_StopRacingStartup guards the panic where Stop read s.listener
 // before start() had assigned it. Reachable in normal use whenever the context
 // passed to StartWithContext is cancelled during startup.
@@ -189,7 +338,9 @@ func TestServer_RestartAfterStop(t *testing.T) {
 			t.Fatalf("get: %v", err)
 		}
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close response body: %v", err)
+		}
 
 		if string(body) != "pong" {
 			t.Fatalf("body = %q, want %q", body, "pong")
@@ -233,7 +384,9 @@ func TestServer_OldContextCannotStopRestart(t *testing.T) {
 		t.Fatalf("second run stopped by old context: %v", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close response body: %v", err)
+	}
 
 	if string(body) != "pong" {
 		t.Fatalf("body = %q, want %q", body, "pong")

@@ -28,6 +28,7 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/cookie"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
+	"github.com/rakunlabs/ada/utils/proxy"
 )
 
 // Config holds an OAuth2 provider's endpoints and credentials.
@@ -113,9 +114,20 @@ type Options struct {
 	HTTPClient *http.Client
 
 	// CallbackBaseURL is the absolute origin used to construct the redirect_uri
-	// (e.g. "https://app.example.com"). When empty, the strategy derives the
-	// origin from the request's X-Forwarded-* headers or Host.
+	// (e.g. "https://app.example.com"). It must contain only an HTTP(S) scheme
+	// and host. When empty, the strategy derives the origin from the request.
 	CallbackBaseURL string
+
+	// TrustedProxies permits matching immediate peers to supply
+	// X-Forwarded-Proto and X-Forwarded-Host. Bare IPs are accepted as
+	// single-address prefixes. Forwarded headers from all other peers are
+	// ignored in favor of the request's direct Host and TLS state.
+	TrustedProxies []string
+
+	// UnsafeTrustAllForwardedHeaders restores the legacy behavior of trusting
+	// forwarded origin headers from every peer. Prefer CallbackBaseURL or
+	// TrustedProxies.
+	UnsafeTrustAllForwardedHeaders bool
 
 	// CallbackBasePath is the path prefix for the callback (e.g. "/auth/callback").
 	// The strategy appends "/<name>" to it when building redirect_uri.
@@ -200,7 +212,9 @@ func New(name string, cfg Config, opts Options) *Strategy {
 // A discovery failure is reported but never fatal: the returned Strategy is
 // always usable with whatever endpoints were configured explicitly.
 func NewWithContext(ctx context.Context, name string, cfg Config, opts Options) (*Strategy, error) {
-	opts.XUserClaims = opts.XUserClaims.withDefaults()
+	cfg.Scopes = append([]string(nil), cfg.Scopes...)
+	opts.XUserClaims = cloneXUserClaims(opts.XUserClaims.withDefaults())
+	opts.TrustedProxies = append([]string(nil), opts.TrustedProxies...)
 
 	if cfg.Audience == "" {
 		cfg.Audience = cfg.ClientID
@@ -255,6 +269,16 @@ func NewWithContext(ctx context.Context, name string, cfg Config, opts Options) 
 	}
 
 	return s, discErr
+}
+
+func cloneXUserClaims(claims XUserClaims) XUserClaims {
+	claims.Subject = append([]string(nil), claims.Subject...)
+	claims.Email = append([]string(nil), claims.Email...)
+	claims.Name = append([]string(nil), claims.Name...)
+	claims.Roles = append([]string(nil), claims.Roles...)
+	claims.Scope = append([]string(nil), claims.Scope...)
+
+	return claims
 }
 
 // Name returns the strategy's URL key.
@@ -315,7 +339,8 @@ func (s *Strategy) Descriptor() strategy.Descriptor {
 func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
 	switch r.Method {
 	case http.MethodGet:
-		if r.URL.Query().Get("code") != "" {
+		q := r.URL.Query()
+		if q.Get("code") != "" || q.Get("error") != "" {
 			return s.handleCallback(w, r)
 		}
 
@@ -368,7 +393,7 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 
 	state, err := randomURLSafe(16)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "state_generate", err.Error())
+		s.writeInternalError(w, http.StatusInternalServerError, "state_generate", "could not start authorization", err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -378,7 +403,7 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 	if !s.cfg.DisableNonce {
 		nonce, err := randomURLSafe(16)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "nonce_generate", err.Error())
+			s.writeInternalError(w, http.StatusInternalServerError, "nonce_generate", "could not start authorization", err)
 
 			return nil, strategy.OutcomeFailed, nil
 		}
@@ -391,7 +416,7 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 	if !s.cfg.DisablePKCE {
 		pkce, err = newPKCE()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "pkce_generate", err.Error())
+			s.writeInternalError(w, http.StatusInternalServerError, "pkce_generate", "could not start authorization", err)
 
 			return nil, strategy.OutcomeFailed, nil
 		}
@@ -400,21 +425,21 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 	}
 
 	if err := s.setFlowCookie(w, r, flow); err != nil {
-		writeError(w, http.StatusInternalServerError, "flow_cookie", err.Error())
+		s.writeInternalError(w, http.StatusInternalServerError, "flow_cookie", "could not start authorization", err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
 	redirectURI, err := s.callbackURL(r)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "redirect_uri", err.Error())
+		s.writeInternalError(w, http.StatusInternalServerError, "redirect_uri", "could not start authorization", err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
 	authURL, err := s.buildAuthCodeURL(flow, redirectURI, pkce)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "auth_url", err.Error())
+		s.writeInternalError(w, http.StatusInternalServerError, "auth_url", "could not start authorization", err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -429,20 +454,6 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 func (s *Strategy) handleCallback(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
 	q := r.URL.Query()
 
-	// The IdP reports failures on the redirect, not as a transport error.
-	// Ignoring these turned an explicit "access_denied" into a confusing
-	// "state does not match" further down.
-	if e := q.Get("error"); e != "" {
-		desc := q.Get("error_description")
-		if desc == "" {
-			desc = e
-		}
-
-		writeError(w, http.StatusUnauthorized, e, desc)
-
-		return nil, strategy.OutcomeFailed, nil
-	}
-
 	flow, err := s.takeFlowCookie(w, r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "state_invalid", "authorization flow expired or cookie missing")
@@ -452,6 +463,16 @@ func (s *Strategy) handleCallback(w http.ResponseWriter, r *http.Request) (*iden
 
 	if err := checkState(flow.State, q.Get("state")); err != nil {
 		writeError(w, http.StatusUnauthorized, "state_invalid", "state does not match")
+
+		return nil, strategy.OutcomeFailed, nil
+	}
+
+	// Provider denials are callbacks too. Validate and consume the flow before
+	// acknowledging one so an attacker cannot inject a plausible denial.
+	if e := q.Get("error"); e != "" {
+		desc := q.Get("error_description")
+		slog.Warn("oauth2 authorization denied", "strategy", s.name, "provider_error", e, "provider_description", desc)
+		writeError(w, http.StatusUnauthorized, "authorization_denied", "authorization request was denied")
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -466,21 +487,21 @@ func (s *Strategy) handleCallback(w http.ResponseWriter, r *http.Request) (*iden
 
 	redirectURI, err := s.callbackURL(r)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "redirect_uri", err.Error())
+		s.writeInternalError(w, http.StatusInternalServerError, "redirect_uri", "could not complete authorization", err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
 	body, err := s.exchangeCode(r.Context(), q.Get("code"), redirectURI, flow.Verifier)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "code_exchange", err.Error())
+		s.writeInternalError(w, http.StatusBadGateway, "code_exchange", "identity provider request failed", err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
 	id, accessToken, err := s.identityFromTokenResponse(r.Context(), body, flow.Nonce)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "identity_extract", err.Error())
+		s.writeInternalError(w, http.StatusBadGateway, "identity_extract", "identity provider response was invalid", err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -524,7 +545,8 @@ func (s *Strategy) handlePassword(w http.ResponseWriter, r *http.Request) (*iden
 
 	tokenBody, err := s.exchangePassword(r.Context(), creds.Username, creds.Password)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", err.Error())
+		slog.Warn("oauth2 password exchange failed", "strategy", s.name, "error", err.Error())
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -532,7 +554,7 @@ func (s *Strategy) handlePassword(w http.ResponseWriter, r *http.Request) (*iden
 	// The password grant has no authorization request and therefore no nonce.
 	id, accessToken, err := s.identityFromTokenResponse(r.Context(), tokenBody, "")
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "identity_extract", err.Error())
+		s.writeInternalError(w, http.StatusBadGateway, "identity_extract", "identity provider response was invalid", err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -933,10 +955,13 @@ func (s *Strategy) buildAuthCodeURL(flow flowState, redirectURI string, pkce *pk
 	return u.String(), nil
 }
 
-// callbackURL returns the absolute redirect_uri. Origin comes from
-// CallbackBaseURL, then X-Forwarded-* headers, then r.Host.
+// callbackURL returns the absolute redirect_uri. A fixed origin wins; otherwise
+// forwarded headers are accepted only across the configured proxy boundary.
 func (s *Strategy) callbackURL(r *http.Request) (string, error) {
-	scheme, host := s.opts.callbackOrigin(r)
+	origin, err := s.opts.callbackOrigin(r)
+	if err != nil {
+		return "", err
+	}
 
 	basePath := s.opts.CallbackBasePath
 	if basePath == "" {
@@ -944,33 +969,39 @@ func (s *Strategy) callbackURL(r *http.Request) (string, error) {
 	}
 
 	u := &url.URL{
-		Scheme: scheme,
-		Host:   host,
+		Scheme: origin.Scheme,
+		Host:   origin.Host,
 		Path:   path.Join(basePath, s.name),
 	}
 
 	return u.String(), nil
 }
 
-func (o Options) callbackOrigin(r *http.Request) (string, string) {
+func (o Options) callbackOrigin(r *http.Request) (proxy.Origin, error) {
 	if o.CallbackBaseURL != "" {
-		if u, err := url.Parse(o.CallbackBaseURL); err == nil {
-			return u.Scheme, u.Host
+		origin, err := proxy.ParseOrigin(o.CallbackBaseURL)
+		if err != nil {
+			return proxy.Origin{}, fmt.Errorf("oauth2: callback base URL: %w", err)
 		}
+
+		return origin, nil
 	}
 
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		if host := r.Header.Get("X-Forwarded-Host"); host != "" {
-			return proto, host
-		}
+	policy, err := proxy.New(o.TrustedProxies...)
+	if err != nil {
+		return proxy.Origin{}, fmt.Errorf("oauth2: trusted proxies: %w", err)
 	}
 
-	scheme := "https"
-	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
-		scheme = "http"
+	if o.UnsafeTrustAllForwardedHeaders {
+		return proxy.UnsafeOrigin(r)
 	}
 
-	return scheme, r.Host
+	return policy.Origin(r)
+}
+
+func (s *Strategy) writeInternalError(w http.ResponseWriter, status int, code, message string, err error) {
+	slog.Error("oauth2 request failed", "strategy", s.name, "operation", code, "error", err.Error())
+	writeError(w, status, code, message)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

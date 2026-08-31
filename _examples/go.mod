@@ -7,17 +7,17 @@ require (
 	connectrpc.com/grpchealth v1.5.0
 	connectrpc.com/grpcreflect v1.3.0
 	connectrpc.com/otelconnect v0.9.0
-	github.com/rakunlabs/ada v0.4.7
-	github.com/rakunlabs/ada/handler/folder v0.4.7
-	github.com/rakunlabs/ada/handler/swagger v0.4.7
-	github.com/rakunlabs/ada/middleware/auth v0.4.9
-	github.com/rakunlabs/ada/middleware/cors v0.4.7
-	github.com/rakunlabs/ada/middleware/encoding v0.4.7
-	github.com/rakunlabs/ada/middleware/log v0.4.7
-	github.com/rakunlabs/ada/middleware/recover v0.4.7
-	github.com/rakunlabs/ada/middleware/requestid v0.4.7
-	github.com/rakunlabs/ada/middleware/server v0.4.7
-	github.com/rakunlabs/ada/middleware/telemetry v0.4.7
+	github.com/rakunlabs/ada v0.4.10
+	github.com/rakunlabs/ada/handler/folder v0.4.10
+	github.com/rakunlabs/ada/handler/swagger v0.4.10
+	github.com/rakunlabs/ada/middleware/auth v0.4.10
+	github.com/rakunlabs/ada/middleware/cors v0.4.10
+	github.com/rakunlabs/ada/middleware/encoding v0.4.10
+	github.com/rakunlabs/ada/middleware/log v0.4.10
+	github.com/rakunlabs/ada/middleware/recover v0.4.10
+	github.com/rakunlabs/ada/middleware/requestid v0.4.10
+	github.com/rakunlabs/ada/middleware/server v0.4.10
+	github.com/rakunlabs/ada/middleware/telemetry v0.4.10
 	github.com/rakunlabs/into v0.5.3
 	github.com/rakunlabs/logi v0.4.5
 	github.com/rakunlabs/tell v0.1.5
@@ -103,6 +103,7 @@ require (
 	github.com/petermattis/goid v0.0.0-20260716134002-a9b348f0a2b9 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.60.0 // indirect
+	github.com/rakunlabs/ada/utils/proxy v0.4.10 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
@@ -181,6 +182,8 @@ replace github.com/rakunlabs/ada/middleware/telemetry => ../middleware/telemetry
 replace github.com/rakunlabs/ada/middleware/server => ../middleware/server
 
 replace github.com/rakunlabs/ada/middleware/auth => ../middleware/auth
+
+replace github.com/rakunlabs/ada/utils/proxy => ../utils/proxy
 
 tool (
 	github.com/bufbuild/buf/cmd/buf

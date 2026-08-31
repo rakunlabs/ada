@@ -46,6 +46,14 @@ const (
 	cborMajorSimple = 7
 )
 
+const (
+	// WebAuthn values are small, but attestation certificate chains can be
+	// larger than COSE keys. These limits leave ample room for real devices
+	// while bounding allocations from untrusted length fields.
+	maxCBORStringLength     = 1 << 20
+	maxCBORCollectionLength = 1024
+)
+
 // Simple-value codes we accept inside major type 7.
 const (
 	cborSimpleFalse = 20
@@ -114,6 +122,9 @@ func decodeItem(data []byte, off, depth int) (any, int, error) {
 	major := ib >> 5
 	minor := ib & 0x1f
 	off++
+	if minor == 31 {
+		return nil, off, cborErr(off-1, "additional information 31 is not supported")
+	}
 
 	arg, n, err := readArgument(data, off, minor)
 	if err != nil {
@@ -137,28 +148,23 @@ func decodeItem(data []byte, off, depth int) (any, int, error) {
 		return int64(-1) - int64(arg), off, nil
 
 	case cborMajorBytes:
-		if minor == 31 {
-			return nil, off, cborErr(off, "indefinite-length byte string not supported")
+		length, err := checkedCBORLength(arg, maxCBORStringLength, len(data)-off, 1, off, "byte string")
+		if err != nil {
+			return nil, off, err
 		}
-		end := off + int(arg)
-		if end > len(data) || end < off {
-			return nil, off, ErrTruncated
-		}
+		end := off + length
 		// Copy so callers can't accidentally mutate the input. CBOR
-		// payloads in attestation flow are small (≤16 KiB for a
-		// reasonable authenticator) so the allocation is fine.
-		out := make([]byte, int(arg))
+		// payloads in attestation flow are bounded above.
+		out := make([]byte, length)
 		copy(out, data[off:end])
 		return out, end, nil
 
 	case cborMajorText:
-		if minor == 31 {
-			return nil, off, cborErr(off, "indefinite-length text string not supported")
+		length, err := checkedCBORLength(arg, maxCBORStringLength, len(data)-off, 1, off, "text string")
+		if err != nil {
+			return nil, off, err
 		}
-		end := off + int(arg)
-		if end > len(data) || end < off {
-			return nil, off, ErrTruncated
-		}
+		end := off + length
 		// Strict UTF-8 is enforced by Go's string conversion semantics
 		// only in `strings` helpers, not by string() itself; for our
 		// usage (COSE_Key keys are integers, only RP-controlled
@@ -168,11 +174,12 @@ func decodeItem(data []byte, off, depth int) (any, int, error) {
 		return string(data[off:end]), end, nil
 
 	case cborMajorArray:
-		if minor == 31 {
-			return nil, off, cborErr(off, "indefinite-length array not supported")
+		count, err := checkedCBORLength(arg, maxCBORCollectionLength, len(data)-off, 1, off, "array")
+		if err != nil {
+			return nil, off, err
 		}
-		out := make([]any, 0, int(arg))
-		for i := uint64(0); i < arg; i++ {
+		out := make([]any, 0, count)
+		for i := 0; i < count; i++ {
 			v, n, err := decodeItem(data, off, depth+1)
 			if err != nil {
 				return nil, off, err
@@ -183,15 +190,16 @@ func decodeItem(data []byte, off, depth int) (any, int, error) {
 		return out, off, nil
 
 	case cborMajorMap:
-		if minor == 31 {
-			return nil, off, cborErr(off, "indefinite-length map not supported")
+		count, err := checkedCBORLength(arg, maxCBORCollectionLength, len(data)-off, 2, off, "map")
+		if err != nil {
+			return nil, off, err
 		}
 		// COSE_Key uses small integer keys; attestation object uses
 		// short string keys. Both must be hashable. We use any-keyed
 		// map and let the caller cast — sub-100 entries in practice
 		// so the allocation overhead is negligible.
-		out := make(map[any]any, int(arg))
-		for i := uint64(0); i < arg; i++ {
+		out := make(map[any]any, count)
+		for i := 0; i < count; i++ {
 			k, kn, err := decodeItem(data, off, depth+1)
 			if err != nil {
 				return nil, off, err
@@ -255,8 +263,6 @@ func decodeItem(data []byte, off, depth int) (any, int, error) {
 			// One-byte simple value with code in [32,255]. Reject —
 			// not used by WebAuthn.
 			return nil, off, cborErr(off, "extension simple values not supported")
-		case 31:
-			return nil, off, cborErr(off, "indefinite-length break not allowed")
 		default:
 			return nil, off, cborErr(off, "unknown simple value %d", minor)
 		}
@@ -265,39 +271,60 @@ func decodeItem(data []byte, off, depth int) (any, int, error) {
 	return nil, off, cborErr(off, "unknown major type %d", major)
 }
 
+// checkedCBORLength converts an attacker-controlled CBOR argument to int and
+// verifies both the allocation cap and the minimum bytes its values require.
+func checkedCBORLength(arg uint64, max, remaining, minBytes int, off int, kind string) (int, error) {
+	length, ok := cborUintToInt(arg)
+	if !ok {
+		return 0, cborErr(off, "%s length overflows int", kind)
+	}
+	if length > max {
+		return 0, cborErr(off, "%s length %d exceeds limit %d", kind, arg, max)
+	}
+	if remaining < 0 || length > remaining/minBytes {
+		return 0, ErrTruncated
+	}
+	return length, nil
+}
+
+func cborUintToInt(v uint64) (int, bool) {
+	if v > uint64(^uint(0)>>1) {
+		return 0, false
+	}
+	return int(v), true
+}
+
 // readArgument decodes the integer argument of a CBOR head byte.
 // minor in [0,23] is the argument itself; 24/25/26/27 indicate a
 // following 1/2/4/8-byte big-endian unsigned integer. 28-30 are
-// reserved and rejected. 31 is "indefinite length" — the caller
-// branches on minor==31 before calling here for arrays/maps/strings.
+// reserved and rejected. 31 is rejected globally by decodeItem because this
+// decoder supports neither indefinite-length items nor break markers.
 func readArgument(data []byte, off int, minor byte) (uint64, int, error) {
 	switch {
 	case minor < 24:
 		return uint64(minor), 0, nil
 	case minor == 24:
-		if off+1 > len(data) {
+		if off < 0 || off > len(data) || len(data)-off < 1 {
 			return 0, 0, ErrTruncated
 		}
 		return uint64(data[off]), 1, nil
 	case minor == 25:
-		if off+2 > len(data) {
+		if off < 0 || off > len(data) || len(data)-off < 2 {
 			return 0, 0, ErrTruncated
 		}
 		return uint64(binary.BigEndian.Uint16(data[off:])), 2, nil
 	case minor == 26:
-		if off+4 > len(data) {
+		if off < 0 || off > len(data) || len(data)-off < 4 {
 			return 0, 0, ErrTruncated
 		}
 		return uint64(binary.BigEndian.Uint32(data[off:])), 4, nil
 	case minor == 27:
-		if off+8 > len(data) {
+		if off < 0 || off > len(data) || len(data)-off < 8 {
 			return 0, 0, ErrTruncated
 		}
 		return binary.BigEndian.Uint64(data[off:]), 8, nil
 	case minor == 31:
-		// Indefinite-length marker — the caller handles this by
-		// inspecting minor itself before invoking us.
-		return 0, 0, nil
+		return 0, 0, cborErr(off, "additional information 31 is not supported")
 	default:
 		// 28-30 are reserved.
 		return 0, 0, cborErr(off, "reserved argument %d", minor)

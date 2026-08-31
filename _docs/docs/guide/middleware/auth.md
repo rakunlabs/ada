@@ -216,6 +216,22 @@ authMW.Strategy(authoauth2.New("google", authoauth2.Config{
 }))
 ```
 
+Set `CallbackBaseURL` to the fixed public origin when possible. If a reverse
+proxy must supply `X-Forwarded-Proto` and `X-Forwarded-Host`, list only the
+networks that connect directly to Ada:
+
+```go
+authMW.Strategy(authoauth2.New("google", cfg, authoauth2.Options{
+    CallbackBasePath: "/login/callback",
+    TrustedProxies:   []string{"10.0.0.0/8", "fd00::/8"},
+}))
+```
+
+Without `TrustedProxies`, forwarded origin headers are ignored and the direct
+request host/TLS are used. `UnsafeTrustAllForwardedHeaders` restores the legacy
+trust-all behavior and should only be used behind a separately enforced network
+boundary.
+
 #### OIDC Discovery
 
 When `IssuerURL` is set, the strategy fetches `/.well-known/openid-configuration` to auto-populate:
@@ -392,6 +408,9 @@ resolve := func(ctx context.Context, email string) (*identity.Identity, error) {
 authMW.Strategy(magiclink.New("magic", send, resolve,
     magiclink.WithLabel("Sign in with email"),
     magiclink.WithTokenTTL(15*time.Minute),
+    // Prefer a fixed public origin. Without this or a trusted-proxy policy,
+    // link generation fails closed before the Sender is called.
+    magiclink.WithVerifyBaseURL("https://app.example.com"),
     // Without a limiter the send endpoint is an open relay pointed at
     // anybody's inbox, and a free user-enumeration oracle.
     magiclink.WithLimiter(g),
@@ -399,8 +418,22 @@ authMW.Strategy(magiclink.New("magic", send, resolve,
 ```
 
 The link points at `{base}login/callback/{name}`, wired automatically at
-`Mount`. Override it with `WithVerifyPath` only if you mount the route
-yourself.
+`Mount`. `WithVerifyBaseURL` supplies its scheme and host. If the public origin
+must come from the request instead, trust only the immediate proxy networks:
+
+```go
+magiclink.WithTrustedProxies("10.0.0.0/8", "fd00::/8")
+```
+
+Only requests from those peers may use `X-Forwarded-Proto` or
+`X-Forwarded-Host` to build a link. The proxy must overwrite incoming host and
+forwarding headers. Without `WithVerifyBaseURL` or a matching trusted-proxy
+policy, the send endpoint returns `verify_origin_unavailable` and does not call
+the sender. `WithUnsafeRequestOrigin()` restores the old trust-all behavior,
+but allows an untrusted caller to choose where another user's login link points.
+
+Override the callback path with `WithVerifyPath` only if you mount the route
+yourself; it does not configure or validate the public origin.
 
 Flow:
 
@@ -430,7 +463,7 @@ a background sweeper). For production, provide your own Redis/DB-backed store:
 ```go
 type TokenStore interface {
     Store(ctx context.Context, token, email string, ttl time.Duration) error
-    Lookup(ctx context.Context, token string) (email string, err error)
+    Consume(ctx context.Context, token string) (email string, err error)
     Delete(ctx context.Context, token string) error
 }
 ```
@@ -471,6 +504,8 @@ Trusts identity from headers set by an upstream reverse proxy (Traefik, nginx, E
 import "github.com/rakunlabs/ada/middleware/auth/strategy/header"
 
 authMW.Strategy(header.New("proxy",
+    // Required trust boundary: only the ingress network may assert identity.
+    header.WithTrustedProxies("10.0.0.0/8", "fd00::/8"),
     header.WithHeaderMap(header.HeaderMap{
         User:   "X-Forwarded-User",   // → Identity.Subject
         Email:  "X-Forwarded-Email",  // → Identity.Email
@@ -483,8 +518,8 @@ authMW.Strategy(header.New("proxy",
 
 All header names have sensible defaults (`X-Forwarded-User`, `X-Forwarded-Email`, etc.).
 
-These headers carry no proof of anything, so the strategy needs a trust
-boundary — state it explicitly rather than assuming it:
+These headers carry no proof of anything, so the strategy requires an explicit
+trust boundary:
 
 ```go
 // Only the proxy's network may claim an identity.
@@ -494,11 +529,20 @@ authMW.Strategy(header.New("proxy", header.WithTrustedProxies("10.0.0.0/8")))
 authMW.Strategy(header.New("proxy",
     header.WithSharedSecret("X-Proxy-Secret", os.Getenv("PROXY_SECRET")),
 ))
+
+// Both options may be combined; then both checks must pass.
+authMW.Strategy(header.New("proxy",
+    header.WithTrustedProxies("10.0.0.0/8"),
+    header.WithSharedSecret("X-Proxy-Secret", os.Getenv("PROXY_SECRET")),
+))
 ```
 
 The check is against `RemoteAddr`, never `X-Forwarded-For` — an attacker sets
 that as easily as the header it is meant to guard. With neither option the
-strategy logs a warning at construction and accepts whatever the caller claims.
+strategy fails closed with the same `401` used for a missing identity header.
+Deployments whose network boundary is enforced entirely outside the process can
+opt into the legacy behavior with `header.WithUnsafeTrustAll()`, but
+`WithTrustedProxies`, `WithSharedSecret`, or both are preferred.
 
 The strategy deliberately does **not** implement `RequestAuthenticator`: header
 identity is accepted at the login endpoint only, so a misrouted deployment
@@ -664,10 +708,16 @@ Register multiple strategies — the login UI renders all of them automatically:
 authMW.Strategy(local.New("local", myVerifier, local.WithLabel("Email & password")))
 authMW.Strategy(authoauth2.New("google", googleCfg, authoauth2.Options{Label: "Google"}))
 authMW.Strategy(authoauth2.New("github", githubCfg, authoauth2.Options{Label: "GitHub"}))
-authMW.Strategy(magiclink.New("magic", magicCfg, magiclink.WithLabel("Email link")))
+authMW.Strategy(magiclink.New("magic", send, resolve,
+    magiclink.WithLabel("Email link"),
+    magiclink.WithVerifyBaseURL("https://app.example.com"),
+    magiclink.WithLimiter(g),
+))
 authMW.Strategy(apikey.New("apikey", keyValidator))    // hidden from UI
 authMW.Strategy(basic.New("basic", verifier))           // hidden, browser dialog
-authMW.Strategy(header.New("proxy"))                    // hidden, proxy-injected
+authMW.Strategy(header.New("proxy",
+    header.WithTrustedProxies("10.0.0.0/8"),
+))                                                       // hidden, proxy-injected
 ```
 
 The UI groups them: form-based strategies (local, LDAP, magic link, password-flow OAuth2) show as tab-switchable forms; redirect-based strategies (OAuth2 code flow) show as buttons below an "or" divider. API key, basic, and header strategies are hidden from the UI.
@@ -761,6 +811,11 @@ With default `Base: "/"`:
 | POST | `/logout` | Revoke session and clear cookie |
 | GET | `/login/status` | Status iframe (for popup flow) |
 
+`POST /login/refresh` rotates the server-side token pair and returns
+`{"identity": ...}`. It no longer returns `session_id`; the opaque session ID
+remains confined to the `HttpOnly` cookie and clients must not expect it in the
+JSON response.
+
 ## Identity
 
 After `Require()`, the identity is available in the request context:
@@ -844,11 +899,30 @@ authMW := auth.New(cfg).
     WithSecondFactor(sf)
 ```
 
+The default issuer, `WithBackend`, and `WithSessionStore` automatically create
+an isolated pending issuer whose lifetime is `MFA.TTL`. A custom session issuer
+cannot be safely reused because Ada cannot infer its lifetime. When combining
+`WithIssuer` and `WithSecondFactor`, provide a separate pending issuer:
+
+```go
+authMW := auth.New(cfg).
+    WithIssuer(customSessionIssuer).
+    WithPendingIssuer(customPendingIssuer).
+    Strategy(local.New("local", verify)).
+    WithSecondFactor(sf)
+```
+
+`customPendingIssuer` must implement `issuer.AtomicUpdater` and enforce a
+lifetime no longer than `cfg.MFA.TTL`. In a replicated
+deployment, back it with shared storage so attempts and expiry are enforced
+across every instance. `Init` rejects MFA configuration that uses a custom
+issuer without this pending issuer.
+
 The first factor no longer issues a session. It parks the identity for
 `MFA.TTL`, sets a short-lived `HttpOnly` cookie scoped to `/login/mfa`, and
 answers `{"mfa_required": true}`. The client posts the code to
 `POST {base}login/mfa`; only then is the real session minted. A parked login
-that is not usable as a session — `Require()` rejects it — and it is destroyed
+is not usable as a session — `Require()` rejects it — and it is destroyed
 after `MFA.MaxAttempts` wrong codes.
 
 Return `totp.ErrNotEnrolled` from the lookup for users who have no secret, so
@@ -865,7 +939,10 @@ g := guard.New(guard.Config{})   // 5 failures, escalating lockout from 15m
 defer g.Close()
 
 local.New("local", verify, local.WithLimiter(g))
-magiclink.New("mail", send, resolve, magiclink.WithLimiter(g))
+magiclink.New("mail", send, resolve,
+    magiclink.WithVerifyBaseURL("https://app.example.com"),
+    magiclink.WithLimiter(g),
+)
 ```
 
 The local strategy keys on the username, not the client address: an attacker
@@ -1203,4 +1280,3 @@ store that persists outside the process.
 Never store secrets (`ClientSecret`, `SessionKey`, encryption keys) in source
 code. Use environment variables or a secret manager.
 :::
-

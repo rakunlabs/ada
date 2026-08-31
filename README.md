@@ -96,4 +96,4 @@ stack.Set("ratelimit", ratelimit.Middleware(...))  // add at runtime
 stack.Remove("auth")                                // remove at runtime
 ```
 
-See the [Runtime Reload guide](https://rakunlabs.github.io/ada/guide/middleware/runtime-reload) for full details.
+See the [Runtime Reload guide](https://rakunlabs.github.io/ada/guide/runtime-reload) for full details.

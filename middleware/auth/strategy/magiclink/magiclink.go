@@ -28,6 +28,7 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
+	"github.com/rakunlabs/ada/utils/proxy"
 )
 
 // Sender delivers the magic link/code to the user. The token is the random
@@ -68,7 +69,9 @@ type Strategy struct {
 	tokenTTL    time.Duration
 	tokenLength int
 
-	verifyBaseURL string
+	verifyBaseURL       *proxy.Origin
+	trustedProxies      *proxy.Policy
+	unsafeRequestOrigin bool
 
 	// verifyBasePath is the mounted path prefix the magic link points at. Set
 	// by SetCallbackBasePath at Mount time, or pinned via WithVerifyPath.
@@ -111,11 +114,51 @@ func WithTokenLength(n int) Option {
 	return func(s *Strategy) { s.tokenLength = n }
 }
 
-// WithVerifyBaseURL sets the base URL for building the verify link. When empty,
-// the strategy derives the origin from the request's X-Forwarded-* headers or
-// Host.
-func WithVerifyBaseURL(u string) Option {
-	return func(s *Strategy) { s.verifyBaseURL = u }
+// WithVerifyBaseURL sets the public origin for verify links. It must be an
+// absolute http(s) URL containing only a scheme and host. Invalid values panic
+// during construction, like invalid trusted-proxy CIDRs.
+//
+// Configure this in normal deployments. Without it, links can only be built
+// from requests arriving through WithTrustedProxies, or through the explicitly
+// unsafe compatibility option WithUnsafeRequestOrigin.
+func WithVerifyBaseURL(raw string) Option {
+	return func(s *Strategy) {
+		origin, err := proxy.ParseOrigin(raw)
+		if err != nil {
+			panic(fmt.Errorf("magiclink: verify base URL: %w", err))
+		}
+
+		s.verifyBaseURL = &origin
+	}
+}
+
+// WithTrustedProxies permits verify-link origins to be derived from requests
+// whose immediate peer falls within one of the given CIDRs. Bare IPs are also
+// accepted. X-Forwarded-Proto and X-Forwarded-Host are consulted only for such
+// peers; X-Forwarded-For is never trusted.
+//
+// The proxy must overwrite the forwarded and Host headers rather than append
+// caller-supplied values. Prefer WithVerifyBaseURL when the public origin is
+// fixed.
+func WithTrustedProxies(cidrs ...string) Option {
+	policy, err := proxy.New(cidrs...)
+	if err != nil {
+		panic(fmt.Errorf("magiclink: trusted proxies: %w", err))
+	}
+
+	return func(s *Strategy) {
+		s.trustedProxies = &policy
+	}
+}
+
+// WithUnsafeRequestOrigin restores the legacy behavior of deriving externally
+// generated links from Host and X-Forwarded-* headers for every caller.
+//
+// This is unsafe whenever an untrusted client can reach the send endpoint,
+// because that client can choose where another user's login link points. Use a
+// configured base URL or WithTrustedProxies instead.
+func WithUnsafeRequestOrigin() Option {
+	return func(s *Strategy) { s.unsafeRequestOrigin = true }
 }
 
 // WithVerifyPath pins the path prefix the magic link points at, e.g.
@@ -268,14 +311,20 @@ func (s *Strategy) handleSendLink(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	verifyURL, err := s.buildVerifyURL(r, token)
+	if err != nil {
+		slog.Error("magiclink verify origin unavailable", "strategy", s.name, "error", err.Error())
+		writeError(w, http.StatusInternalServerError, "verify_origin_unavailable", "verify URL origin is not configured")
+
+		return nil, strategy.OutcomeFailed, nil
+	}
+
 	if err := s.store.Store(r.Context(), hashToken(token), email, s.tokenTTL); err != nil {
 		slog.Error("magiclink store error", "strategy", s.name, "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "store_failed", "failed to store token")
 
 		return nil, strategy.OutcomeFailed, nil
 	}
-
-	verifyURL := s.buildVerifyURL(r, token)
 
 	if err := s.sender(r.Context(), email, token, verifyURL); err != nil {
 		// Best-effort cleanup of stored token on send failure.
@@ -369,8 +418,11 @@ func (s *Strategy) readEmail(r *http.Request) (string, error) {
 }
 
 // buildVerifyURL constructs the full verify URL for the magic link.
-func (s *Strategy) buildVerifyURL(r *http.Request, token string) string {
-	scheme, host := s.verifyOrigin(r)
+func (s *Strategy) buildVerifyURL(r *http.Request, token string) (string, error) {
+	origin, err := s.verifyOrigin(r)
+	if err != nil {
+		return "", err
+	}
 
 	base := s.verifyBasePath
 	if base == "" {
@@ -381,13 +433,13 @@ func (s *Strategy) buildVerifyURL(r *http.Request, token string) string {
 	}
 
 	u := &url.URL{
-		Scheme:   scheme,
-		Host:     host,
+		Scheme:   origin.Scheme,
+		Host:     origin.Host,
 		Path:     path.Join(base, s.name),
 		RawQuery: url.Values{"token": {token}}.Encode(),
 	}
 
-	return u.String()
+	return u.String(), nil
 }
 
 // hashToken is what actually lands in the TokenStore.
@@ -417,25 +469,21 @@ func validEmail(v string) bool {
 }
 
 // verifyOrigin determines the scheme and host for building the verify URL.
-func (s *Strategy) verifyOrigin(r *http.Request) (string, string) {
-	if s.verifyBaseURL != "" {
-		if u, err := url.Parse(s.verifyBaseURL); err == nil {
-			return u.Scheme, u.Host
-		}
+func (s *Strategy) verifyOrigin(r *http.Request) (proxy.Origin, error) {
+	if s.verifyBaseURL != nil {
+		origin := *s.verifyBaseURL
+
+		return origin, nil
 	}
 
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		if host := r.Header.Get("X-Forwarded-Host"); host != "" {
-			return proto, host
-		}
+	if s.trustedProxies != nil && s.trustedProxies.TrustedPeer(r) {
+		return s.trustedProxies.Origin(r)
+	}
+	if s.unsafeRequestOrigin {
+		return proxy.UnsafeOrigin(r)
 	}
 
-	scheme := "https"
-	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
-		scheme = "http"
-	}
-
-	return scheme, r.Host
+	return proxy.Origin{}, fmt.Errorf("set WithVerifyBaseURL or a trusted-proxy policy")
 }
 
 // generateToken produces a cryptographically random hex-encoded token.

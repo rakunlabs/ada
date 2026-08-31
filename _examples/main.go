@@ -45,7 +45,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to init telemetry; %w", err)
 	}
-	defer collector.Shutdown()
+	defer func() { _ = collector.Shutdown() }()
 
 	example := strings.ToLower(os.Getenv("EXAMPLE"))
 

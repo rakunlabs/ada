@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"strings"
 )
 
 // MethodQuery is the QUERY HTTP method, a safe and idempotent method that
@@ -21,17 +22,57 @@ const MethodQuery = "QUERY"
 // ErrorHandler — is setup-time only and must be configured before the first
 // request. Use a Slot or a Pipeline for middlewares that need to change on a
 // running server.
+//
+// Path handling: Mux matches on the decoded r.URL.Path as received. Unlike
+// net/http.ServeMux it does NOT apply path.Clean and does NOT redirect to a
+// canonical form. Two consequences are security-relevant:
+//
+//   - Values returned by r.PathValue are attacker-controlled and may contain
+//     ".." and "." segments, whether sent literally or percent-encoded
+//     ("/static/..%2f..%2fetc/passwd" decodes to "/static/../../etc/passwd"
+//     before matching). A greedy capture MUST be cleaned and confined before
+//     being used as a filesystem path — prefer os.OpenRoot or an fs.FS over
+//     filepath.Join on raw input.
+//   - "%2F" decodes to a real separator, so a {name} param can never capture a
+//     slash: GET /users/a%2Fb is matched as /users/a/b.
 type Mux struct {
 	// routes is shared by pointer with every Group derived from this Mux, so
 	// a group's registrations land in the same tree. It is safe to mutate
 	// while the server is serving; see routeTable.
 	routes *routeTable
 
-	errHandler       func(c *Context, err error)
+	// parent is the Mux this one was derived from with Group; nil on a root
+	// Mux. children are the Groups derived from this one.
+	//
+	// The links exist so a Group keeps tracking its parent instead of
+	// freezing a copy of it at creation time: a later NotFound,
+	// MethodNotAllowed or Use on the parent has to reach every descendant
+	// that has not overridden that same behaviour. They are written only by
+	// Group, which — like every other configuration method here — is
+	// setup-time only, so they need no synchronisation.
+	parent   *Mux
+	children []*Mux
+
+	errHandler func(c *Context, err error)
+
+	// notFound and methodNotAllowed hold only what was set on THIS Mux. nil
+	// means "not overridden here", which is what lets resolveNotFound and
+	// resolveMethodNotAllowed inherit the nearest ancestor's choice.
 	notFound         http.HandlerFunc
 	methodNotAllowed http.HandlerFunc
-	middlewares      []func(next http.Handler) http.Handler
-	prefix           string
+
+	// ownMiddlewares are the middlewares added on this Mux itself: the
+	// Group's own arguments plus everything a later Use appended. It is the
+	// authoritative record, because the effective chain below is derived and
+	// recomputed whenever an ancestor changes.
+	ownMiddlewares []func(next http.Handler) http.Handler
+	// middlewares is the effective chain — every ancestor's, outermost
+	// first, then ownMiddlewares. Route registration reads it. Each refresh
+	// allocates it fresh with len == cap, so sibling Groups can never share
+	// a backing array and append into each other's slots.
+	middlewares []func(next http.Handler) http.Handler
+
+	prefix string
 
 	// Pre-chained 404/405 handlers. Rebuilt whenever middlewares or the
 	// custom handlers change (registration time), so the request path
@@ -51,6 +92,69 @@ func NewMux() *Mux {
 	return m
 }
 
+// refresh recomputes this Mux's effective middleware chain from its parent,
+// rebuilds its cached error chains, and cascades to every Group derived from
+// it.
+//
+// The cascade is what makes a Group track its parent. Group used to copy the
+// parent Mux by value and then claim its prefix for error dispatch, so the
+// snapshot it took at creation time was frozen: a NotFound, MethodNotAllowed
+// or Use applied to the parent afterwards rebuilt only the parent's chains,
+// while the prefix node still pointed at the child — and every 404/405 below
+// the group kept answering with the defaults the child had captured.
+//
+// Setup-time only, like every caller that reaches it.
+func (m *Mux) refresh() {
+	var inherited []func(next http.Handler) http.Handler
+	if m.parent != nil {
+		inherited = m.parent.middlewares
+	}
+
+	if len(inherited) == 0 && len(m.ownMiddlewares) == 0 {
+		m.middlewares = nil
+	} else {
+		// len == cap, so a later append cannot write into storage a
+		// sibling Group also considers its own.
+		chain := make([]func(next http.Handler) http.Handler, 0, len(inherited)+len(m.ownMiddlewares))
+		chain = append(chain, inherited...)
+		chain = append(chain, m.ownMiddlewares...)
+		m.middlewares = chain
+	}
+
+	m.rebuildErrorChains()
+
+	for _, child := range m.children {
+		child.refresh()
+	}
+}
+
+// resolveNotFound returns the 404 handler in effect here: this Mux's own, else
+// the nearest ancestor that set one, else the net/http default. Walking the
+// chain instead of copying the parent's handler at Group creation is what lets
+// a group inherit a NotFound the parent installs later.
+func (m *Mux) resolveNotFound() http.HandlerFunc {
+	for scope := m; scope != nil; scope = scope.parent {
+		if scope.notFound != nil {
+			return scope.notFound
+		}
+	}
+
+	return http.NotFound
+}
+
+// resolveMethodNotAllowed is resolveNotFound's 405 counterpart.
+func (m *Mux) resolveMethodNotAllowed() http.HandlerFunc {
+	for scope := m; scope != nil; scope = scope.parent {
+		if scope.methodNotAllowed != nil {
+			return scope.methodNotAllowed
+		}
+	}
+
+	return func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // rebuildErrorChains re-composes the middleware chain around the 404, 405 and
 // auto-OPTIONS handlers. Called at every mutation point (NewMux, Use, Group,
 // NotFound, MethodNotAllowed) so ServeHTTP only reads the cached chains.
@@ -59,19 +163,8 @@ func NewMux() *Mux {
 // by middleware (CORS being the obvious one) present on the responses that
 // most need them.
 func (m *Mux) rebuildErrorChains() {
-	notFound := m.notFound
-	if notFound == nil {
-		notFound = http.NotFound
-	}
-	m.notFoundChain = Chain(m.middlewares...)(notFound)
-
-	methodNotAllowed := m.methodNotAllowed
-	if methodNotAllowed == nil {
-		methodNotAllowed = func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		}
-	}
-	m.methodNotAllowedChain = Chain(m.middlewares...)(methodNotAllowed)
+	m.notFoundChain = Chain(m.middlewares...)(m.resolveNotFound())
+	m.methodNotAllowedChain = Chain(m.middlewares...)(m.resolveMethodNotAllowed())
 
 	// The Allow header varies per node, so it is written by the caller
 	// before the chain runs; this terminal handler only emits the status.
@@ -80,17 +173,19 @@ func (m *Mux) rebuildErrorChains() {
 	}))
 }
 
-// scopeErrors marks the subtree under this Mux's prefix as belonging to this
-// Mux for error dispatch, so 404/405/auto-OPTIONS responses below a Group run
-// that Group's middleware chain and its NotFound/MethodNotAllowed handlers.
+// scopeErrors marks this Mux's prefix as belonging to it for error dispatch, so
+// 404/405/auto-OPTIONS responses at and below a Group run that Group's
+// middleware chain and its NotFound/MethodNotAllowed handlers.
 //
-// The marker is metadata on the wildcard node, not a route: it never answers a
-// request, so it cannot shadow a real handler.
+// The marker is metadata on the actual prefix node, not a synthetic wildcard
+// route. This lets the prefix itself inherit the scope and supports groups whose
+// prefixes already contain wildcard syntax. If multiple Groups share a prefix,
+// the most recent scope configuration applies uniformly below that prefix.
 func (m *Mux) scopeErrors() {
 	prefix := m.prefix
 
 	m.routes.mutate(func(root *node) {
-		scope, _, _ := root.insertPath(prefix + "/*")
+		scope, _, _ := root.insertPath(prefix)
 		scope.errorScope = m
 	})
 }
@@ -138,12 +233,60 @@ func (m *Mux) resolveHandler(handler any) http.HandlerFunc {
 	}
 }
 
+// checkMethod rejects a method that could never match a request.
+//
+// Route selection compares against r.Method, which net/http delivers verbatim
+// and which RFC 9110 defines as case-sensitive — so "get" registers a route
+// that is unreachable for the rest of the process's life, and reports nothing.
+// It is a typo with no legitimate reading, so it fails at boot like the
+// ambiguous patterns trie_insert rejects, rather than being silently upcased
+// into a route the caller did not write.
+//
+// The empty method is the documented catch-all used by Handle and HandleFunc
+// and is always accepted.
+func checkMethod(method string) {
+	if method == "" {
+		return
+	}
+
+	for i := range len(method) {
+		if isUpperMethodChar(method[i]) {
+			continue
+		}
+
+		panic(fmt.Sprintf(
+			"ada: invalid HTTP method %q: methods are case-sensitive and must be uppercase RFC 9110 tokens (use \"\" for a catch-all)",
+			method,
+		))
+	}
+}
+
+// isUpperMethodChar reports whether c may appear in a canonical method: an RFC
+// 9110 token character that is not a lowercase letter.
+func isUpperMethodChar(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c >= 'a' && c <= 'z':
+		return false
+	}
+
+	return strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+}
+
 // HandleWithMethod registers an http.HandlerFunc for the given method.
 //   - This is the non-generic primitive: it is the method to embed in an
 //     interface when abstracting over *Mux, because Go interfaces cannot
 //     declare (nor be satisfied by) generic methods.
+//   - Panics if method is neither "" nor a valid uppercase HTTP method token;
+//     see checkMethod.
 func (m *Mux) HandleWithMethod(method, path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	handlerFunc := Chain(append(m.middlewares, middlewares...)...)(handler)
+	checkMethod(method)
+
+	combined := make([]MiddlewareFunc, 0, len(m.middlewares)+len(middlewares))
+	combined = append(combined, m.middlewares...)
+	combined = append(combined, middlewares...)
+	handlerFunc := Chain(combined...)(handler)
 
 	m.routes.insert(method, m.routePath(path), handlerFunc.ServeHTTP)
 }
@@ -195,6 +338,14 @@ func (m *Mux) HandleFunc[H RouteHandler](path string, handler H, middlewares ...
 }
 
 // HandleFuncWildcard is registering all paths under the given path.
+//
+// The greedy capture is the decoded remainder of r.URL.Path as received: Mux
+// applies no path.Clean and no canonicalizing redirect, so r.PathValue("*") is
+// attacker-controlled and may contain ".." and "." segments, sent literally or
+// percent-encoded ("/static/..%2f..%2fetc/passwd" decodes to
+// "/static/../../etc/passwd" before matching). Clean and confine it before
+// using it as a filesystem path — prefer os.OpenRoot or an fs.FS over
+// filepath.Join on raw input. See the Mux type documentation.
 func (m *Mux) HandleFuncWildcard[H RouteHandler](path string, handler H, middlewares ...func(next http.Handler) http.Handler) {
 	m.HandleFunc(normalizeWildcardPath(path), handler, middlewares...)
 }
@@ -204,6 +355,14 @@ func (m *Mux) Handle(path string, handler http.Handler, middlewares ...func(next
 }
 
 // HandleWildcard is registering all paths under the given path.
+//
+// The greedy capture is the decoded remainder of r.URL.Path as received: Mux
+// applies no path.Clean and no canonicalizing redirect, so r.PathValue("*") is
+// attacker-controlled and may contain ".." and "." segments, sent literally or
+// percent-encoded ("/static/..%2f..%2fetc/passwd" decodes to
+// "/static/../../etc/passwd" before matching). Clean and confine it before
+// using it as a filesystem path — prefer os.OpenRoot or an fs.FS over
+// filepath.Join on raw input. See the Mux type documentation.
 func (m *Mux) HandleWildcard(path string, handler http.Handler, middlewares ...func(next http.Handler) http.Handler) {
 	m.HandleFuncWildcard(path, handler.ServeHTTP, middlewares...)
 }
@@ -222,39 +381,58 @@ func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
 		return
 	}
 
-	m.middlewares = append(m.middlewares, middlewares...)
-	m.rebuildErrorChains()
+	// Recorded as this Mux's own, then re-derived: refresh rebuilds the
+	// effective chain here and in every descendant Group, so root
+	// middleware added after a Group was created still runs on the 404s
+	// and 405s below that group's prefix.
+	m.ownMiddlewares = append(m.ownMiddlewares, middlewares...)
+	m.refresh()
 
 	// Claim this prefix for error dispatch so the middlewares just added
 	// also run on unmatched paths below it.
 	m.scopeErrors()
 }
 
-func (m Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http.Handler) *Mux {
-	m.prefix = path.Join("/", m.prefix, pathGroup)
-	if m.prefix == "/" {
-		m.prefix = ""
+// Group returns a Mux that shares this one's routing table but registers under
+// an additional path prefix, with additional middlewares.
+//
+// A group inherits, rather than snapshots, its parent's configuration: a
+// NotFound, MethodNotAllowed or Use applied to the parent after the group was
+// created still takes effect below the group's prefix. A group that sets its
+// own keeps winning for that specific behaviour, and only for it — overriding
+// NotFound does not detach the group from a later parent Use.
+//
+// Where two Groups share the same prefix, the most recently created (or most
+// recently reconfigured) one owns the error scope for everything below it, as
+// the prefix node can only point at one Mux.
+func (m *Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http.Handler) *Mux {
+	prefix := path.Join("/", m.prefix, pathGroup)
+	if prefix == "/" {
+		prefix = ""
 	}
 
-	// Defensive copy: Mux is taken by value, so m.middlewares' slice
-	// header was duplicated, but it still points at the parent's backing
-	// array. Without copying here, sibling groups created from the same
-	// parent (`a := s.Group(); b := s.Group()`) would share that backing
-	// array — and a later `b.Use(...)` could append-in-place into a slot
-	// that `a` already considers part of its chain (or vice versa),
-	// silently corrupting the middleware order on whichever group ran
-	// `Use` first. Allocating a fresh slice with len == cap pins this
-	// child group to its own storage and makes append always grow.
-	parent := m.middlewares
-	m.middlewares = make([]func(next http.Handler) http.Handler, len(parent), len(parent)+len(middlewares))
-	copy(m.middlewares, parent)
-	m.middlewares = append(m.middlewares, middlewares...)
-	m.rebuildErrorChains()
+	group := &Mux{
+		routes: m.routes,
+		parent: m,
+		// ErrorHandler is not part of the error-chain cascade: it is read
+		// through the wrapper a Context handler was registered with, so it
+		// is captured here exactly as it was before.
+		errHandler: m.errHandler,
+		prefix:     prefix,
+		// Copied out of the variadic slice so the caller cannot mutate the
+		// group's chain afterwards, and so this group owns storage no
+		// sibling shares.
+		ownMiddlewares: append([]func(next http.Handler) http.Handler(nil), middlewares...),
+	}
+
+	m.children = append(m.children, group)
+	group.refresh()
+
 	// Claim the group prefix so 404/405/OPTIONS below it run this group's
 	// chain rather than the parent's.
-	(&m).scopeErrors()
+	group.scopeErrors()
 
-	return &m
+	return group
 }
 
 // Prefix returns the current prefix of the Mux.
@@ -265,9 +443,11 @@ func (m *Mux) Prefix() string {
 
 // NotFound sets the handler for 404 Not Found responses.
 //   - If not set, it defaults to http.NotFound.
+//   - Groups derived from this Mux that have not set their own inherit it,
+//     whether they were created before or after this call.
 func (m *Mux) NotFound(handler http.HandlerFunc) {
 	m.notFound = handler
-	m.rebuildErrorChains()
+	m.refresh()
 	// Claim the prefix so a group's handler actually takes effect without
 	// requiring an unrelated Use call first.
 	m.scopeErrors()
@@ -281,9 +461,11 @@ func (m *Mux) notFoundHandler(w http.ResponseWriter, r *http.Request, scope *Mux
 // MethodNotAllowed sets the handler for 405 Method Not Allowed responses.
 //   - If not set, it defaults to a standard 405 text response.
 //   - The Allow header is always set before the handler is called.
+//   - Groups derived from this Mux that have not set their own inherit it,
+//     whether they were created before or after this call.
 func (m *Mux) MethodNotAllowed(handler http.HandlerFunc) {
 	m.methodNotAllowed = handler
-	m.rebuildErrorChains()
+	m.refresh()
 	m.scopeErrors()
 }
 

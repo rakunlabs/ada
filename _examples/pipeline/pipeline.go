@@ -20,10 +20,10 @@ func Run(ctx context.Context) error {
 		mux.POST("/switch", func(w http.ResponseWriter, r *http.Request) {
 			if myMiddleware.Enabled() {
 				myMiddleware.Disable()
-				fmt.Fprintln(w, "Middleware disabled")
+				_, _ = fmt.Fprintln(w, "Middleware disabled")
 			} else {
 				myMiddleware.Enable()
-				fmt.Fprintln(w, "Middleware enabled")
+				_, _ = fmt.Fprintln(w, "Middleware enabled")
 			}
 		})
 
@@ -49,10 +49,10 @@ func Run(ctx context.Context) error {
 		mux.POST("/pipeline/switch", func(w http.ResponseWriter, r *http.Request) {
 			if stack.Has("first") {
 				stack.Remove("first")
-				fmt.Fprintln(w, "First middleware disabled")
+				_, _ = fmt.Fprintln(w, "First middleware disabled")
 			} else {
 				stack.Set("first", first)
-				fmt.Fprintln(w, "First middleware enabled")
+				_, _ = fmt.Fprintln(w, "First middleware enabled")
 			}
 		})
 
@@ -75,5 +75,5 @@ func MyMiddleware(next http.Handler) http.Handler {
 
 func OKHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "OK")
+	_, _ = fmt.Fprintln(w, "OK")
 }

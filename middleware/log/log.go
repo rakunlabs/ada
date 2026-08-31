@@ -1,19 +1,16 @@
 package log
 
 import (
+	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/felixge/httpsnoop"
+	"github.com/rakunlabs/ada/utils/proxy"
 	"github.com/rakunlabs/logi"
 )
-
-var trueClientIP = http.CanonicalHeaderKey("True-Client-IP")
-var xForwardedFor = http.CanonicalHeaderKey("X-Forwarded-For")
-var xRealIP = http.CanonicalHeaderKey("X-Real-IP")
 
 var defaultLogger = defaultSlogLogger
 
@@ -22,6 +19,10 @@ type Logger struct {
 	Skipper  func(r *http.Request) bool
 	PreFunc  func(r *http.Request) *http.Request
 	PostFunc func(r *http.Request, v *Response)
+
+	proxyPolicy       proxy.Policy
+	unsafeProxyHeader bool
+	defaultSlogPost   bool
 }
 
 // Response contains extracted values from logger.
@@ -87,6 +88,10 @@ func New(opts ...Option) *Logger {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.Logger.defaultSlogPost && !o.postConfigured {
+		realIP := trustedRealIP(o.Logger.proxyPolicy, o.Logger.unsafeProxyHeader)
+		o.Logger.PostFunc = slogPostFunc(realIP)
+	}
 
 	return &o.Logger
 }
@@ -108,6 +113,7 @@ func SetDefaultLogger(f func() Logger) {
 
 func defaultSlogLogger() Logger {
 	return Logger{
+		defaultSlogPost: true,
 		PreFunc: func(r *http.Request) *http.Request {
 			user := r.Header.Get("X-User")
 			requestID := r.Header.Get("X-Request-ID")
@@ -126,46 +132,71 @@ func defaultSlogLogger() Logger {
 
 			return r.WithContext(logi.WithContext(r.Context(), slog.With(slogAttrs...)))
 		},
-		PostFunc: func(r *http.Request, v *Response) {
-			slog.Debug("request",
-				slog.String("user", r.Header.Get("X-User")),
-				slog.String("route", r.Pattern),
-				slog.String("request_id", r.Header.Get("X-Request-ID")),
-				slog.String("remote_ip", RealIP(r)),
-				slog.String("host", r.Host),
-				slog.String("method", r.Method),
-				slog.String("uri", r.RequestURI),
-				slog.String("user_agent", UserAgent(r)),
-				slog.Int("status", v.Status),
-				slog.Int64("latency", v.Latency.Nanoseconds()),
-				slog.String("latency_human", v.Latency.String()),
-				slog.String("bytes_in", r.Header.Get("Content-Length")),
-				slog.Int64("bytes_out", v.ResponseSize),
-			)
-		},
 	}
 }
 
-// RealIP returns the client IP extracted from common proxy headers.
-func RealIP(r *http.Request) (ip string) {
-	defer func() {
-		if ip == "" {
-			ip = r.RemoteAddr
-		}
-	}()
-
-	if tcip := r.Header.Get(trueClientIP); tcip != "" {
-		ip = tcip
-	} else if xrip := r.Header.Get(xRealIP); xrip != "" {
-		ip = xrip
-	} else if xff := r.Header.Get(xForwardedFor); xff != "" {
-		ip, _, _ = strings.Cut(xff, ",")
+func slogPostFunc(realIP func(*http.Request) string) func(*http.Request, *Response) {
+	return func(r *http.Request, v *Response) {
+		slog.Debug("request",
+			slog.String("user", r.Header.Get("X-User")),
+			slog.String("route", r.Pattern),
+			slog.String("request_id", r.Header.Get("X-Request-ID")),
+			slog.String("remote_ip", realIP(r)),
+			slog.String("host", r.Host),
+			slog.String("method", r.Method),
+			slog.String("uri", r.RequestURI),
+			slog.String("user_agent", UserAgent(r)),
+			slog.Int("status", v.Status),
+			slog.Int64("latency", v.Latency.Nanoseconds()),
+			slog.String("latency_human", v.Latency.String()),
+			slog.String("bytes_in", r.Header.Get("Content-Length")),
+			slog.Int64("bytes_out", v.ResponseSize),
+		)
 	}
-	if ip == "" || net.ParseIP(ip) == nil {
-		return ""
-	}
+}
 
+// RealIP returns the canonical immediate peer address. Forwarding headers are
+// deliberately ignored.
+func RealIP(r *http.Request) string {
+	ip, _ := proxy.ClientIP(r)
 	return ip
+}
+
+// TrustedRealIP returns a request helper backed by validated trusted proxy
+// CIDRs. Malformed forwarding headers fall back to the immediate peer.
+func TrustedRealIP(cidrs ...string) func(*http.Request) string {
+	policy, err := proxy.New(cidrs...)
+	if err != nil {
+		panic(fmt.Errorf("log: trusted proxies: %w", err))
+	}
+
+	return trustedRealIP(policy, false)
+}
+
+// UnsafeRealIP trusts common client IP forwarding headers from every peer. It
+// exists for compatibility with deployments that enforce trust externally.
+func UnsafeRealIP(r *http.Request) string {
+	return trustedRealIP(proxy.Policy{}, true)(r)
+}
+
+func trustedRealIP(policy proxy.Policy, unsafe bool) func(*http.Request) string {
+	return func(r *http.Request) string {
+		var (
+			ip  string
+			err error
+		)
+		if unsafe {
+			ip, err = proxy.UnsafeClientIP(r)
+		} else {
+			ip, err = policy.ClientIP(r)
+		}
+		if err == nil {
+			return ip
+		}
+
+		ip, _ = proxy.ClientIP(r)
+		return ip
+	}
 }
 
 // UserAgent returns the first user-agent token.
@@ -185,7 +216,8 @@ func UserAgent(r *http.Request) string {
 // //////////////////////////////////////////////////////
 
 type option struct {
-	Logger Logger
+	Logger         Logger
+	postConfigured bool
 }
 
 type Option func(*option)
@@ -195,6 +227,27 @@ func WithLogger(l Logger) Option {
 	return func(o *option) {
 		o.Logger = l
 	}
+}
+
+// WithTrustedProxies allows the built-in slog logger to derive remote_ip from
+// forwarding headers supplied by matching immediate peers. CIDRs are validated
+// when this option is created.
+func WithTrustedProxies(cidrs ...string) Option {
+	policy, err := proxy.New(cidrs...)
+	if err != nil {
+		panic(fmt.Errorf("log: trusted proxies: %w", err))
+	}
+
+	return func(o *option) {
+		o.Logger.proxyPolicy = policy
+		o.Logger.unsafeProxyHeader = false
+	}
+}
+
+// WithUnsafeProxyHeaders makes the built-in slog logger trust forwarding
+// headers from every peer. Prefer WithTrustedProxies.
+func WithUnsafeProxyHeaders() Option {
+	return func(o *option) { o.Logger.unsafeProxyHeader = true }
 }
 
 // WithSkipper sets a function to skip middleware.
@@ -210,6 +263,7 @@ func WithSkipper(skipper func(r *http.Request) bool) Option {
 func WithPostFunc(f func(r *http.Request, v *Response)) Option {
 	return func(o *option) {
 		o.Logger.PostFunc = f
+		o.postConfigured = true
 	}
 }
 

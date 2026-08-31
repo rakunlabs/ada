@@ -94,9 +94,8 @@ func Run(ctx context.Context) error {
 	}
 
 	server, err := ada.NewWithFunc(ctx, func(ctx context.Context, mux *ada.Mux) error {
-		// Public auth routes + the inline login page handler at /auth/.
+		// Public auth routes + the embedded login page at /login/.
 		authMW.Mount(mux)
-		// mux.GET("/auth/", serveLoginPage)
 
 		// Passkey demo wiring. No-op unless PASSKEY_RPID and
 		// PASSKEY_ORIGINS are set in the environment — see
@@ -180,7 +179,6 @@ func buildOAuth2FromEnv() *authoauth2.Strategy {
 	return authoauth2.New(name, cfg, authoauth2.Options{
 		Label:            label,
 		EmailVerifyCheck: true,
-		CallbackBasePath: "/auth/callback",
 	})
 }
 
@@ -233,96 +231,7 @@ var dashboardTmpl = template.Must(template.New("dashboard").Parse(`<!doctype htm
   <li><strong>roles</strong>: {{range .Roles}}{{.}} {{end}}</li>
   <li><strong>scopes</strong>: {{range .Scopes}}{{.}} {{end}}</li>
 </ul>
-<form method="post" action="/auth/logout" onsubmit="event.preventDefault();fetch('/auth/logout',{method:'POST'}).then(()=>location.href='/')">
+<form method="post" action="/logout" onsubmit="event.preventDefault();fetch('/logout',{method:'POST'}).then(()=>location.href='/')">
   <button type="submit">Log out</button>
 </form>
 `))
-
-// serveLoginPage is a minimal inline login UI used because the demo runs in
-// external-folder mode (no embedded Svelte build needed). It hits /auth/info
-// to discover strategies and renders matching widgets.
-func serveLoginPage(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(loginPageHTML))
-}
-
-const loginPageHTML = `<!doctype html><meta charset=utf-8>
-<title>Login</title>
-<style>
- body{font-family:system-ui,sans-serif;max-width:380px;margin:60px auto;padding:0 16px}
- form{display:flex;flex-direction:column;gap:8px;margin:16px 0}
- input,button{padding:8px 12px;font:inherit;border:1px solid #ccc;border-radius:6px}
- button{cursor:pointer;background:#615fff;color:#fff;border-color:#615fff}
- .err{background:#fee;padding:8px;border-radius:6px;margin-top:8px}
- .oauth{display:block;text-align:center;background:#fff;color:#000;border:1px solid #ccc;padding:8px;border-radius:6px;margin-top:8px;text-decoration:none}
- hr{margin:16px 0;border:none;border-top:1px solid #eee}
-</style>
-<h1 id="title">Sign in</h1>
-<div id="content">Loading...</div>
-<div id="error" class="err" style="display:none"></div>
-<script>
-(async () => {
-  const $c = document.getElementById('content');
-  const $e = document.getElementById('error');
-  const showErr = (msg) => { $e.textContent = msg; $e.style.display = 'block'; };
-
-  let info;
-  try {
-    const r = await fetch('/login/info');
-    info = await r.json();
-  } catch (err) { return showErr('Failed to load /login/info: ' + err); }
-
-  document.getElementById('title').textContent = info.title || 'Sign in';
-  $c.innerHTML = '';
-
-  const formStrategies = info.strategies.filter(s => (s.fields && s.fields.length) || s.kind === 'password');
-  const redirectStrategies = info.strategies.filter(s => !(s.fields && s.fields.length) && s.kind !== 'password');
-
-  for (const s of formStrategies) {
-    const form = document.createElement('form');
-    form.innerHTML = '<h3>' + s.label + '</h3>';
-    for (const f of (s.fields || [])) {
-      const input = document.createElement('input');
-      input.name = f.name; input.type = f.type || 'text'; input.placeholder = f.label || f.name;
-      input.required = !!f.required;
-      form.appendChild(input);
-    }
-    const submit = document.createElement('button');
-    submit.type = 'submit'; submit.textContent = 'Sign in';
-    form.appendChild(submit);
-    form.addEventListener('submit', async (ev) => {
-      ev.preventDefault();
-      const data = {};
-      new FormData(form).forEach((v, k) => { data[k] = v; });
-      try {
-        const r = await fetch(s.url, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-          body: JSON.stringify(data),
-        });
-        if (!r.ok) {
-          const body = await r.json().catch(() => ({}));
-          return showErr(body.message || body.error || ('Login failed: ' + r.status));
-        }
-        const params = new URLSearchParams(location.search);
-        location.assign(params.get('redirect_path') || '/app/dashboard');
-      } catch (err) { showErr(String(err)); }
-    });
-    $c.appendChild(form);
-  }
-
-  if (formStrategies.length && redirectStrategies.length) {
-    $c.appendChild(document.createElement('hr'));
-  }
-
-  for (const s of redirectStrategies) {
-    const a = document.createElement('a');
-    a.className = 'oauth'; a.textContent = s.label; a.href = s.url + (location.search || '');
-    $c.appendChild(a);
-  }
-
-  if (!info.strategies.length) {
-    $c.textContent = 'No strategies configured.';
-  }
-})();
-</script>`

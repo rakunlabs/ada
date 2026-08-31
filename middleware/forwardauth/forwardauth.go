@@ -332,7 +332,7 @@ func (f *ForwardAuth) forward(w http.ResponseWriter, r *http.Request, next http.
 	if err != nil {
 		return fmt.Errorf("calling auth service: %w", err)
 	}
-	defer authResp.Body.Close()
+	defer func(body io.ReadCloser) { _ = body.Close() }(authResp.Body)
 
 	// 2xx: authentication succeeded.
 	if authResp.StatusCode >= http.StatusOK && authResp.StatusCode < http.StatusMultipleChoices {

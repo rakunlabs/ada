@@ -1,17 +1,27 @@
 .DEFAULT_GOAL := help
 .ONESHELL:
 
-MODULE_DIRS := . $(sort $(patsubst %/go.mod,%,$(shell git ls-files '*/go.mod')))
+MODULE_DIRS := . $(sort $(patsubst %/go.mod,%,$(shell git ls-files --cached --others --exclude-standard -- '*/go.mod')))
+GOLANGCI_LINT ?= golangci-lint
 
 .PHONY: tag
 tag: ## Tags the repo with new version and tag all sub modules same time than push all
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "Refusing to tag a dirty worktree; commit all release files first"; \
+		exit 1; \
+	fi
 	@latest=$$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 || echo "none"); \
 	printf "Enter the new version (latest: $$latest): "; read version; \
+	if ! printf '%s\n' "$$version" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$$'; then \
+		echo "Invalid version: $$version (expected vX.Y.Z or vX.Y.Z-prerelease)"; \
+		exit 1; \
+	fi; \
 	echo "########################################################"; \
 	echo "Checking require versions match $$version"; \
+	version_re=$$(printf '%s\n' "$$version" | sed 's/\./\\./g'); \
 	bad=$$(grep -rEn "^[[:space:]]*(require[[:space:]]+)?github.com/rakunlabs/ada[^[:space:]]*[[:space:]]+v[0-9]" \
-		--include="go.mod" --exclude-dir="_examples" . \
-		| grep -v "[[:space:]]$$version$$" || true); \
+		--include="go.mod" . \
+		| grep -vE "[[:space:]]$${version_re}([[:space:]]|$$)" || true); \
 	if [ -n "$$bad" ]; then \
 		echo "Please fix these require versions before tagging $$version:"; \
 		echo "$$bad"; \
@@ -21,8 +31,12 @@ tag: ## Tags the repo with new version and tag all sub modules same time than pu
 	echo "########################################################"; \
 	echo "Use git tag to add new version"; \
 	tags=""; \
-	for dir in $$(find . -type f -name 'go.mod' -not -path "*/_examples/*" -exec dirname {} \; | sed 's|^\./||'); do \
+	for dir in $(filter-out _examples%,$(MODULE_DIRS)); do \
 		if [ "$$dir" = "." ]; then tag="$$version"; else tag="$$dir/$$version"; fi; \
+		if git rev-parse -q --verify "refs/tags/$$tag" >/dev/null; then \
+			echo "Tag already exists: $$tag"; \
+			exit 1; \
+		fi; \
 		echo "git tag $$tag"; \
 		tags="$$tags $$tag"; \
 	done; \
@@ -35,7 +49,15 @@ docs: ## Serve documentation
 
 .PHONY: lint
 lint: ## Lint Go files
-	@GOPATH="$(shell dirname $(PWD))" golangci-lint run ./...
+	@$(GOLANGCI_LINT) run ./...
+
+.PHONY: lint-all
+lint-all: ## Lint every Go module
+	@set -e; \
+	for dir in $(MODULE_DIRS); do \
+		printf '\n==> %s\n' "$$dir"; \
+		(cd "$$dir" && $(GOLANGCI_LINT) run ./...); \
+	done
 
 .PHONY: test
 test: ## Run unit tests

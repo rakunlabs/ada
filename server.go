@@ -10,14 +10,31 @@ import (
 	"time"
 )
 
+type listenerAddrKey struct{}
+
 var (
 	DefaultShutdownTimeout   = 10 * time.Second
 	DefaultReadHeaderTimeout = 10 * time.Second
 	ErrAlreadyStarted        = errors.New("server started already")
 	ErrListen                = errors.New("listen")
 
-	ListenerAddrContextKey = "listener_addr"
+	ListenerAddrContextKey string = "listener_addr"
+	listenerAddrContextKey listenerAddrKey
 )
+
+// listenerAddrContext supports both the typed key and the historical string
+// lookup without using a built-in string as a context.WithValue key.
+type listenerAddrContext struct {
+	context.Context
+}
+
+func (c *listenerAddrContext) Value(key any) any {
+	if key, ok := key.(string); ok && key == ListenerAddrContextKey {
+		return c.Context.Value(listenerAddrContextKey)
+	}
+
+	return c.Context.Value(key)
+}
 
 type Server struct {
 	*Mux
@@ -116,7 +133,9 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 		&http.Server{
 			ReadHeaderTimeout: opt.ReadHeaderTimeout,
 			BaseContext: func(_ net.Listener) context.Context {
-				return context.WithValue(baseContext, ListenerAddrContextKey, listener.Addr())
+				ctx := context.WithValue(baseContext, listenerAddrContextKey, listener.Addr())
+
+				return &listenerAddrContext{Context: ctx}
 			},
 			Protocols: protocols,
 			Handler:   s.Mux,
@@ -162,6 +181,9 @@ func (s *Server) start(addr string, opts ...OptionStart) error {
 // Stop gracefully shuts the server down, waiting up to the configured
 // shutdown timeout for in-flight requests to finish.
 //   - Safe to call before Start, concurrently with Start, and more than once.
+//   - If the drain deadline expires, the remaining connections are
+//     force-closed and an error wrapping the deadline is returned. The
+//     Server is left fully stopped and can be started again either way.
 func (s *Server) Stop() error {
 	return s.stopGeneration(0)
 }
@@ -199,7 +221,21 @@ func (s *Server) stopGeneration(generation uint64) error {
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+		// http.Server.Shutdown explicitly does NOT close active connections;
+		// it only stops accepting and waits for them to go idle. When the
+		// deadline expires those connections — and any hijacked ones — stay
+		// open, and start's deferred cleanup is about to nil out s.server and
+		// s.listener, so no later caller could force them shut. Close them
+		// here, while we still hold the only reference.
+		//
+		// Close is safe after Shutdown: it re-closes the already-closed
+		// listener (hence the net.ErrClosed filter below) and then tears down
+		// every remaining connection.
+		if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			return fmt.Errorf("shutdown: %w; force close: %w", err, closeErr)
+		}
+
+		return fmt.Errorf("shutdown: %w; remaining connections were force-closed", err)
 	}
 
 	return nil

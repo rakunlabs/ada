@@ -78,9 +78,32 @@ const (
 	UVDiscouraged UserVerification = "discouraged"
 )
 
-// validate fills defaults and rejects misconfiguration up front.
-// A nil receiver is an error — the caller MUST construct a config
-// before invoking ceremony methods.
+// cloneConfig applies defaults to an owned copy and validates it. New must not
+// mutate or retain caller-owned slices because they define authentication policy.
+func cloneConfig(c *Config) (*Config, error) {
+	if c == nil {
+		return nil, errors.New("passkey: nil config")
+	}
+
+	cloned := *c
+	cloned.RPOrigins = append([]string(nil), c.RPOrigins...)
+	cloned.Algorithms = append([]CredentialAlgorithm(nil), c.Algorithms...)
+	if cloned.UserVerification == "" {
+		cloned.UserVerification = UVPreferred
+	}
+	if cloned.ChallengeTTL <= 0 {
+		cloned.ChallengeTTL = 5 * time.Minute
+	}
+	if len(cloned.Algorithms) == 0 {
+		cloned.Algorithms = append([]CredentialAlgorithm(nil), DefaultAlgorithms...)
+	}
+
+	if err := cloned.validate(); err != nil {
+		return nil, err
+	}
+	return &cloned, nil
+}
+
 func (c *Config) validate() error {
 	if c == nil {
 		return errors.New("passkey: nil config")
@@ -98,16 +121,45 @@ func (c *Config) validate() error {
 	if len(c.RPOrigins) == 0 {
 		return errors.New("passkey: at least one RPOrigin is required")
 	}
-	if c.UserVerification == "" {
-		c.UserVerification = UVPreferred
-	}
-	if c.ChallengeTTL <= 0 {
-		c.ChallengeTTL = 5 * time.Minute
+	if !c.UserVerification.valid() {
+		return fmt.Errorf("passkey: invalid UserVerification %q", c.UserVerification)
 	}
 	if len(c.Algorithms) == 0 {
-		c.Algorithms = DefaultAlgorithms
+		return errors.New("passkey: at least one credential algorithm is required")
+	}
+
+	seenAlgorithms := make(map[int]struct{}, len(c.Algorithms))
+	for _, algorithm := range c.Algorithms {
+		if !supportedCredentialAlgorithm(algorithm.COSE) {
+			return fmt.Errorf("passkey: unsupported credential algorithm %d", algorithm.COSE)
+		}
+		if _, duplicate := seenAlgorithms[algorithm.COSE]; duplicate {
+			return fmt.Errorf("passkey: duplicate credential algorithm %d", algorithm.COSE)
+		}
+		seenAlgorithms[algorithm.COSE] = struct{}{}
 	}
 	return nil
+}
+
+func (u UserVerification) valid() bool {
+	switch u {
+	case UVRequired, UVPreferred, UVDiscouraged:
+		return true
+	default:
+		return false
+	}
+}
+
+func supportedCredentialAlgorithm(algorithm int) bool {
+	switch algorithm {
+	case algES256, algES384, algES512,
+		algRS256, algRS384, algRS512,
+		algPS256, algPS384, algPS512,
+		algEdDSA:
+		return true
+	default:
+		return false
+	}
 }
 
 // User is the relying-party's view of the user enrolling or signing
@@ -172,4 +224,30 @@ type SessionData struct {
 // attacker can't burn server CPU by submitting expired ceremonies.
 func (s *SessionData) expired(now time.Time) bool {
 	return !s.Expires.IsZero() && s.Expires.Before(now)
+}
+
+func cloneBytes(value []byte) []byte {
+	return append([]byte(nil), value...)
+}
+
+func cloneByteSlices(values [][]byte) [][]byte {
+	if values == nil {
+		return nil
+	}
+	cloned := make([][]byte, len(values))
+	for i, value := range values {
+		cloned[i] = cloneBytes(value)
+	}
+	return cloned
+}
+
+func cloneSessionData(data *SessionData) *SessionData {
+	if data == nil {
+		return nil
+	}
+	cloned := *data
+	cloned.Challenge = cloneBytes(data.Challenge)
+	cloned.UserHandle = cloneBytes(data.UserHandle)
+	cloned.AllowedCredentialIDs = cloneByteSlices(data.AllowedCredentialIDs)
+	return &cloned
 }

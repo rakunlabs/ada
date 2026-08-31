@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.35.0
-	github.com/rakunlabs/ada/middleware/auth v0.4.7
+	github.com/rakunlabs/ada/middleware/auth v0.4.10
 	github.com/redis/go-redis/v9 v9.14.0
 	github.com/twmb/tlscfg v1.3.0
 )

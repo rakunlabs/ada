@@ -1,41 +1,70 @@
-on: [push]
+name: CI
 
-name: Test
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
 jobs:
-  sonarcloud:
+  ci:
+    name: Go
     runs-on: ubuntu-latest
     steps:
-    - name: get repository name
-      run: echo "REPOSITORY_NAME=${GITHUB_REPOSITORY#*/}" >> $GITHUB_ENV
-    - uses: actions/checkout@v3
-      with:
-        # Disabling shallow clone is recommended for improving relevancy of reporting
-        fetch-depth: 0
-    - uses: actions/setup-go@v4
-    - name: golangci-lint general
-      uses: golangci/golangci-lint-action@v3
-      with:
-        args: --issues-exit-code 0 --out-format checkstyle:golangci-lint-report.out,colored-line-number
-    - name: golangci-lint critical check
-      run: |
-        golangci-lint run --new-from-rev remotes/origin/${{ github.event.repository.default_branch }} ./...
-    - name: Run tests
-      run: |
-        make test-all
-        go test -coverprofile=coverage.out -json ./... > test-report.out
-    - name: SonarCloud Scan
-      uses: sonarsource/sonarcloud-github-action@master
-      with:
-        args: >
-          -Dsonar.organization=${{ github.repository_owner }}
-          -Dsonar.projectKey=${{ github.repository_owner }}_${{ env.REPOSITORY_NAME }}
-          -Dsonar.go.coverage.reportPaths=coverage.out
-          -Dsonar.go.tests.reportPaths=test-report.out
-          -Dsonar.go.golangci-lint.reportPaths=golangci-lint-report.out
-          -Dsonar.sources=.
-          -Dsonar.exclusions=**/vendor/**,**/*_test.go
-          -Dsonar.tests=.
-          -Dsonar.test.inclusions=**/*_test.go
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            **/go.sum
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          install-only: true
+
+      - name: Lint all modules
+        run: make lint-all
+
+      - name: Generate Sonar lint report
+        if: github.event_name == 'push'
+        run: golangci-lint run --output.checkstyle.path=golangci-lint-report.out ./...
+
+      - name: Run race tests
+        run: make test-all
+
+      - name: Run vet
+        run: make vet-all
+
+      - name: Check examples
+        run: make examples-check benchmarks-check
+
+      - name: Generate Sonar test reports
+        if: github.event_name == 'push'
+        run: go test -coverprofile=coverage.out -json ./... > test-report.out
+
+      - name: SonarQube Cloud scan
+        if: github.event_name == 'push'
+        uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          args: >
+            -Dsonar.organization=${{ github.repository_owner }}
+            -Dsonar.projectKey=${{ github.repository_owner }}_${{ github.event.repository.name }}
+            -Dsonar.go.coverage.reportPaths=coverage.out
+            -Dsonar.go.tests.reportPaths=test-report.out
+            -Dsonar.go.golangci-lint.reportPaths=golangci-lint-report.out
+            -Dsonar.sources=.
+            -Dsonar.exclusions=**/vendor/**,**/*_test.go
+            -Dsonar.tests=.
+            -Dsonar.test.inclusions=**/*_test.go
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

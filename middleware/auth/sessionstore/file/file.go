@@ -3,6 +3,7 @@ package file
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,7 +56,10 @@ type Config struct {
 	GCInterval time.Duration `cfg:"gc_interval"`
 }
 
-const filePrefix = "session_"
+const (
+	filePrefix             = "session_"
+	transactionLockStripes = 64
+)
 
 // New creates a new filesystem-based session store.
 func New(cfg Config, opts sessionstore.Options) (*Store, error) {
@@ -130,12 +134,18 @@ func (s *Store) Close() error {
 	return nil
 }
 
+func (s *Store) newSession(name string) *sessionstore.Session {
+	options := s.options
+
+	return sessionstore.NewSession(s, name, &options)
+}
+
 // Get returns the session for the given name.
 func (s *Store) Get(r *http.Request, name string) (*sessionstore.Session, error) {
 	cookieValue, err := sessionstore.ReadSessionCookie(r, name)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
-			return sessionstore.NewSession(s, name, &s.options), nil
+			return s.newSession(name), nil
 		}
 
 		return nil, fmt.Errorf("file: read session cookie: %w", err)
@@ -143,19 +153,19 @@ func (s *Store) Get(r *http.Request, name string) (*sessionstore.Session, error)
 
 	sessionID, err := s.codec.Decode(name, cookieValue)
 	if err != nil {
-		return sessionstore.NewSession(s, name, &s.options), nil
+		return s.newSession(name), nil
 	}
 
-	data, err := s.load(sessionID)
+	data, err := s.load(r.Context(), sessionID)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, sessionstore.ErrNoSession) {
-			return sessionstore.NewSession(s, name, &s.options), nil
+			return s.newSession(name), nil
 		}
 
 		return nil, fmt.Errorf("file: load session: %w", err)
 	}
 
-	session := sessionstore.NewSession(s, name, &s.options)
+	session := s.newSession(name)
 	session.ID = sessionID
 	session.Values = data
 	session.IsNew = false
@@ -166,11 +176,15 @@ func (s *Store) Get(r *http.Request, name string) (*sessionstore.Session, error)
 // Save persists the session and sets the cookie.
 func (s *Store) Save(r *http.Request, w http.ResponseWriter, session *sessionstore.Session) error {
 	if session.Options.MaxAge < 0 {
+		var deleteErr error
 		if session.ID != "" {
-			s.delete(session.ID)
+			deleteErr = s.delete(r.Context(), session.ID)
 		}
 
 		sessionstore.SetSessionCookie(w, session.Name(), "", session.Options)
+		if deleteErr != nil {
+			return fmt.Errorf("failed to delete session: %w", deleteErr)
+		}
 
 		return nil
 	}
@@ -189,7 +203,7 @@ func (s *Store) Save(r *http.Request, w http.ResponseWriter, session *sessionsto
 		ttl = time.Duration(session.Options.MaxAge) * time.Second
 	}
 
-	if err := s.save(session.ID, session.Values, ttl); err != nil {
+	if err := s.save(r.Context(), session.ID, session.Values, ttl); err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
@@ -200,8 +214,8 @@ func (s *Store) Save(r *http.Request, w http.ResponseWriter, session *sessionsto
 }
 
 // LoadByID implements sessionstore.DirectStore.
-func (s *Store) LoadByID(_ context.Context, id string) (map[string]any, error) {
-	v, err := s.load(id)
+func (s *Store) LoadByID(ctx context.Context, id string) (map[string]any, error) {
+	v, err := s.load(ctx, id)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, sessionstore.ErrNoSession
@@ -214,15 +228,13 @@ func (s *Store) LoadByID(_ context.Context, id string) (map[string]any, error) {
 }
 
 // SaveByID implements sessionstore.DirectStore.
-func (s *Store) SaveByID(_ context.Context, id string, values map[string]any, ttl time.Duration) error {
-	return s.save(id, values, ttl)
+func (s *Store) SaveByID(ctx context.Context, id string, values map[string]any, ttl time.Duration) error {
+	return s.save(ctx, id, values, ttl)
 }
 
 // DeleteByID implements sessionstore.DirectStore.
-func (s *Store) DeleteByID(_ context.Context, id string) error {
-	s.delete(id)
-
-	return nil
+func (s *Store) DeleteByID(ctx context.Context, id string) error {
+	return s.delete(ctx, id)
 }
 
 // record is the on-disk envelope. Values are nested so an expiry can be stored
@@ -247,15 +259,130 @@ func safeID(sessionID string) bool {
 	return !strings.ContainsAny(sessionID, `/\.`)
 }
 
-func (s *Store) load(sessionID string) (map[string]any, error) {
+func transactionLockStripe(sessionID string) byte {
+	digest := sha256.Sum256([]byte(sessionID))
+
+	return digest[0] % transactionLockStripes
+}
+
+func (s *Store) transactionLockPath(sessionID string) string {
+	name := fmt.Sprintf(".transaction-%02x.lock", transactionLockStripe(sessionID))
+
+	return filepath.Join(s.path, name)
+}
+
+func (s *Store) load(ctx context.Context, sessionID string) (map[string]any, error) {
 	if !safeID(sessionID) {
 		return nil, sessionstore.ErrNoSession
 	}
 
+	rec, err := s.readRecord(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if !s.expired(rec) {
+		return recordValues(rec), nil
+	}
+
+	// A concurrent save may have replaced the expired record after the first
+	// read. Serialize with writers and re-read before removing anything.
+	unlock, err := s.lockTransaction(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	return s.loadLocked(sessionID)
+}
+
+func (s *Store) loadLocked(sessionID string) (map[string]any, error) {
+	rec, err := s.liveRecordLocked(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	return recordValues(rec), nil
+}
+
+func (s *Store) liveRecordLocked(sessionID string) (record, error) {
+	rec, err := s.readRecord(sessionID)
+	if err != nil {
+		return record{}, err
+	}
+	if s.expired(rec) {
+		if err := s.deleteLocked(sessionID); err != nil {
+			return record{}, err
+		}
+
+		return record{}, sessionstore.ErrNoSession
+	}
+
+	return rec, nil
+}
+
+func (s *Store) readRecord(sessionID string) (record, error) {
 	s.mu.RLock()
 	data, err := os.ReadFile(s.filePath(sessionID))
 	s.mu.RUnlock()
 
+	if err != nil {
+		return record{}, err
+	}
+
+	if s.maxLength > 0 && len(data) > s.maxLength {
+		return record{}, fmt.Errorf("session data exceeds maximum length")
+	}
+
+	var rec record
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return record{}, err
+	}
+
+	return rec, nil
+}
+
+func (s *Store) expired(rec record) bool {
+	return rec.ExpiresAt > 0 && s.now().Unix() >= rec.ExpiresAt
+}
+
+func recordValues(rec record) map[string]any {
+	if rec.Values == nil {
+		rec.Values = make(map[string]any)
+	}
+
+	return rec.Values
+}
+
+func (s *Store) save(ctx context.Context, sessionID string, values map[string]any, ttl time.Duration) error {
+	if !safeID(sessionID) {
+		return fmt.Errorf("file: unsafe session id")
+	}
+
+	data, err := s.marshalRecord(values, ttl)
+	if err != nil {
+		return err
+	}
+
+	unlock, err := s.lockTransaction(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	return s.writeRecord(sessionID, data)
+}
+
+func (s *Store) marshalRecord(values map[string]any, ttl time.Duration) ([]byte, error) {
+	rec := record{Values: values}
+	if ttl > 0 {
+		rec.ExpiresAt = s.now().Add(ttl).Unix()
+	}
+
+	return s.marshalRecordEnvelope(rec)
+}
+
+func (s *Store) marshalRecordEnvelope(rec record) ([]byte, error) {
+	data, err := json.Marshal(rec)
 	if err != nil {
 		return nil, err
 	}
@@ -264,43 +391,10 @@ func (s *Store) load(sessionID string) (map[string]any, error) {
 		return nil, fmt.Errorf("session data exceeds maximum length")
 	}
 
-	var rec record
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, err
-	}
-
-	if rec.ExpiresAt > 0 && s.now().Unix() >= rec.ExpiresAt {
-		s.delete(sessionID)
-
-		return nil, sessionstore.ErrNoSession
-	}
-
-	if rec.Values == nil {
-		rec.Values = make(map[string]any)
-	}
-
-	return rec.Values, nil
+	return data, nil
 }
 
-func (s *Store) save(sessionID string, values map[string]any, ttl time.Duration) error {
-	if !safeID(sessionID) {
-		return fmt.Errorf("file: unsafe session id")
-	}
-
-	rec := record{Values: values}
-	if ttl > 0 {
-		rec.ExpiresAt = s.now().Add(ttl).Unix()
-	}
-
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-
-	if s.maxLength > 0 && len(data) > s.maxLength {
-		return fmt.Errorf("session data exceeds maximum length")
-	}
-
+func (s *Store) writeRecord(sessionID string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -310,7 +404,7 @@ func (s *Store) save(sessionID string, values map[string]any, ttl time.Duration)
 	}
 
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
@@ -325,15 +419,34 @@ func (s *Store) save(sessionID string, values map[string]any, ttl time.Duration)
 	return os.Rename(tmpName, s.filePath(sessionID))
 }
 
-func (s *Store) delete(sessionID string) {
+func (s *Store) delete(ctx context.Context, sessionID string) error {
 	if !safeID(sessionID) {
-		return
+		return fmt.Errorf("file: unsafe session id")
 	}
 
+	unlock, err := s.lockTransaction(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		return err
+	}
+	defer unlock()
+
+	return s.deleteLocked(sessionID)
+}
+
+func (s *Store) deleteLocked(sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_ = os.Remove(s.filePath(sessionID))
+	err := os.Remove(s.filePath(sessionID))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	return err
 }
 
 // sweep removes every expired session file.
@@ -346,29 +459,22 @@ func (s *Store) sweep() {
 	now := s.now().Unix()
 
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), filePrefix) {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), filePrefix) || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 
-		full := filepath.Join(s.path, e.Name())
+		sessionID := strings.TrimSuffix(strings.TrimPrefix(e.Name(), filePrefix), ".json")
+		if !safeID(sessionID) {
+			continue
+		}
 
-		s.mu.RLock()
-		data, err := os.ReadFile(full)
-		s.mu.RUnlock()
-
+		rec, err := s.readRecord(sessionID)
 		if err != nil {
 			continue
 		}
 
-		var rec record
-		if err := json.Unmarshal(data, &rec); err != nil {
-			continue
-		}
-
 		if rec.ExpiresAt > 0 && now >= rec.ExpiresAt {
-			s.mu.Lock()
-			_ = os.Remove(full)
-			s.mu.Unlock()
+			_, _ = s.load(context.Background(), sessionID)
 		}
 	}
 }

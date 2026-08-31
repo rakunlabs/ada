@@ -46,7 +46,10 @@ func newStrategy(t *testing.T, opts ...magiclink.Option) (*magiclink.Strategy, *
 
 	c := &capture{}
 
-	all := append([]magiclink.Option{magiclink.WithTokenStore(store)}, opts...)
+	all := append([]magiclink.Option{
+		magiclink.WithTokenStore(store),
+		magiclink.WithVerifyBaseURL("https://app.example"),
+	}, opts...)
 	s := magiclink.New("mail", c.send, resolver, all...)
 
 	return s, c, store
@@ -110,6 +113,177 @@ func TestVerifyBaseURLOrigin(t *testing.T) {
 
 	if !strings.HasPrefix(c.url, "https://public.example/") {
 		t.Fatalf("verify url = %q", c.url)
+	}
+}
+
+func TestRequestOriginIsNotTrustedByDefault(t *testing.T) {
+	store := magiclink.NewMemoryStore()
+	t.Cleanup(func() { _ = store.Close() })
+
+	c := &capture{}
+	s := magiclink.New("mail", c.send, resolver, magiclink.WithTokenStore(store))
+	s.SetCallbackBasePath("/auth/login/callback")
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "https://attacker.example/auth/login/pass/mail",
+		strings.NewReader(`{"email":"alice@example.com"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "attacker.example")
+
+	_, outcome, _ := s.Login(rec, r)
+	if outcome != strategy.OutcomeFailed || rec.Code != http.StatusInternalServerError {
+		t.Fatalf("outcome = %v, code = %d, body = %s", outcome, rec.Code, rec.Body)
+	}
+	if c.calls != 0 {
+		t.Fatal("sender must not receive a caller-controlled verification URL")
+	}
+}
+
+func TestTrustedProxyMaySupplyOrigin(t *testing.T) {
+	store := magiclink.NewMemoryStore()
+	t.Cleanup(func() { _ = store.Close() })
+
+	c := &capture{}
+	s := magiclink.New("mail", c.send, resolver,
+		magiclink.WithTokenStore(store),
+		magiclink.WithTrustedProxies("10.0.0.0/8"),
+	)
+	s.SetCallbackBasePath("/auth/login/callback")
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "http://internal/auth/login/pass/mail",
+		strings.NewReader(`{"email":"alice@example.com"}`))
+	r.RemoteAddr = "10.1.2.3:1234"
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "public.example")
+
+	if _, outcome, _ := s.Login(rec, r); outcome != strategy.OutcomePending {
+		t.Fatalf("trusted request failed: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.HasPrefix(c.url, "https://public.example/") {
+		t.Fatalf("verify URL = %q", c.url)
+	}
+}
+
+func TestUntrustedPeerCannotSupplyForwardedOrigin(t *testing.T) {
+	store := magiclink.NewMemoryStore()
+	t.Cleanup(func() { _ = store.Close() })
+
+	c := &capture{}
+	s := magiclink.New("mail", c.send, resolver,
+		magiclink.WithTokenStore(store),
+		magiclink.WithTrustedProxies("10.0.0.0/8"),
+	)
+	s.SetCallbackBasePath("/auth/login/callback")
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "http://internal/auth/login/pass/mail",
+		strings.NewReader(`{"email":"alice@example.com"}`))
+	r.RemoteAddr = "203.0.113.9:1234"
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "attacker.example")
+
+	if _, outcome, _ := s.Login(rec, r); outcome != strategy.OutcomeFailed {
+		t.Fatal("untrusted forwarded origin was accepted")
+	}
+	if c.calls != 0 {
+		t.Fatal("sender called for an untrusted origin")
+	}
+}
+
+func TestTrustedProxyOriginIsValidated(t *testing.T) {
+	store := magiclink.NewMemoryStore()
+	t.Cleanup(func() { _ = store.Close() })
+
+	for name, headers := range map[string]map[string]string{
+		"malformed proto": {"X-Forwarded-Proto": "javascript", "X-Forwarded-Host": "public.example"},
+		"proto chain":     {"X-Forwarded-Proto": "https, http", "X-Forwarded-Host": "public.example"},
+		"host chain":      {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "public.example, attacker.example"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := &capture{}
+			s := magiclink.New("mail", c.send, resolver,
+				magiclink.WithTokenStore(store),
+				magiclink.WithTrustedProxies("10.0.0.0/8"),
+			)
+			s.SetCallbackBasePath("/auth/login/callback")
+
+			rec := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, "http://internal/auth/login/pass/mail",
+				strings.NewReader(`{"email":"alice@example.com"}`))
+			r.RemoteAddr = "10.1.2.3:1234"
+			r.Header.Set("Content-Type", "application/json")
+			for key, value := range headers {
+				r.Header.Set(key, value)
+			}
+
+			if _, outcome, _ := s.Login(rec, r); outcome != strategy.OutcomeFailed {
+				t.Fatal("malformed forwarded origin was accepted")
+			}
+			if c.calls != 0 {
+				t.Fatal("sender called with malformed forwarded origin")
+			}
+		})
+	}
+}
+
+func TestTrustedIPv6ProxyMaySupplyIPv6Origin(t *testing.T) {
+	store := magiclink.NewMemoryStore()
+	t.Cleanup(func() { _ = store.Close() })
+
+	c := &capture{}
+	s := magiclink.New("mail", c.send, resolver,
+		magiclink.WithTokenStore(store),
+		magiclink.WithTrustedProxies("2001:db8::/32"),
+	)
+	s.SetCallbackBasePath("/auth/login/callback")
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "http://internal/auth/login/pass/mail",
+		strings.NewReader(`{"email":"alice@example.com"}`))
+	r.RemoteAddr = "[2001:db8::1]:1234"
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("X-Forwarded-Host", "[2001:0db8::8]:8443")
+
+	if _, outcome, _ := s.Login(rec, r); outcome != strategy.OutcomePending {
+		t.Fatalf("trusted IPv6 request failed: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.HasPrefix(c.url, "https://[2001:db8::8]:8443/") {
+		t.Fatalf("verify URL = %q", c.url)
+	}
+}
+
+func TestUnsafeRequestOriginRequiresExplicitOptIn(t *testing.T) {
+	store := magiclink.NewMemoryStore()
+	t.Cleanup(func() { _ = store.Close() })
+	c := &capture{}
+	s := magiclink.New("mail", c.send, resolver,
+		magiclink.WithTokenStore(store),
+		magiclink.WithUnsafeRequestOrigin(),
+	)
+	s.SetCallbackBasePath("/auth/login/callback")
+
+	sendLink(t, s, "alice@example.com")
+	if !strings.HasPrefix(c.url, "https://app.example/") {
+		t.Fatalf("legacy request origin = %q", c.url)
+	}
+}
+
+func TestVerifyBaseURLIsValidatedAtConstruction(t *testing.T) {
+	for _, raw := range []string{"", "public.example", "ftp://public.example", "https://user@public.example", "https://public.example/path", "https://public.example?x=1"} {
+		t.Run(raw, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("WithVerifyBaseURL(%q) did not panic", raw)
+				}
+			}()
+
+			_ = magiclink.New("mail", (&capture{}).send, resolver, magiclink.WithVerifyBaseURL(raw))
+		})
 	}
 }
 

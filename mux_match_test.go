@@ -43,7 +43,7 @@ func TestMatch_WalkResult(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var res matchResult
-			mux.match(mux.routes.load(), tc.path, &res)
+			mux.matchMethod(mux.routes.load(), http.MethodGet, tc.path, &res)
 
 			if got := res.node != nil; got != tc.matched {
 				t.Fatalf("matched = %v, want %v", got, tc.matched)
@@ -64,6 +64,153 @@ func TestMatch_WalkResult(t *testing.T) {
 			}
 			if res.wildcardOffset != tc.wildcardOffset {
 				t.Errorf("wildcardOffset = %d, want %d", res.wildcardOffset, tc.wildcardOffset)
+			}
+		})
+	}
+}
+
+// TestMatch_MethodAwareWalk exercises the walk's method awareness directly:
+// which node it settles on, and whether it produced a dispatchable entry.
+//
+// The walk used to answer a pure path question and leave the method to
+// dispatch, which meant the first node holding any handler ended the search
+// even when it could not serve the request.
+func TestMatch_MethodAwareWalk(t *testing.T) {
+	noop := func(w http.ResponseWriter, r *http.Request) {}
+
+	mux := NewMux()
+	mux.POST("/a/b", noop)
+	mux.GET("/a/{id}", noop)
+	mux.POST("/files/{p...}", noop)
+	mux.GET("/files/deep/{q...}", noop)
+
+	for _, tc := range []struct {
+		name    string
+		method  string
+		path    string
+		pattern string // "" means the walk produced no entry
+		greedy  bool
+	}{
+		{name: "static serves its own method", method: http.MethodPost, path: "/a/b", pattern: "/a/b"},
+		{name: "static dead end falls to param", method: http.MethodGet, path: "/a/b", pattern: "/a/{id}"},
+		{name: "auto-HEAD reaches the param branch", method: http.MethodHead, path: "/a/b", pattern: "/a/{id}"},
+		{name: "no candidate serves the method", method: http.MethodPut, path: "/a/b"},
+		{
+			name:   "deepest greedy wins when it serves",
+			method: http.MethodGet, path: "/files/deep/x/y",
+			pattern: "/files/deep/{q...}", greedy: true,
+		},
+		{
+			name:   "shallower greedy takes over when the deeper one cannot serve",
+			method: http.MethodPost, path: "/files/deep/x/y",
+			pattern: "/files/{p...}", greedy: true,
+		},
+		{name: "neither greedy serves", method: http.MethodPut, path: "/files/deep/x/y"},
+		{name: "path miss", method: http.MethodGet, path: "/nothing/here"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var res matchResult
+			mux.matchMethod(mux.routes.load(), tc.method, tc.path, &res)
+
+			if tc.pattern == "" {
+				if res.entry != nil {
+					t.Fatalf("entry = %q, want none", res.entry.pattern)
+				}
+
+				return
+			}
+
+			if res.entry == nil {
+				t.Fatalf("no entry, want %q", tc.pattern)
+			}
+			if res.entry.pattern != tc.pattern {
+				t.Fatalf("pattern = %q, want %q", res.entry.pattern, tc.pattern)
+			}
+			if res.node == nil {
+				t.Fatal("entry resolved but node is nil")
+			}
+			if res.node.Possible != tc.greedy {
+				t.Fatalf("greedy = %v, want %v", res.node.Possible, tc.greedy)
+			}
+		})
+	}
+}
+
+// TestPathAllow covers the cold-path walk that decides 404 vs 405 and builds
+// the Allow header. It has to see EVERY node matching the path, not just the
+// one route selection settled on, or a 405 under-reports what the path
+// actually accepts.
+func TestPathAllow(t *testing.T) {
+	noop := func(w http.ResponseWriter, r *http.Request) {}
+
+	for _, tc := range []struct {
+		name   string
+		routes func(*Mux)
+		path   string
+		want   string
+	}{
+		{
+			name:   "single node",
+			routes: func(m *Mux) { m.POST("/a/b", noop) },
+			path:   "/a/b",
+			want:   "OPTIONS, POST",
+		},
+		{
+			name:   "static and param merge",
+			routes: func(m *Mux) { m.POST("/a/b", noop); m.GET("/a/{id}", noop) },
+			path:   "/a/b",
+			want:   "GET, HEAD, OPTIONS, POST",
+		},
+		{
+			name: "static, param and wildcard merge",
+			routes: func(m *Mux) {
+				m.POST("/a/b", noop)
+				m.DELETE("/a/{id}", noop)
+				m.GET("/a/*", noop)
+			},
+			path: "/a/b",
+			want: "DELETE, GET, HEAD, OPTIONS, POST",
+		},
+		{
+			name: "greedies at two depths merge",
+			routes: func(m *Mux) {
+				m.POST("/a/{p...}", noop)
+				m.GET("/a/b/{q...}", noop)
+			},
+			path: "/a/b/c",
+			want: "GET, HEAD, OPTIONS, POST",
+		},
+		{
+			name:   "identical method sets dedupe",
+			routes: func(m *Mux) { m.GET("/a/b", noop); m.GET("/a/{id}", noop) },
+			path:   "/a/b",
+			want:   "GET, HEAD, OPTIONS",
+		},
+		{
+			name:   "path miss reports nothing",
+			routes: func(m *Mux) { m.POST("/a/b", noop) },
+			path:   "/a/b/c",
+			want:   "",
+		},
+		{
+			name:   "catch-all contributes nothing: it is never a 405",
+			routes: func(m *Mux) { m.HandleFunc("/a/{id}", noop) },
+			path:   "/a/b",
+			want:   "",
+		},
+		{
+			name:   "greedy needs a non-empty segment",
+			routes: func(m *Mux) { m.POST("/a/{p...}", noop) },
+			path:   "/a/",
+			want:   "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := NewMux()
+			tc.routes(mux)
+
+			if got := pathAllow(mux.routes.load(), tc.path); got != tc.want {
+				t.Fatalf("pathAllow(%q) = %q, want %q", tc.path, got, tc.want)
 			}
 		})
 	}
@@ -108,6 +255,9 @@ func TestEmptyWildcardPathTargetsMuxRoot(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.String() != "a/b" {
 		t.Fatalf("status = %d body = %q, want 200 / a/b", rec.Code, rec.Body.String())
 	}
+	if code, _ := statusOf(t, mux, http.MethodGet, "/"); code != http.StatusNotFound {
+		t.Fatalf("root status = %d, want 404 because wildcard segments are non-empty", code)
+	}
 
 	if !mux.RemoveWildcard("") {
 		t.Fatal("RemoveWildcard did not remove the root wildcard")
@@ -115,6 +265,52 @@ func TestEmptyWildcardPathTargetsMuxRoot(t *testing.T) {
 
 	if code, _ := statusOf(t, mux, http.MethodGet, "/a/b"); code != http.StatusNotFound {
 		t.Fatalf("status after removal = %d, want 404", code)
+	}
+}
+
+func TestHandleFuncWildcardNormalizesBasePath(t *testing.T) {
+	for _, routePath := range []string{"/assets", "/assets/", "/assets///"} {
+		t.Run(routePath, func(t *testing.T) {
+			mux := NewMux()
+			mux.HandleFuncWildcard(routePath, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(r.Pattern + "|" + r.PathValue("*")))
+			})
+
+			rec := serve(mux, http.MethodGet, "/assets/js/app.js")
+			if rec.Code != http.StatusOK || rec.Body.String() != "/assets/*|js/app.js" {
+				t.Fatalf("status = %d body = %q", rec.Code, rec.Body.String())
+			}
+			for _, base := range []string{"/assets", "/assets/"} {
+				if code, _ := statusOf(t, mux, http.MethodGet, base); code != http.StatusNotFound {
+					t.Fatalf("base path %q status = %d, want 404", base, code)
+				}
+			}
+			if !mux.RemoveWildcard(routePath) {
+				t.Fatal("RemoveWildcard did not use the registration normalization")
+			}
+		})
+	}
+}
+
+func TestNormalizeWildcardPathPreservesExplicitPatterns(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"", "/*"},
+		{"/", "/*"},
+		{"assets", "assets/*"},
+		{"/assets", "/assets/*"},
+		{"/assets/", "/assets/*"},
+		{"/assets/*", "/assets/*"},
+		{"/assets/*/", "/assets/*"},
+		{"/teams/*/members", "/teams/*/members"},
+		{"/files/{path...}", "/files/{path...}"},
+		{"/files/{path...}/", "/files/{path...}"},
+	} {
+		if got := normalizeWildcardPath(tc.path); got != tc.want {
+			t.Errorf("normalizeWildcardPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
 	}
 }
 

@@ -145,12 +145,12 @@ func WithHidden() Option {
 // treated as the username key, the second as the password key for parsing.
 func WithFields(fields ...strategy.Field) Option {
 	return func(s *Strategy) {
-		s.fields = fields
-		if len(fields) >= 1 {
-			s.usernameField = fields[0].Name
+		s.fields = append([]strategy.Field(nil), fields...)
+		if len(s.fields) >= 1 {
+			s.usernameField = s.fields[0].Name
 		}
-		if len(fields) >= 2 {
-			s.passwordField = fields[1].Name
+		if len(s.fields) >= 2 {
+			s.passwordField = s.fields[1].Name
 		}
 	}
 }
@@ -194,7 +194,7 @@ func (s *Strategy) Descriptor() strategy.Descriptor {
 		Kind:  "password",
 		Label: s.label,
 		// LoginURL is resolved by the auth middleware from cfg.Base.
-		Fields:   s.fields,
+		Fields:   append([]strategy.Field(nil), s.fields...),
 		Priority: s.priority,
 		Hidden:   s.hidden,
 	}

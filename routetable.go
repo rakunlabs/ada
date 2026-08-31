@@ -79,11 +79,21 @@ func (m *Mux) ApplyRoutes(fn func(*RouteBuilder)) {
 }
 
 func normalizeWildcardPath(path string) string {
-	if path == "" || strings.HasSuffix(path, "/") {
-		return path + "*"
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return "/*"
 	}
 
-	return path
+	// An explicit wildcard pattern already states the caller's intent. In
+	// particular, appending another star would invalidate middle-star and
+	// named-greedy patterns.
+	for segment := range strings.SplitSeq(strings.TrimPrefix(path, "/"), "/") {
+		if segment == "*" || isGreedyParam(segment) {
+			return path
+		}
+	}
+
+	return path + "/*"
 }
 
 // routeTable owns the radix trie and is shared, by pointer, between a Mux and
@@ -241,7 +251,11 @@ type RouteBuilder struct {
 }
 
 // HandleWithMethod adds or replaces a route in the batch.
+//   - Panics if method is neither "" nor a valid uppercase HTTP method token,
+//     exactly as Mux.HandleWithMethod does; see checkMethod.
 func (b *RouteBuilder) HandleWithMethod(method, routePath string, handler http.HandlerFunc, middlewares ...MiddlewareFunc) {
+	checkMethod(method)
+
 	combined := make([]MiddlewareFunc, 0, len(b.middlewares)+len(middlewares))
 	combined = append(combined, b.middlewares...)
 	combined = append(combined, middlewares...)
@@ -261,8 +275,8 @@ func (b *RouteBuilder) RemoveWildcard(routePath string) bool {
 
 // clone deep-copies the routing structure of the subtree.
 //
-// Handlers, param descriptors and the errorScope Mux pointers are shared with
-// the original: they are immutable once registered — SetHandler replaces whole
+// Handlers, param descriptors and error-scope Mux pointers are shared with the
+// original: they are immutable once registered — SetHandler replaces whole
 // methodEntry values rather than editing them — so sharing cannot let a reader
 // observe a mutation.
 func (n *node) clone() *node {
@@ -336,6 +350,9 @@ func (n *node) removeRoute(method, pattern string) bool {
 
 	if removed {
 		n.allow = buildAllowHeader(n)
+		if n.Possible && !n.IsHandlerExists() {
+			n.Possible = false
+		}
 	}
 
 	for _, child := range n.StaticChildren {

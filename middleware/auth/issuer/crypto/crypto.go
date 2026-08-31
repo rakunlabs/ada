@@ -29,9 +29,13 @@ var (
 	ErrNotEncrypted = errors.New("crypto: value is not encrypted")
 )
 
-// prefix marks our wire format so a plaintext value left over from an
-// unencrypted deployment is recognisable rather than garbage.
-const prefix = "enc:v1:"
+// Prefixes mark our wire formats so a plaintext value left over from an
+// unencrypted deployment is recognisable rather than garbage. Version 2 binds
+// caller-supplied associated data; version 1 remains readable for migration.
+const (
+	prefixV1 = "enc:v1:"
+	prefixV2 = "enc:v2:"
+)
 
 // Cipher is an AES-GCM issuer.Cipher with hot-swappable keys.
 type Cipher struct {
@@ -104,6 +108,16 @@ func isAESLen(n int) bool {
 
 // Encrypt seals plaintext and returns a prefixed, base64-encoded value.
 func (c *Cipher) Encrypt(plaintext []byte) ([]byte, error) {
+	return c.encrypt(plaintext, nil, prefixV1)
+}
+
+// EncryptWithAssociatedData seals plaintext while authenticating associatedData.
+// Decryption succeeds only when the same associated data is supplied.
+func (c *Cipher) EncryptWithAssociatedData(plaintext, associatedData []byte) ([]byte, error) {
+	return c.encrypt(plaintext, associatedData, prefixV2)
+}
+
+func (c *Cipher) encrypt(plaintext, associatedData []byte, prefix string) ([]byte, error) {
 	aead := c.load()
 	if aead == nil {
 		return nil, ErrKeyRequired
@@ -114,7 +128,7 @@ func (c *Cipher) Encrypt(plaintext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("crypto: read random: %w", err)
 	}
 
-	sealed := aead.Seal(nonce, nonce, plaintext, nil)
+	sealed := aead.Seal(nonce, nonce, plaintext, associatedData)
 
 	out := make([]byte, 0, len(prefix)+base64.RawStdEncoding.EncodedLen(len(sealed)))
 	out = append(out, prefix...)
@@ -125,6 +139,18 @@ func (c *Cipher) Encrypt(plaintext []byte) ([]byte, error) {
 
 // Decrypt opens a value produced by Encrypt.
 func (c *Cipher) Decrypt(ciphertext []byte) ([]byte, error) {
+	return c.decrypt(ciphertext, nil)
+}
+
+// DecryptWithAssociatedData opens a value produced by
+// EncryptWithAssociatedData. Legacy v1 values are opened without associated
+// data so persisted sessions survive an upgrade and are rewritten as v2 on the
+// next save.
+func (c *Cipher) DecryptWithAssociatedData(ciphertext, associatedData []byte) ([]byte, error) {
+	return c.decrypt(ciphertext, associatedData)
+}
+
+func (c *Cipher) decrypt(ciphertext, associatedData []byte) ([]byte, error) {
 	aead := c.load()
 	if aead == nil {
 		return nil, ErrKeyRequired
@@ -134,7 +160,18 @@ func (c *Cipher) Decrypt(ciphertext []byte) ([]byte, error) {
 		return nil, ErrNotEncrypted
 	}
 
-	sealed, err := base64.RawStdEncoding.AppendDecode(nil, ciphertext[len(prefix):])
+	prefixLen := 0
+	switch {
+	case hasPrefix(ciphertext, prefixV2):
+		prefixLen = len(prefixV2)
+	case hasPrefix(ciphertext, prefixV1):
+		prefixLen = len(prefixV1)
+		associatedData = nil
+	default:
+		return nil, ErrNotEncrypted
+	}
+
+	sealed, err := base64.RawStdEncoding.AppendDecode(nil, ciphertext[prefixLen:])
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCiphertext, err)
 	}
@@ -145,7 +182,7 @@ func (c *Cipher) Decrypt(ciphertext []byte) ([]byte, error) {
 
 	nonce, body := sealed[:aead.NonceSize()], sealed[aead.NonceSize():]
 
-	plaintext, err := aead.Open(nil, nonce, body, nil)
+	plaintext, err := aead.Open(nil, nonce, body, associatedData)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCiphertext, err)
 	}
@@ -155,7 +192,11 @@ func (c *Cipher) Decrypt(ciphertext []byte) ([]byte, error) {
 
 // IsEncrypted reports whether v carries this package's wire format.
 func IsEncrypted(v []byte) bool {
-	return len(v) > len(prefix) && string(v[:len(prefix)]) == prefix
+	return hasPrefix(v, prefixV1) || hasPrefix(v, prefixV2)
+}
+
+func hasPrefix(value []byte, prefix string) bool {
+	return len(value) > len(prefix) && string(value[:len(prefix)]) == prefix
 }
 
 func (c *Cipher) load() cipher.AEAD {

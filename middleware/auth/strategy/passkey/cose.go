@@ -60,6 +60,12 @@ const (
 	algEdDSA = -8
 )
 
+const (
+	minRSAModulusBits = 2048
+	maxRSAModulusBits = 8192
+	maxRSAExponent    = 1<<31 - 1
+)
+
 // CredentialAlgorithm bundles a COSE-numeric alg with the
 // human-friendly name we surface in API responses. Callers (e.g. the
 // registration ceremony) advertise the set they accept and the
@@ -263,9 +269,8 @@ func parseEC2Key(m map[any]any, alg int) (*publicKey, error) {
 // parseRSAKey extracts an RSA public key. WebAuthn RSA keys carry the
 // modulus n (big-endian byte string) and the public exponent e (also
 // big-endian byte string, never an integer). The exponent must be
-// odd and within sane bounds — we reject < 3 to defeat the trivial
-// e=1 forge attack and > 2^32 because anything larger is non-standard
-// and likely an encoding error.
+// odd and within sane bounds. Moduli outside 2048-8192 bits and exponents
+// larger than a signed 32-bit integer are non-standard and needlessly costly.
 func parseRSAKey(m map[any]any, alg int) (*publicKey, error) {
 	nb, err := mapBytes(m, coseLabelN)
 	if err != nil {
@@ -275,16 +280,23 @@ func parseRSAKey(m map[any]any, alg int) (*publicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("e: %w", err)
 	}
-	if len(nb) < 256 { // 2048-bit minimum; WebAuthn forbids smaller keys.
-		return nil, fmt.Errorf("rsa modulus too short (%d bytes)", len(nb))
+	if len(nb) > maxRSAModulusBits/8 {
+		return nil, fmt.Errorf("rsa modulus too large (%d bytes)", len(nb))
 	}
-	if len(eb) == 0 || len(eb) > 8 {
-		return nil, fmt.Errorf("rsa exponent length %d outside [1,8]", len(eb))
+	if len(eb) == 0 || len(eb) > 4 {
+		return nil, fmt.Errorf("rsa exponent length %d outside [1,4]", len(eb))
 	}
 
 	n := new(big.Int).SetBytes(nb)
+	if bits := n.BitLen(); bits < minRSAModulusBits || bits > maxRSAModulusBits {
+		return nil, fmt.Errorf("rsa modulus size %d bits outside [%d,%d]", bits, minRSAModulusBits, maxRSAModulusBits)
+	}
+	if n.Bit(0) == 0 {
+		return nil, errors.New("rsa modulus must be odd")
+	}
+
 	bigE := new(big.Int).SetBytes(eb)
-	if !bigE.IsInt64() {
+	if !bigE.IsInt64() || bigE.Int64() > maxRSAExponent {
 		return nil, errors.New("rsa exponent too large")
 	}
 	e := bigE.Int64()

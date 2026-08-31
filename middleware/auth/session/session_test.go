@@ -2,9 +2,12 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,7 +118,7 @@ func TestRequireRedirectsWithRedirectPath(t *testing.T) {
 
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/private?x=1", nil))
 
-	if rec.Code != http.StatusTemporaryRedirect {
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("code = %d", rec.Code)
 	}
 
@@ -142,7 +145,7 @@ func TestRequireRejectFn(t *testing.T) {
 
 	h.ServeHTTP(rec, r)
 
-	if rec.Code != http.StatusTemporaryRedirect {
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("code = %d, want redirect", rec.Code)
 	}
 }
@@ -197,6 +200,125 @@ func TestRefreshOnExpiredAccess(t *testing.T) {
 
 	if seen == nil || seen.Subject != "alice" {
 		t.Fatalf("expired access token should have been refreshed, got %+v", seen)
+	}
+}
+
+type replicaConflictIssuer struct {
+	*issuer.Default
+	winner *issuer.Default
+	once   sync.Once
+	calls  atomic.Int32
+}
+
+func (i *replicaConflictIssuer) Refresh(ctx context.Context, sessionID, refreshToken string) (*issuer.Pair, error) {
+	i.calls.Add(1)
+	conflicted := false
+	var winnerErr error
+	i.once.Do(func() {
+		conflicted = true
+		_, winnerErr = i.winner.Refresh(ctx, sessionID, refreshToken)
+	})
+	if winnerErr != nil {
+		return nil, winnerErr
+	}
+	if conflicted {
+		return nil, issuer.ErrTransactionConflict
+	}
+
+	return i.Default.Refresh(ctx, sessionID, refreshToken)
+}
+
+type alwaysConflictRefreshIssuer struct {
+	issuer.Issuer
+	calls atomic.Int32
+}
+
+func (i *alwaysConflictRefreshIssuer) Refresh(context.Context, string, string) (*issuer.Pair, error) {
+	i.calls.Add(1)
+
+	return nil, issuer.ErrTransactionConflict
+}
+
+func expireStoredAccess(t *testing.T, memory *backend.Memory, sessionID string) {
+	t.Helper()
+
+	_, err := memory.TransactPair(context.Background(), sessionID, 0, func(pair *issuer.Pair) (*issuer.Pair, bool, error) {
+		pair.Access.ExpiresAt = time.Now().Add(-time.Minute)
+		pair.Identity.ExpiresAt = pair.Access.ExpiresAt
+
+		return pair, true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRefreshRecoversFromReplicaConflictUsingStoredWinner(t *testing.T) {
+	memory := backend.NewMemory()
+	first := issuer.NewDefault(memory, issuer.Config{AccessTTL: time.Minute, RefreshTTL: time.Hour})
+	second := issuer.NewDefault(memory, issuer.Config{AccessTTL: time.Minute, RefreshTTL: time.Hour})
+	pair, err := first.Issue(context.Background(), &identity.Identity{Subject: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expireStoredAccess(t, memory, pair.SessionID)
+	iss := &replicaConflictIssuer{Default: first, winner: second}
+	s := &session.Session{Issuer: iss, LoginPath: "/login"}
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	h := s.Require()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	r := httptest.NewRequest(http.MethodGet, "/private", nil)
+	r.AddCookie(&http.Cookie{Name: "auth_session", Value: pair.SessionID})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+
+	if !called || rec.Code != http.StatusOK {
+		t.Fatalf("request was not recovered: called=%t code=%d body=%s", called, rec.Code, rec.Body)
+	}
+	if got := iss.calls.Load(); got != 1 {
+		t.Fatalf("Refresh calls = %d, want one conflicted call followed by winner resolve", got)
+	}
+	if got := rec.Header().Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("valid cookie was modified after recovery: %v", got)
+	}
+	if _, err := first.Refresh(context.Background(), pair.SessionID, pair.Refresh.Value); !errors.Is(err, issuer.ErrRefreshInvalid) {
+		t.Fatalf("low-level refresh accepted the stale token: %v", err)
+	}
+}
+
+func TestRefreshConflictExhaustionPreservesCookie(t *testing.T) {
+	memory := backend.NewMemory()
+	base := issuer.NewDefault(memory, issuer.Config{AccessTTL: time.Minute, RefreshTTL: time.Hour})
+	pair, err := base.Issue(context.Background(), &identity.Identity{Subject: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expireStoredAccess(t, memory, pair.SessionID)
+	iss := &alwaysConflictRefreshIssuer{Issuer: base}
+	s := &session.Session{Issuer: iss, LoginPath: "/login"}
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	h := s.Require()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("handler ran despite refresh failure")
+	}))
+	r := httptest.NewRequest(http.MethodGet, "/private", nil)
+	r.AddCookie(&http.Cookie{Name: "auth_session", Value: pair.SessionID})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code = %d, want 503 (%s)", rec.Code, rec.Body)
+	}
+	if got := iss.calls.Load(); got != 3 {
+		t.Fatalf("Refresh calls = %d, want bounded 3 attempts", got)
+	}
+	if got := rec.Header().Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("transient conflict cleared the cookie: %v", got)
 	}
 }
 

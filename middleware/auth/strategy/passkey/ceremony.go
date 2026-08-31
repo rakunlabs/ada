@@ -19,10 +19,11 @@ type WebAuthn struct {
 // caller should fail fast at boot rather than serving requests with
 // a broken authenticator.
 func New(cfg *Config) (*WebAuthn, error) {
-	if err := cfg.validate(); err != nil {
+	cloned, err := cloneConfig(cfg)
+	if err != nil {
 		return nil, err
 	}
-	return &WebAuthn{cfg: cfg}, nil
+	return &WebAuthn{cfg: cloned}, nil
 }
 
 // CredentialCreationOptions is the JSON shape passed back to the
@@ -97,9 +98,8 @@ type registrationOptions struct {
 // WithAuthenticatorAttachment scopes the ceremony to a class of
 // authenticator. Accepted values are "platform" (built-in: Touch ID,
 // Windows Hello, Android keystore) and "cross-platform" (roaming:
-// USB/NFC/BLE security keys). Any other value (including empty,
-// which is the default) lets the browser offer both — the standard
-// "let the user pick" behavior.
+// USB/NFC/BLE security keys). Empty lets the browser offer both; any
+// other value causes BeginRegistration to reject the ceremony.
 //
 // Use case is rare: a corporate policy that mandates security keys,
 // or an account-recovery flow that explicitly wants a phone-bound
@@ -137,6 +137,10 @@ func (w *WebAuthn) BeginRegistration(user User, exclude []PublicKeyCredentialDes
 	for _, opt := range opts {
 		opt(&ro)
 	}
+	attachment, err := validateAuthenticatorAttachment(ro.authenticatorAttachment)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	chal, err := newChallenge()
 	if err != nil {
@@ -148,6 +152,7 @@ func (w *WebAuthn) BeginRegistration(user User, exclude []PublicKeyCredentialDes
 		params = append(params, PubKeyCredentialParameter{Type: "public-key", Alg: a.COSE})
 	}
 
+	excluded := cloneCredentialDescriptors(exclude)
 	options := &CredentialCreationOptions{
 		Challenge: encodeBase64URL(chal),
 		RP: RelyingParty{
@@ -161,9 +166,9 @@ func (w *WebAuthn) BeginRegistration(user User, exclude []PublicKeyCredentialDes
 		},
 		PubKeyCredParams:   params,
 		Timeout:            int(w.cfg.ChallengeTTL.Milliseconds()),
-		ExcludeCredentials: exclude,
+		ExcludeCredentials: excluded,
 		AuthenticatorSelection: AuthenticatorSelection{
-			AuthenticatorAttachment: normalizeAttachment(ro.authenticatorAttachment),
+			AuthenticatorAttachment: attachment,
 			UserVerification:        string(w.cfg.UserVerification),
 			ResidentKey:             "preferred",
 			RequireResidentKey:      false,
@@ -178,7 +183,7 @@ func (w *WebAuthn) BeginRegistration(user User, exclude []PublicKeyCredentialDes
 
 	session := &SessionData{
 		Challenge:        chal,
-		UserHandle:       user.Handle,
+		UserHandle:       cloneBytes(user.Handle),
 		UserVerification: w.cfg.UserVerification,
 		Expires:          time.Now().Add(w.cfg.ChallengeTTL),
 	}
@@ -186,17 +191,25 @@ func (w *WebAuthn) BeginRegistration(user User, exclude []PublicKeyCredentialDes
 	return options, session, nil
 }
 
-// normalizeAttachment validates the caller-supplied attachment value
-// and drops anything outside the spec. We coerce here so a typo in
-// the SPA doesn't end up in the ceremony — the browser would just
-// throw, but the resulting error would be obscure for the operator.
-func normalizeAttachment(s string) string {
+func validateAuthenticatorAttachment(s string) (string, error) {
 	switch s {
-	case "platform", "cross-platform":
-		return s
+	case "", "platform", "cross-platform":
+		return s, nil
 	default:
-		return ""
+		return "", fmt.Errorf("passkey: invalid authenticator attachment %q", s)
 	}
+}
+
+func cloneCredentialDescriptors(descriptors []PublicKeyCredentialDescriptor) []PublicKeyCredentialDescriptor {
+	if descriptors == nil {
+		return nil
+	}
+	cloned := make([]PublicKeyCredentialDescriptor, len(descriptors))
+	copy(cloned, descriptors)
+	for i := range cloned {
+		cloned[i].Transports = append([]string(nil), descriptors[i].Transports...)
+	}
+	return cloned
 }
 
 // RegistrationResponseJSON is the shape the browser POSTs back to
@@ -230,6 +243,9 @@ func (w *WebAuthn) FinishRegistration(session *SessionData, body []byte) (*Crede
 	}
 	if session.expired(time.Now()) {
 		return nil, nil, errors.New("passkey: registration session expired")
+	}
+	if err := w.validateSessionPolicy(session); err != nil {
+		return nil, nil, err
 	}
 
 	var resp RegistrationResponseJSON
@@ -271,20 +287,24 @@ func (w *WebAuthn) FinishRegistration(session *SessionData, body []byte) (*Crede
 	if ad.Flags&flagUserPresent == 0 {
 		return nil, nil, errors.New("passkey: user-present flag not set")
 	}
-	if session.UserVerification == UVRequired && ad.Flags&flagUserVerified == 0 {
+	if w.cfg.UserVerification == UVRequired && ad.Flags&flagUserVerified == 0 {
 		return nil, nil, errors.New("passkey: user-verified flag required but not set")
 	}
 
 	// Parse the COSE_Key once to sanity-check the format before we
 	// persist it. The raw bytes are what we store (so future
 	// algorithm additions can re-parse without a schema change).
-	if _, err := parseCOSEPublicKey(ad.AttestedCredential.PublicKeyCBOR); err != nil {
+	publicKey, err := parseCOSEPublicKey(ad.AttestedCredential.PublicKeyCBOR)
+	if err != nil {
 		return nil, nil, fmt.Errorf("passkey: credential public key: %w", err)
+	}
+	if !w.algorithmAllowed(publicKey.Algorithm) {
+		return nil, nil, fmt.Errorf("passkey: credential algorithm %d was not offered", publicKey.Algorithm)
 	}
 
 	cred := &Credential{
 		ID:              ad.AttestedCredential.CredentialID,
-		UserHandle:      session.UserHandle,
+		UserHandle:      cloneBytes(session.UserHandle),
 		PublicKey:       ad.AttestedCredential.PublicKeyCBOR,
 		AAGUID:          ad.AttestedCredential.AAGUID[:],
 		SignCount:       ad.SignCount,
@@ -322,8 +342,9 @@ func (w *WebAuthn) BeginLogin(allowedCredentials [][]byte) (*CredentialRequestOp
 		return nil, nil, err
 	}
 
-	allow := make([]PublicKeyCredentialDescriptor, 0, len(allowedCredentials))
-	for _, id := range allowedCredentials {
+	allowed := cloneByteSlices(allowedCredentials)
+	allow := make([]PublicKeyCredentialDescriptor, 0, len(allowed))
+	for _, id := range allowed {
 		allow = append(allow, PublicKeyCredentialDescriptor{
 			Type: "public-key",
 			ID:   encodeBase64URL(id),
@@ -342,7 +363,7 @@ func (w *WebAuthn) BeginLogin(allowedCredentials [][]byte) (*CredentialRequestOp
 		Challenge:            chal,
 		UserVerification:     w.cfg.UserVerification,
 		Expires:              time.Now().Add(w.cfg.ChallengeTTL),
-		AllowedCredentialIDs: allowedCredentials,
+		AllowedCredentialIDs: allowed,
 	}
 
 	return opts, session, nil
@@ -392,6 +413,9 @@ func (w *WebAuthn) FinishLogin(session *SessionData, cred *Credential, body []by
 	}
 	if session.expired(time.Now()) {
 		return nil, errors.New("passkey: login session expired")
+	}
+	if err := w.validateSessionPolicy(session); err != nil {
+		return nil, err
 	}
 	if cred == nil {
 		return nil, errors.New("passkey: credential required")
@@ -457,7 +481,7 @@ func (w *WebAuthn) FinishLogin(session *SessionData, cred *Credential, body []by
 	if ad.Flags&flagUserPresent == 0 {
 		return nil, errors.New("passkey: user-present flag not set")
 	}
-	if session.UserVerification == UVRequired && ad.Flags&flagUserVerified == 0 {
+	if w.cfg.UserVerification == UVRequired && ad.Flags&flagUserVerified == 0 {
 		return nil, errors.New("passkey: user-verified flag required but not set")
 	}
 
@@ -474,13 +498,10 @@ func (w *WebAuthn) FinishLogin(session *SessionData, cred *Credential, body []by
 		return nil, err
 	}
 
-	// Sign-count check. A counter that didn't advance is suspicious
-	// only when the authenticator claims to maintain one — many
-	// platform authenticators always report 0. We reject only when
-	// the new value is strictly less than the stored value (i.e.
-	// went backwards). Stable at zero is allowed.
-	if cred.SignCount > 0 && ad.SignCount < cred.SignCount {
-		return nil, fmt.Errorf("passkey: sign count went backwards (stored=%d, presented=%d)",
+	// Stable zero is valid for authenticators without counters. Once either
+	// side is nonzero, every assertion must strictly advance the counter.
+	if (cred.SignCount != 0 || ad.SignCount != 0) && ad.SignCount <= cred.SignCount {
+		return nil, fmt.Errorf("passkey: sign count did not increase (stored=%d, presented=%d)",
 			cred.SignCount, ad.SignCount)
 	}
 
@@ -505,4 +526,23 @@ func (w *WebAuthn) FinishLogin(session *SessionData, cred *Credential, body []by
 		UserHandle:   userHandle,
 		UserVerified: ad.Flags&flagUserVerified != 0,
 	}, nil
+}
+
+func (w *WebAuthn) validateSessionPolicy(session *SessionData) error {
+	if !session.UserVerification.valid() {
+		return fmt.Errorf("passkey: invalid session UserVerification %q", session.UserVerification)
+	}
+	if session.UserVerification != w.cfg.UserVerification {
+		return errors.New("passkey: session UserVerification does not match configured policy")
+	}
+	return nil
+}
+
+func (w *WebAuthn) algorithmAllowed(algorithm int) bool {
+	for _, allowed := range w.cfg.Algorithms {
+		if allowed.COSE == algorithm {
+			return true
+		}
+	}
+	return false
 }

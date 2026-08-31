@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -131,6 +133,16 @@ func TestBindRejectsNarrowIntegerOverflow(t *testing.T) {
 
 type CustomType struct {
 	Value string
+}
+
+type closeTrackingBody struct {
+	*strings.Reader
+	closed bool
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.closed = true
+	return nil
 }
 
 func (c *CustomType) UnmarshalText(text []byte) error {
@@ -356,23 +368,40 @@ func TestDefaultBinder_BindMultipartForm(t *testing.T) {
 	writer := multipart.NewWriter(&buf)
 
 	// Add form fields
-	writer.WriteField("title", "Test Upload")
-	writer.WriteField("description", "Test file upload")
-	writer.WriteField("public", "true")
-	writer.WriteField("tags", "test")
-	writer.WriteField("tags", "upload")
+	if err := writer.WriteField("title", "Test Upload"); err != nil {
+		t.Fatalf("write title field: %v", err)
+	}
+	if err := writer.WriteField("description", "Test file upload"); err != nil {
+		t.Fatalf("write description field: %v", err)
+	}
+	if err := writer.WriteField("public", "true"); err != nil {
+		t.Fatalf("write public field: %v", err)
+	}
+	if err := writer.WriteField("tags", "test"); err != nil {
+		t.Fatalf("write first tag field: %v", err)
+	}
+	if err := writer.WriteField("tags", "upload"); err != nil {
+		t.Fatalf("write second tag field: %v", err)
+	}
 
 	// Add file
-	fileWriter, _ := writer.CreateFormFile("main_file", "test.txt")
-	fileWriter.Write([]byte("test file content"))
+	fileWriter, err := writer.CreateFormFile("main_file", "test.txt")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := fileWriter.Write([]byte("test file content")); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
 
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
 
 	req, _ := http.NewRequest("POST", "/upload", &buf)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	var upload FileUploadRequest
-	err := Bind(req, &upload)
+	err = Bind(req, &upload)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
@@ -523,6 +552,556 @@ func TestDefaultBinder_ErrorCases(t *testing.T) {
 	}
 }
 
+func TestBindContentTypeParsing(t *testing.T) {
+	type payload struct {
+		Value string `json:"value" xml:"value"`
+	}
+
+	t.Run("parameters", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":"bound"}`))
+		req.Header.Set("Content-Type", "Application/JSON; Charset=UTF-8")
+
+		var target payload
+		if err := Bind(req, &target); err != nil {
+			t.Fatalf("Bind returned an error: %v", err)
+		}
+		if target.Value != "bound" {
+			t.Fatalf("expected parsed media type to bind JSON, got %q", target.Value)
+		}
+	})
+
+	for _, contentType := range []string{"application/json-evil", "application/xml-evil", "text/xml-evil"} {
+		t.Run("deceptive "+contentType, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":"body"}`))
+			req.Header.Set("Content-Type", contentType)
+
+			target := payload{Value: "unchanged"}
+			if err := Bind(req, &target); err != nil {
+				t.Fatalf("Bind returned an error: %v", err)
+			}
+			if target.Value != "unchanged" {
+				t.Fatalf("deceptive media type %q was treated as supported", contentType)
+			}
+		})
+	}
+
+	t.Run("malformed", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":"body"}`))
+		req.Header.Set("Content-Type", "application/json; charset")
+
+		var target payload
+		err := Bind(req, &target)
+		if !errors.Is(err, ErrBinding) {
+			t.Fatalf("expected malformed media type to wrap ErrBinding, got %v", err)
+		}
+	})
+}
+
+func TestBindRejectsTrailingBodyData(t *testing.T) {
+	type payload struct {
+		Value string `json:"value" xml:"value"`
+	}
+
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{name: "multiple JSON values", contentType: "application/json", body: `{"value":"first"} {"value":"second"}`},
+		{name: "trailing JSON data", contentType: "application/json", body: `{"value":"first"} trailing`},
+		{name: "multiple XML values", contentType: "application/xml", body: `<payload><value>first</value></payload><payload><value>second</value></payload>`},
+		{name: "trailing XML data", contentType: "application/xml", body: `<payload><value>first</value></payload>trailing`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", tt.contentType)
+			req.ContentLength = -1
+
+			var target payload
+			err := Bind(req, &target)
+			if !errors.Is(err, ErrBinding) {
+				t.Fatalf("expected trailing body data to wrap ErrBinding, got %v", err)
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{name: "JSON whitespace", contentType: "application/json", body: "{\"value\":\"bound\"}\n\t "},
+		{name: "XML whitespace", contentType: "application/xml", body: "<payload><value>bound</value></payload>\n\t "},
+		{name: "XML comment", contentType: "application/xml", body: "<payload><value>bound</value></payload><!-- trailing comment -->"},
+		{name: "XML processing instruction", contentType: "application/xml", body: "<payload><value>bound</value></payload><?audit complete?>"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", tt.contentType)
+
+			var target payload
+			if err := Bind(req, &target); err != nil {
+				t.Fatalf("expected trailing whitespace to be accepted, got %v", err)
+			}
+			if target.Value != "bound" {
+				t.Fatalf("expected body to bind, got %q", target.Value)
+			}
+		})
+	}
+}
+
+func TestBindBodyLimit(t *testing.T) {
+	type payload struct {
+		Value string `json:"value" xml:"value"`
+	}
+
+	for _, tt := range []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{name: "JSON", contentType: "application/json", body: `{"value":"too long"}`},
+		{name: "XML", contentType: "application/xml", body: `<payload><value>too long</value></payload>`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", tt.contentType)
+			req.ContentLength = -1
+
+			var target payload
+			err := Bind(req, &target, WithBodyLimit(int64(len(tt.body)-1)))
+			if !errors.Is(err, ErrBinding) {
+				t.Fatalf("expected oversized body to wrap ErrBinding, got %v", err)
+			}
+		})
+	}
+
+	t.Run("custom exact limit", func(t *testing.T) {
+		body := `{"value":"accepted"}`
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.ContentLength = -1
+
+		var target payload
+		if err := Bind(req, &target, WithBodyLimit(int64(len(body)))); err != nil {
+			t.Fatalf("expected a body at the custom limit to be accepted, got %v", err)
+		}
+		if target.Value != "accepted" {
+			t.Fatalf("expected custom-limit body to bind, got %q", target.Value)
+		}
+	})
+
+	t.Run("trailing whitespace counts toward limit", func(t *testing.T) {
+		value := `{"value":"bound"}`
+		body := value + strings.Repeat(" ", 10)
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.ContentLength = -1
+
+		var target payload
+		err := Bind(req, &target, WithBodyLimit(int64(len(value))))
+		if !errors.Is(err, ErrBinding) {
+			t.Fatalf("expected trailing whitespace to count toward the body limit, got %v", err)
+		}
+	})
+
+	largeValue := strings.Repeat("x", int(DefaultBodyLimit))
+	largeBody := `{"value":"` + largeValue + `"}`
+
+	t.Run("default limit", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(largeBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		var target payload
+		err := Bind(req, &target)
+		if !errors.Is(err, ErrBinding) {
+			t.Fatalf("expected default body limit error to wrap ErrBinding, got %v", err)
+		}
+	})
+
+	t.Run("disabled limit", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(largeBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		var target payload
+		if err := Bind(req, &target, WithBodyLimit(0)); err != nil {
+			t.Fatalf("expected disabled body limit to accept the body, got %v", err)
+		}
+		if target.Value != largeValue {
+			t.Fatalf("disabled-limit body did not bind completely: got %d bytes", len(target.Value))
+		}
+	})
+}
+
+func TestBindBodyLimitForm(t *testing.T) {
+	body := url.Values{"value": {strings.Repeat("x", 128)}}.Encode()
+	req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.ContentLength = -1
+
+	var target struct {
+		Value string `form:"value"`
+	}
+	err := Bind(req, &target, WithBodyLimit(int64(len(body)-1)))
+	if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
+		t.Fatalf("expected oversized form to return the body-limit binding error, got %v", err)
+	}
+}
+
+func TestBindBodyLimitMultipartAfterParseForm(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("value", "bound"); err != nil {
+		t.Fatalf("write multipart field: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	contentType := writer.FormDataContentType()
+
+	for _, tt := range []struct {
+		name    string
+		limit   int64
+		wantErr bool
+	}{
+		{name: "exact limit succeeds", limit: int64(body.Len())},
+		{name: "oversized body is measured", limit: int64(body.Len() - 1), wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(body.Bytes()))
+			req.Header.Set("Content-Type", contentType)
+			req.ContentLength = -1
+			req.TransferEncoding = []string{"chunked"}
+			if err := req.ParseForm(); err != nil {
+				t.Fatalf("pre-parse form: %v", err)
+			}
+			if req.Form == nil || req.PostForm == nil {
+				t.Fatal("ParseForm did not initialize Form and PostForm")
+			}
+			if req.MultipartForm != nil {
+				t.Fatal("ParseForm unexpectedly parsed the multipart body")
+			}
+			t.Cleanup(func() {
+				if req.MultipartForm != nil {
+					if err := req.MultipartForm.RemoveAll(); err != nil {
+						t.Errorf("remove multipart form: %v", err)
+					}
+				}
+			})
+
+			var target struct {
+				Value string `form:"value"`
+			}
+			err := Bind(req, &target, WithBodyLimit(tt.limit))
+			if tt.wantErr {
+				if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
+					t.Fatalf("expected measured multipart body to exceed the limit, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Bind returned an error: %v", err)
+			}
+			if target.Value != "bound" {
+				t.Fatalf("multipart value = %q, want bound", target.Value)
+			}
+		})
+	}
+}
+
+func TestBindBodyLimitRejectsPreParsedUnknownLengthForms(t *testing.T) {
+	largeValue := strings.Repeat("x", int(DefaultBodyLimit))
+
+	t.Run("ParseForm", func(t *testing.T) {
+		body := url.Values{"value": {largeValue}}.Encode()
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.ContentLength = -1
+		req.TransferEncoding = []string{"chunked"}
+		if err := req.ParseForm(); err != nil {
+			t.Fatalf("pre-parse form: %v", err)
+		}
+
+		var target struct {
+			Value string `form:"value"`
+		}
+		err := Bind(req, &target)
+		if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
+			t.Fatalf("expected pre-parsed form with unknown length to fail closed, got %v", err)
+		}
+	})
+
+	t.Run("FormValue", func(t *testing.T) {
+		body := url.Values{"value": {largeValue}}.Encode()
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.ContentLength = -1
+		req.TransferEncoding = []string{"chunked"}
+		if got := req.FormValue("value"); got != largeValue {
+			t.Fatalf("pre-parse form value length = %d, want %d", len(got), len(largeValue))
+		}
+
+		var target struct {
+			Value string `form:"value"`
+		}
+		err := Bind(req, &target)
+		if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
+			t.Fatalf("expected FormValue-parsed form with unknown length to fail closed, got %v", err)
+		}
+	})
+
+	t.Run("ParseMultipartForm", func(t *testing.T) {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if err := writer.WriteField("value", largeValue); err != nil {
+			t.Fatalf("write multipart field: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close multipart writer: %v", err)
+		}
+
+		req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(body.Bytes()))
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.ContentLength = -1
+		req.TransferEncoding = []string{"chunked"}
+		if err := req.ParseMultipartForm(DefaultMultipartFormMaxMemory); err != nil {
+			t.Fatalf("pre-parse multipart form: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := req.MultipartForm.RemoveAll(); err != nil {
+				t.Errorf("remove multipart form: %v", err)
+			}
+		})
+
+		var target struct {
+			Value string `form:"value"`
+		}
+		err := Bind(req, &target)
+		if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
+			t.Fatalf("expected pre-parsed multipart form with unknown length to fail closed, got %v", err)
+		}
+	})
+}
+
+func TestBindBodyLimitAcceptsPreParsedKnownLengthForms(t *testing.T) {
+	t.Run("url encoded", func(t *testing.T) {
+		body := url.Values{"value": {"bound"}}.Encode()
+		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if err := req.ParseForm(); err != nil {
+			t.Fatalf("pre-parse form: %v", err)
+		}
+
+		var target struct {
+			Value string `form:"value"`
+		}
+		if err := Bind(req, &target); err != nil {
+			t.Fatalf("Bind returned an error: %v", err)
+		}
+		if target.Value != "bound" {
+			t.Fatalf("pre-parsed form value = %q, want bound", target.Value)
+		}
+	})
+
+	t.Run("multipart", func(t *testing.T) {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if err := writer.WriteField("value", "bound"); err != nil {
+			t.Fatalf("write multipart field: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close multipart writer: %v", err)
+		}
+
+		req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(body.Bytes()))
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		if err := req.ParseMultipartForm(DefaultMultipartFormMaxMemory); err != nil {
+			t.Fatalf("pre-parse multipart form: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := req.MultipartForm.RemoveAll(); err != nil {
+				t.Errorf("remove multipart form: %v", err)
+			}
+		})
+
+		var target struct {
+			Value string `form:"value"`
+		}
+		if err := Bind(req, &target); err != nil {
+			t.Fatalf("Bind returned an error: %v", err)
+		}
+		if target.Value != "bound" {
+			t.Fatalf("pre-parsed multipart value = %q, want bound", target.Value)
+		}
+	})
+}
+
+func TestBindBodyLimitMultipart(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	file, err := writer.CreateFormFile("upload", "large.bin")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := file.Write(bytes.Repeat([]byte("x"), 4096)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	bodyLimit := body.Len()
+	if _, err := body.Write(bytes.Repeat([]byte("epilogue"), 512)); err != nil {
+		t.Fatalf("write multipart epilogue: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(body.Bytes()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.ContentLength = -1
+
+	var target struct {
+		Upload *multipart.FileHeader `file:"upload"`
+	}
+	err = Bind(req, &target, WithBodyLimit(int64(bodyLimit)), WithMultipartFormMaxMemory(1))
+	if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
+		t.Fatalf("expected oversized multipart form to return the body-limit binding error, got %v", err)
+	}
+	entries, readErr := os.ReadDir(tempDir)
+	if readErr != nil {
+		t.Fatalf("read multipart temp directory: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("multipart parsing leaked temporary files: %v", entries)
+	}
+}
+
+func TestBindCleansMultipartFilesAfterBindingError(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("count", "invalid"); err != nil {
+		t.Fatalf("write multipart field: %v", err)
+	}
+	file, err := writer.CreateFormFile("upload", "large.bin")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := file.Write(bytes.Repeat([]byte("x"), 4096)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(body.Bytes()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	var target struct {
+		Count  int                   `form:"count"`
+		Upload *multipart.FileHeader `file:"upload"`
+	}
+	err = Bind(req, &target, WithBodyLimit(int64(body.Len())), WithMultipartFormMaxMemory(1))
+	if !errors.Is(err, ErrBinding) {
+		t.Fatalf("expected invalid multipart field to return a binding error, got %v", err)
+	}
+	entries, readErr := os.ReadDir(tempDir)
+	if readErr != nil {
+		t.Fatalf("read multipart temp directory: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("binding error leaked multipart temporary files: %v", entries)
+	}
+}
+
+func TestBindBodyLimitPreservesClose(t *testing.T) {
+	body := &closeTrackingBody{Reader: strings.NewReader("value=bound")}
+	req, _ := http.NewRequest(http.MethodPost, "/", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	var target struct {
+		Value string `form:"value"`
+	}
+	if err := Bind(req, &target); err != nil {
+		t.Fatalf("Bind returned an error: %v", err)
+	}
+	if body.closed {
+		t.Fatal("Bind unexpectedly closed the request body")
+	}
+	if err := req.Body.Close(); err != nil {
+		t.Fatalf("close wrapped request body: %v", err)
+	}
+	if !body.closed {
+		t.Fatal("wrapped request body did not close the original body")
+	}
+}
+
+func TestBindJSONUsesNumber(t *testing.T) {
+	var target struct {
+		Value any `json:"value"`
+	}
+	req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":9007199254740993}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	if err := Bind(req, &target); err != nil {
+		t.Fatalf("Bind returned an error: %v", err)
+	}
+	value, ok := target.Value.(json.Number)
+	if !ok || value != "9007199254740993" {
+		t.Fatalf("expected json.Number without precision loss, got %T(%v)", target.Value, target.Value)
+	}
+}
+
+func TestBindSliceValuesReplaceExistingData(t *testing.T) {
+	type payload struct {
+		FormValues  []string `form:"form_values"`
+		QueryValues []int    `query:"query_values"`
+	}
+
+	form := url.Values{"form_values": {"new", "values"}}
+	req, _ := http.NewRequest(http.MethodPost, "/?query_values=1,2&query_values=3,4", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	target := payload{
+		FormValues:  []string{"old-form"},
+		QueryValues: []int{99},
+	}
+	if err := Bind(req, &target); err != nil {
+		t.Fatalf("Bind returned an error: %v", err)
+	}
+	if !reflect.DeepEqual(target.FormValues, []string{"new", "values"}) {
+		t.Fatalf("form values were appended instead of replaced: %v", target.FormValues)
+	}
+	if !reflect.DeepEqual(target.QueryValues, []int{1, 2, 3, 4}) {
+		t.Fatalf("query values were not expanded and replaced deterministically: %v", target.QueryValues)
+	}
+}
+
+func TestBindRejectsInvalidOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		opt  Option
+	}{
+		{name: "negative body limit", opt: WithBodyLimit(-1)},
+		{name: "negative multipart memory", opt: WithMultipartFormMaxMemory(-1)},
+		{name: "nil option", opt: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, "/", nil)
+			var target struct{}
+			err := Bind(req, &target, tt.opt)
+			if !errors.Is(err, ErrBinding) {
+				t.Fatalf("expected invalid option to wrap ErrBinding, got %v", err)
+			}
+		})
+	}
+}
+
 func TestGetFieldCacheConcurrent(t *testing.T) {
 	const (
 		goroutines = 32
@@ -572,7 +1151,9 @@ func BenchmarkBinder_JSON(b *testing.B) {
 		req.Header.Set("Content-Type", "application/json")
 
 		var user ExampleUser
-		Bind(req, &user)
+		if err := Bind(req, &user); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -592,7 +1173,9 @@ func BenchmarkBinder_Form(b *testing.B) {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 		var user ExampleUser
-		Bind(req, &user)
+		if err := Bind(req, &user); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -605,14 +1188,18 @@ func BenchmarkBinder_Form_Parsed(b *testing.B) {
 	// Pre-create and parse request to isolate binding performance
 	req, _ := http.NewRequest("POST", "/users", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.ParseForm() // Pre-parse the form
+	if err := req.ParseForm(); err != nil { // Pre-parse the form
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 
 	for b.Loop() {
 		var user ExampleUser
 		// Test only the binding logic, not request parsing
-		bindForm(req, reflect.ValueOf(&user).Elem(), getFieldCache(reflect.TypeOf(user)))
+		if err := bindForm(req, reflect.ValueOf(&user).Elem(), getFieldCache(reflect.TypeOf(user))); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -854,10 +1441,16 @@ func TestDefaultBinder_BindNestedStructFromMultipartForm(t *testing.T) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
-	writer.WriteField("title", "Test Title")
-	writer.WriteField("nested", `{"key":"value","items":[1,2,3]}`)
+	if err := writer.WriteField("title", "Test Title"); err != nil {
+		t.Fatalf("write title field: %v", err)
+	}
+	if err := writer.WriteField("nested", `{"key":"value","items":[1,2,3]}`); err != nil {
+		t.Fatalf("write nested field: %v", err)
+	}
 
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
 
 	req, _ := http.NewRequest("POST", "/test", &buf)
 	req.Header.Set("Content-Type", writer.FormDataContentType())

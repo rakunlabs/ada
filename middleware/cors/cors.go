@@ -1,8 +1,10 @@
 package cors
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -47,6 +49,9 @@ type Cors struct {
 	// AllowMethods determines the value of the Access-Control-Allow-Methods
 	// response header.  This header specified the list of methods allowed when
 	// accessing the resource.  This is used in response to a preflight request.
+	// A wildcard allows any requested method. For credentialed requests, the
+	// concrete requested method is returned because browsers do not treat '*'
+	// as a wildcard when credentials are included.
 	//
 	// Optional. Default value DefaultCORSConfig.AllowMethods.
 	// If `allowMethods` is left empty, this middleware will fill for preflight
@@ -59,8 +64,12 @@ type Cors struct {
 	// AllowHeaders determines the value of the Access-Control-Allow-Headers
 	// response header.  This header is used in response to a preflight request to
 	// indicate which HTTP headers can be used when making the actual request.
+	// A wildcard allows any requested header. For credentialed requests, the
+	// concrete requested headers are returned because browsers do not treat '*'
+	// as a wildcard when credentials are included.
 	//
-	// Optional. Default value []string{}.
+	// Optional. The secure default is an empty list: preflights that request any
+	// non-safelisted headers are rejected rather than reflecting those headers.
 	//
 	// See also: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Headers
 	AllowHeaders []string `cfg:"allow_headers"`
@@ -75,7 +84,8 @@ type Cors struct {
 	//
 	// Optional. Default value false, in which case the header is not set.
 	//
-	// Security: avoid using `AllowCredentials = true` with `AllowOrigins = *`.
+	// Security: AllowCredentials cannot be combined with an AllowOrigins entry
+	// of "*" unless UnsafeWildcardOriginWithAllowCredentials is explicitly set.
 	// See "Exploiting CORS misconfigurations for Bitcoins and bounties",
 	// https://blog.portswigger.net/2016/10/exploiting-cors-misconfigurations-for.html
 	//
@@ -119,19 +129,36 @@ func Middleware(opts ...Option) func(http.Handler) http.Handler {
 	return o.Config.Middleware()
 }
 
-// CORSWithConfig returns a CORS middleware with config.
-// See: [CORS].
+// Middleware returns a CORS middleware using an immutable snapshot of m.
 func (m *Cors) Middleware() func(http.Handler) http.Handler {
-	// Defaults
-	if len(m.AllowOrigins) == 0 {
-		m.AllowOrigins = allowOrigins
-	}
-	if len(m.AllowMethods) == 0 {
-		m.AllowMethods = allowMethods
-	}
+	cfg := *m
+	cfg.AllowOrigins = slices.Clone(m.AllowOrigins)
+	cfg.AllowMethods = slices.Clone(m.AllowMethods)
+	cfg.AllowHeaders = slices.Clone(m.AllowHeaders)
+	cfg.ExposeHeaders = slices.Clone(m.ExposeHeaders)
 
-	allowOriginPatterns := make([]*regexp.Regexp, 0, len(m.AllowOrigins))
-	for _, origin := range m.AllowOrigins {
+	// Defaults
+	if len(cfg.AllowOrigins) == 0 {
+		cfg.AllowOrigins = slices.Clone(allowOrigins)
+	}
+	if len(cfg.AllowMethods) == 0 {
+		cfg.AllowMethods = slices.Clone(allowMethods)
+	}
+	normalizeTokens("allow method", cfg.AllowMethods)
+	normalizeTokens("allow header", cfg.AllowHeaders)
+	normalizeTokens("expose header", cfg.ExposeHeaders)
+	if cfg.AllowCredentials && slices.Contains(cfg.AllowOrigins, "*") &&
+		!cfg.UnsafeWildcardOriginWithAllowCredentials {
+		panic(fmt.Errorf("cors: wildcard allow origin with credentials requires UnsafeWildcardOriginWithAllowCredentials"))
+	}
+	wildcardMethod := slices.Contains(cfg.AllowMethods, "*")
+	wildcardHeaders := slices.Contains(cfg.AllowHeaders, "*")
+
+	allowOriginPatterns := make([]*regexp.Regexp, 0, len(cfg.AllowOrigins))
+	for _, origin := range cfg.AllowOrigins {
+		if origin == "" || strings.TrimSpace(origin) != origin {
+			panic(fmt.Errorf("cors: invalid allow origin pattern %q", origin))
+		}
 		if origin == "*" {
 			continue // "*" is handled differently and does not need regexp
 		}
@@ -142,52 +169,46 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 
 		re, err := regexp.Compile(pattern)
 		if err != nil {
-			// this is to preserve previous behaviour - invalid patterns were just ignored.
-			// If we would turn this to panic, users with invalid patterns
-			// would have applications crashing in production due unrecovered panic.
-			// TODO: this should be turned to error/panic in `v5`
-			continue
+			panic(fmt.Errorf("cors: invalid allow origin pattern %q: %w", origin, err))
 		}
 		allowOriginPatterns = append(allowOriginPatterns, re)
 	}
 
-	allowMethods := strings.Join(m.AllowMethods, ",")
-	allowHeaders := strings.Join(m.AllowHeaders, ",")
-	exposeHeaders := strings.Join(m.ExposeHeaders, ",")
+	allowMethods := strings.Join(cfg.AllowMethods, ",")
+	allowHeaders := strings.Join(cfg.AllowHeaders, ",")
+	exposeHeaders := strings.Join(cfg.ExposeHeaders, ",")
 
 	maxAge := "0"
-	if m.MaxAge > 0 {
-		maxAge = strconv.Itoa(m.MaxAge)
+	if cfg.MaxAge > 0 {
+		maxAge = strconv.Itoa(cfg.MaxAge)
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get(headerOrigin)
+			requestedMethod := r.Header.Get(headerAccessControlRequestMethod)
+			requestedHeaders := strings.Join(r.Header.Values(headerAccessControlRequestHeaders), ",")
 			allowOrigin := ""
 
 			w.Header().Add(headerVary, headerOrigin)
 
-			// Preflight request is an OPTIONS request, using three HTTP request headers: Access-Control-Request-Method,
-			// Access-Control-Request-Headers, and the Origin header. See: https://developer.mozilla.org/en-US/docs/Glossary/Preflight_request
-			// For simplicity we just consider method type and later `Origin` header.
-			preflight := r.Method == http.MethodOptions
+			preflight := r.Method == http.MethodOptions &&
+				origin != "" && requestedMethod != ""
 
 			// No Origin provided. This is (probably) not request from actual browser - proceed executing middleware chain
 			if origin == "" {
-				if !preflight {
-					next.ServeHTTP(w, r)
-
-					return
-				}
-
-				w.WriteHeader(http.StatusNoContent)
+				next.ServeHTTP(w, r)
 
 				return
 			}
+			if preflight {
+				w.Header().Add(headerVary, headerAccessControlRequestMethod)
+				w.Header().Add(headerVary, headerAccessControlRequestHeaders)
+			}
 
 			// Check allowed origins
-			for _, o := range m.AllowOrigins {
-				if o == "*" && m.AllowCredentials && m.UnsafeWildcardOriginWithAllowCredentials {
+			for _, o := range cfg.AllowOrigins {
+				if o == "*" && cfg.AllowCredentials && cfg.UnsafeWildcardOriginWithAllowCredentials {
 					allowOrigin = origin
 
 					break
@@ -232,9 +253,15 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 
 				return
 			}
+			if preflight && (!isAllowedMethod(requestedMethod, cfg.AllowMethods) ||
+				!areAllowedHeaders(requestedHeaders, cfg.AllowHeaders)) {
+				w.WriteHeader(http.StatusNoContent)
+
+				return
+			}
 
 			w.Header().Set(headerAccessControlAllowOrigin, allowOrigin)
-			if m.AllowCredentials {
+			if cfg.AllowCredentials {
 				w.Header().Set(headerAccessControlAllowCredentials, "true")
 			}
 
@@ -250,25 +277,105 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 			}
 
 			// Preflight request
-			w.Header().Add(headerVary, headerAccessControlRequestMethod)
-			w.Header().Add(headerVary, headerAccessControlRequestHeaders)
-			w.Header().Set(headerAccessControlAllowMethods, allowMethods)
-
-			if allowHeaders != "" {
-				w.Header().Set(headerAccessControlAllowHeaders, allowHeaders)
-			} else {
-				h := r.Header.Get(headerAccessControlRequestHeaders)
-				if h != "" {
-					w.Header().Set(headerAccessControlAllowHeaders, h)
-				}
+			responseAllowMethods := allowMethods
+			if cfg.AllowCredentials && wildcardMethod {
+				responseAllowMethods = requestedMethod
 			}
-			if m.MaxAge != 0 {
+			w.Header().Set(headerAccessControlAllowMethods, responseAllowMethods)
+
+			responseAllowHeaders := allowHeaders
+			if cfg.AllowCredentials && wildcardHeaders {
+				responseAllowHeaders = requestedHeaders
+			}
+			if responseAllowHeaders != "" {
+				w.Header().Set(headerAccessControlAllowHeaders, responseAllowHeaders)
+			}
+			if cfg.MaxAge != 0 {
 				w.Header().Set(headerAccessControlMaxAge, maxAge)
 			}
 
 			w.WriteHeader(http.StatusNoContent)
 		})
 	}
+}
+
+func normalizeTokens(name string, values []string) {
+	for i, value := range values {
+		value = strings.TrimSpace(value)
+		if !isHTTPToken(value) {
+			panic(fmt.Errorf("cors: invalid %s %q", name, values[i]))
+		}
+		values[i] = value
+	}
+}
+
+func isHTTPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+
+	for i := range len(value) {
+		c := value[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+
+	return true
+}
+
+func isAllowedMethod(requested string, allowed []string) bool {
+	requested = strings.TrimSpace(requested)
+	if !isHTTPToken(requested) {
+		return false
+	}
+	for _, method := range allowed {
+		method = strings.TrimSpace(method)
+		if method == "*" || method == requested {
+			return true
+		}
+	}
+
+	return false
+}
+
+func areAllowedHeaders(requested string, allowed []string) bool {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return true
+	}
+
+	wildcard := false
+	allowedHeaders := make(map[string]struct{}, len(allowed))
+	for _, header := range allowed {
+		header = strings.TrimSpace(header)
+		if header == "*" {
+			wildcard = true
+
+			continue
+		}
+		if header != "" {
+			allowedHeaders[strings.ToLower(header)] = struct{}{}
+		}
+	}
+
+	for _, header := range strings.Split(requested, ",") {
+		header = strings.TrimSpace(header)
+		if !isHTTPToken(header) {
+			return false
+		}
+		if _, ok := allowedHeaders[strings.ToLower(header)]; !wildcard && !ok {
+			return false
+		}
+	}
+
+	return true
 }
 
 // ////////////////////////////////////////////////////////////////////

@@ -15,7 +15,7 @@ hero:
       link: /getting-started.md
     - theme: alt
       text: Guide
-      link: /guide.md
+      link: /guide/
 
 features:
   - title: Simple Mux

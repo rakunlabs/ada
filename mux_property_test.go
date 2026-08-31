@@ -7,8 +7,11 @@ package ada
 //
 //   - per-segment preference: static first, then {param}, then wildcard
 //   - cross-segment backtracking when a preferred branch dead-ends
+//   - method-aware selection: a node that matches the path but cannot serve
+//     the request method is a dead end the walk backtracks out of
 //   - single trailing-wildcard fallback ("possible")
-//   - auto-HEAD (GET fallback), auto-OPTIONS, 405 with Allow header
+//   - auto-HEAD (GET fallback), auto-OPTIONS, 405 whose Allow header is the
+//     union over every path-matching node
 //
 // The reference is intentionally built on maps and string slices — slow and
 // simple — so it stays trustworthy while the production trie is optimized.
@@ -57,23 +60,35 @@ func (n *refNode) lookupEntry(method string) *refEntry {
 	return entry
 }
 
-func refAllow(n *refNode) string {
-	if n == nil || n.catchAll != nil || len(n.entries) == 0 {
+// refAllow unions the methods of every candidate node into one Allow header.
+// A node holding a catch-all contributes nothing: it serves every method, so
+// it can never be part of a request that failed to find a handler.
+func refAllow(nodes []*refNode) string {
+	methodSet := make(map[string]struct{})
+	var hasGet, hasHead, hasOptions bool
+	for _, n := range nodes {
+		if n == nil || n.catchAll != nil {
+			continue
+		}
+		for method := range n.entries {
+			methodSet[method] = struct{}{}
+			switch method {
+			case http.MethodGet:
+				hasGet = true
+			case http.MethodHead:
+				hasHead = true
+			case http.MethodOptions:
+				hasOptions = true
+			}
+		}
+	}
+	if len(methodSet) == 0 {
 		return ""
 	}
 
-	methods := make([]string, 0, len(n.entries)+2)
-	var hasGet, hasHead, hasOptions bool
-	for method := range n.entries {
+	methods := make([]string, 0, len(methodSet)+2)
+	for method := range methodSet {
 		methods = append(methods, method)
-		switch method {
-		case http.MethodGet:
-			hasGet = true
-		case http.MethodHead:
-			hasHead = true
-		case http.MethodOptions:
-			hasOptions = true
-		}
 	}
 	if hasGet && !hasHead {
 		methods = append(methods, http.MethodHead)
@@ -168,14 +183,51 @@ type refResult struct {
 // refWalk resolves a request path against the reference trie, trying static,
 // then param, then wildcard at every segment and backtracking when a branch
 // dead-ends. This mirrors ada's choicePoint stack.
+//
+// The walk is method-aware, which is the whole point of the oracle: a node
+// that matches the path but has no entry for the request method is rejected
+// like any other dead end, so the search continues into the alternatives
+// behind it. Every node it rejects is remembered in candidates, whose union
+// is the Allow header owed on a 405.
 type refWalk struct {
-	segments    []string
+	segments []string
+	method   string
+
 	possible    *refNode
 	possibleIdx int
+
+	candidates []*refNode
+}
+
+// note records a node that matches the path, whatever its methods.
+func (w *refWalk) note(n *refNode) {
+	for _, seen := range w.candidates {
+		if seen == n {
+			return
+		}
+	}
+
+	w.candidates = append(w.candidates, n)
+}
+
+// terminal accepts n as the answer only if it can serve the request method.
+func (w *refWalk) terminal(n *refNode) *refNode {
+	if !n.hasHandler() {
+		return nil
+	}
+
+	w.note(n)
+
+	if n.lookupEntry(w.method) == nil {
+		return nil
+	}
+
+	return n
 }
 
 // resolve returns the terminal node for segments[i:] starting from the
-// segment-dispatch node n, or nil when no branch below n matches.
+// segment-dispatch node n, or nil when no branch below n can serve the
+// request.
 func (w *refWalk) resolve(n *refNode, i int) *refNode {
 	if n == nil {
 		return nil
@@ -183,17 +235,20 @@ func (w *refWalk) resolve(n *refNode, i int) *refNode {
 
 	// The greedy fallback is recorded and never rewound: like ada, it
 	// describes a matched prefix of the URL rather than the branch taken.
-	if n.wildcard != nil && n.wildcard.trailing {
-		w.possible = n.wildcard
-		w.possibleIdx = i
+	// Only a greedy that can serve the method is kept, so a deeper greedy
+	// registered under some other method cannot mask a shallower one.
+	if n.wildcard != nil && n.wildcard.trailing && i < len(w.segments) && w.segments[i] != "" {
+		if n.wildcard.hasHandler() {
+			w.note(n.wildcard)
+		}
+		if n.wildcard.lookupEntry(w.method) != nil {
+			w.possible = n.wildcard
+			w.possibleIdx = i
+		}
 	}
 
 	if i == len(w.segments) {
-		if n.hasHandler() {
-			return n
-		}
-
-		return nil
+		return w.terminal(n)
 	}
 
 	segment := w.segments[i]
@@ -230,11 +285,7 @@ func (w *refWalk) resolve(n *refNode, i int) *refNode {
 // advance steps from a node that consumed segment i to the rest of the path.
 func (w *refWalk) advance(nd *refNode, i int) *refNode {
 	if i == len(w.segments)-1 {
-		if nd.hasHandler() {
-			return nd
-		}
-
-		return nil
+		return w.terminal(nd)
 	}
 
 	return w.resolve(nd.segment, i+1)
@@ -243,41 +294,31 @@ func (w *refWalk) advance(nd *refNode, i int) *refNode {
 func refServe(root *refNode, method, path string) refResult {
 	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 
-	walk := &refWalk{segments: segments}
+	walk := &refWalk{segments: segments, method: method}
 
 	current := walk.resolve(root, 0)
 	if current == nil {
 		current = walk.possible
 	}
 
-	possible := walk.possible
 	possibleIdx := walk.possibleIdx
 
+	// Both the walk and its greedy fallback already screened for the
+	// method, so a node here is guaranteed to serve the request; reaching
+	// this with none means the request is a 404 or a 405.
 	if current == nil {
-		return refResult{status: http.StatusNotFound}
+		allowed := refAllow(walk.candidates)
+		switch {
+		case allowed == "":
+			return refResult{status: http.StatusNotFound}
+		case method == http.MethodOptions:
+			return refResult{status: http.StatusNoContent, allow: allowed}
+		default:
+			return refResult{status: http.StatusMethodNotAllowed, allow: allowed}
+		}
 	}
 
 	entry := current.lookupEntry(method)
-	if entry == nil && possible != nil {
-		entry = possible.lookupEntry(method)
-		if entry != nil {
-			current = possible
-		}
-	}
-
-	if entry == nil && method == http.MethodOptions {
-		if allowed := refAllow(current); allowed != "" {
-			return refResult{status: http.StatusNoContent, allow: allowed}
-		}
-	}
-
-	if entry == nil {
-		if allowed := refAllow(current); allowed != "" {
-			return refResult{status: http.StatusMethodNotAllowed, allow: allowed}
-		}
-
-		return refResult{status: http.StatusNotFound}
-	}
 
 	values := map[string]string{}
 	if current.trailing {
@@ -334,14 +375,21 @@ func patternParamNames(pattern string) []string {
 func TestMuxMatchesReference(t *testing.T) {
 	staticSegs := []string{"a", "b", "ab", "files", "v1", "users"}
 	paramNames := []string{"id", "name", "p", "slug"}
-	methods := []string{http.MethodGet, http.MethodPost, ""} // "" = catch-all
+	// Registering several methods per shape is what makes the oracle bite:
+	// route selection has to reject a node that matches the path but was
+	// registered under a different method and keep backtracking.
+	methods := []string{
+		http.MethodGet, http.MethodPost, http.MethodPut,
+		http.MethodDelete, "", // "" = catch-all
+	}
 	reqMethods := []string{
 		http.MethodGet, http.MethodPost, http.MethodPut,
+		http.MethodDelete, http.MethodPatch,
 		http.MethodHead, http.MethodOptions,
 	}
 	reqSegs := append([]string{"zz", "q", ""}, staticSegs...)
 
-	const rounds = 300
+	const rounds = 800
 
 	for round := range rounds {
 		rng := rand.New(rand.NewSource(int64(round))) //nolint:gosec // deterministic test
@@ -386,7 +434,7 @@ func TestMuxMatchesReference(t *testing.T) {
 					for _, name := range names {
 						sb.WriteString("|" + name + "=" + r.PathValue(name))
 					}
-					w.Write([]byte(sb.String()))
+					_, _ = w.Write([]byte(sb.String()))
 				}
 			}(pattern, names)
 

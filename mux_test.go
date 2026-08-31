@@ -46,7 +46,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodOptions,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								pathAsterisk := r.PathValue("code_1")
-								w.Write([]byte("GET " + pathAsterisk))
+								_, _ = w.Write([]byte("GET " + pathAsterisk))
 							},
 						},
 						{
@@ -55,7 +55,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								code := r.PathValue("code_2")
-								w.Write([]byte("GET " + code))
+								_, _ = w.Write([]byte("GET " + code))
 							},
 						},
 					},
@@ -90,7 +90,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodOptions,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								pathAsterisk := r.PathValue("*")
-								w.Write([]byte("Asterisk: " + pathAsterisk))
+								_, _ = w.Write([]byte("Asterisk: " + pathAsterisk))
 							},
 						},
 						{
@@ -99,7 +99,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								code := r.PathValue("code")
-								w.Write([]byte("GET " + code))
+								_, _ = w.Write([]byte("GET " + code))
 							},
 						},
 					},
@@ -135,7 +135,7 @@ func TestMux(t *testing.T) {
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								pathTest := r.PathValue("test")
 								pathAsterisk := r.PathValue("*")
-								w.Write([]byte("Test Param: " + pathTest + ", Asterisk: " + pathAsterisk))
+								_, _ = w.Write([]byte("Test Param: " + pathTest + ", Asterisk: " + pathAsterisk))
 							},
 						},
 						{
@@ -145,7 +145,7 @@ func TestMux(t *testing.T) {
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								pathTest := r.PathValue("test")
 								pathAsterisk := r.PathValue("*")
-								w.Write([]byte("Test Param: " + pathTest + ", Asterisk: " + pathAsterisk))
+								_, _ = w.Write([]byte("Test Param: " + pathTest + ", Asterisk: " + pathAsterisk))
 							},
 						},
 					},
@@ -173,7 +173,7 @@ func TestMux(t *testing.T) {
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								pathTest := r.PathValue("test")
 								pathAsterisk := r.PathValue("*")
-								w.Write([]byte("Test Param: " + pathTest + ", Asterisk: " + pathAsterisk))
+								_, _ = w.Write([]byte("Test Param: " + pathTest + ", Asterisk: " + pathAsterisk))
 							},
 						},
 					},
@@ -199,7 +199,7 @@ func TestMux(t *testing.T) {
 							path:   "/",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Base!"))
+								_, _ = w.Write([]byte("Base!"))
 							},
 						},
 						{
@@ -207,7 +207,7 @@ func TestMux(t *testing.T) {
 							path:   "/{test}",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Test!"))
+								_, _ = w.Write([]byte("Test!"))
 							},
 						},
 						{
@@ -215,7 +215,7 @@ func TestMux(t *testing.T) {
 							path:   "/grpc.reflection.v1alpha.ServerReflection/",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("gRPC Reflection!"))
+								_, _ = w.Write([]byte("gRPC Reflection!"))
 							},
 						},
 					},
@@ -249,7 +249,7 @@ func TestMux(t *testing.T) {
 							path:   "/*",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Wildcard!"))
+								_, _ = w.Write([]byte("Wildcard!"))
 							},
 						},
 						{
@@ -257,7 +257,7 @@ func TestMux(t *testing.T) {
 							path:   "/test",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Test!"))
+								_, _ = w.Write([]byte("Test!"))
 							},
 						},
 					},
@@ -277,8 +277,8 @@ func TestMux(t *testing.T) {
 						req, _ := http.NewRequest(http.MethodGet, "/", nil)
 						return req
 					},
-					status: http.StatusOK,
-					body:   "Wildcard!",
+					status: http.StatusNotFound,
+					body:   "404 page not found\n",
 				},
 			},
 		},
@@ -291,7 +291,7 @@ func TestMux(t *testing.T) {
 							path:   "/*",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Wildcard!"))
+								_, _ = w.Write([]byte("Wildcard!"))
 							},
 						},
 						{
@@ -299,7 +299,7 @@ func TestMux(t *testing.T) {
 							path:   "/{test}",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Test Param!"))
+								_, _ = w.Write([]byte("Test Param!"))
 							},
 						},
 					},
@@ -319,8 +319,8 @@ func TestMux(t *testing.T) {
 						req, _ := http.NewRequest(http.MethodGet, "/", nil)
 						return req
 					},
-					status: http.StatusOK,
-					body:   "Wildcard!",
+					status: http.StatusNotFound,
+					body:   "404 page not found\n",
 				},
 			},
 		},
@@ -334,7 +334,7 @@ func TestMux(t *testing.T) {
 							path:   "/",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Root!"))
+								_, _ = w.Write([]byte("Root!"))
 							},
 						},
 						{
@@ -342,7 +342,7 @@ func TestMux(t *testing.T) {
 							path:   "/",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Root Override!"))
+								_, _ = w.Write([]byte("Root Override!"))
 							},
 						},
 						{
@@ -350,7 +350,7 @@ func TestMux(t *testing.T) {
 							path:   "/どうしたの",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("ありがとう"))
+								_, _ = w.Write([]byte("ありがとう"))
 							},
 						},
 						{
@@ -358,7 +358,7 @@ func TestMux(t *testing.T) {
 							path:   "/どういたしまして",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("まあまあです"))
+								_, _ = w.Write([]byte("まあまあです"))
 							},
 						},
 						{
@@ -366,7 +366,7 @@ func TestMux(t *testing.T) {
 							path:   "/*",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Wildcard!"))
+								_, _ = w.Write([]byte("Wildcard!"))
 							},
 						},
 						{
@@ -374,7 +374,7 @@ func TestMux(t *testing.T) {
 							path:   "/*/under/1/2/3/4",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Wildcard Under!"))
+								_, _ = w.Write([]byte("Wildcard Under!"))
 							},
 						},
 						{
@@ -382,7 +382,7 @@ func TestMux(t *testing.T) {
 							path:   "/*/under/1/2/3",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Wildcard Under 1-2-3!"))
+								_, _ = w.Write([]byte("Wildcard Under 1-2-3!"))
 							},
 						},
 						{
@@ -397,7 +397,7 @@ func TestMux(t *testing.T) {
 							path:   "/*/under/{rest...}",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Wildcard Under Wildcard!"))
+								_, _ = w.Write([]byte("Wildcard Under Wildcard!"))
 							},
 						},
 					},
@@ -410,7 +410,7 @@ func TestMux(t *testing.T) {
 							path:   "/*",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Base!"))
+								_, _ = w.Write([]byte("Base!"))
 							},
 						},
 					},
@@ -431,7 +431,7 @@ func TestMux(t *testing.T) {
 							path:   "/hello",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Hello, world!"))
+								_, _ = w.Write([]byte("Hello, world!"))
 							},
 						},
 						{
@@ -440,7 +440,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodPost,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								w.WriteHeader(http.StatusAccepted)
-								w.Write([]byte("OK!"))
+								_, _ = w.Write([]byte("OK!"))
 							},
 						},
 						{
@@ -449,7 +449,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								w.WriteHeader(http.StatusOK)
-								w.Write([]byte("Welcome!"))
+								_, _ = w.Write([]byte("Welcome!"))
 							},
 						},
 						{
@@ -458,7 +458,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								w.WriteHeader(http.StatusOK)
-								w.Write([]byte("how how!"))
+								_, _ = w.Write([]byte("how how!"))
 							},
 						},
 						{
@@ -467,7 +467,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								w.WriteHeader(http.StatusOK)
-								w.Write([]byte("how how 4!"))
+								_, _ = w.Write([]byte("how how 4!"))
 							},
 						},
 						{
@@ -476,7 +476,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								w.WriteHeader(http.StatusOK)
-								w.Write([]byte("ho ho ho *!"))
+								_, _ = w.Write([]byte("ho ho ho *!"))
 							},
 						},
 						{
@@ -486,7 +486,7 @@ func TestMux(t *testing.T) {
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								id := r.PathValue("id")
 								w.WriteHeader(http.StatusOK)
-								w.Write([]byte("how how " + id + "!"))
+								_, _ = w.Write([]byte("how how " + id + "!"))
 							},
 						},
 						{
@@ -495,7 +495,7 @@ func TestMux(t *testing.T) {
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								user := r.PathValue("user")
 								w.WriteHeader(http.StatusCreated)
-								w.Write([]byte("path user is " + user + "!"))
+								_, _ = w.Write([]byte("path user is " + user + "!"))
 							},
 						},
 					},
@@ -643,7 +643,7 @@ func TestMux(t *testing.T) {
 						return req
 					},
 					status: http.StatusOK,
-					body:   "Base!",
+					body:   "Wildcard!",
 				},
 			},
 		},
@@ -658,7 +658,7 @@ func TestMux(t *testing.T) {
 							path:   "/self",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("Self!"))
+								_, _ = w.Write([]byte("Self!"))
 							},
 						},
 						{
@@ -666,7 +666,7 @@ func TestMux(t *testing.T) {
 							path:   "",
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
-								w.Write([]byte("List!"))
+								_, _ = w.Write([]byte("List!"))
 							},
 						},
 						{
@@ -675,7 +675,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodPost,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								w.WriteHeader(http.StatusCreated)
-								w.Write([]byte("Created!"))
+								_, _ = w.Write([]byte("Created!"))
 							},
 						},
 						{
@@ -684,7 +684,7 @@ func TestMux(t *testing.T) {
 							method: http.MethodGet,
 							handler: func(w http.ResponseWriter, r *http.Request) {
 								id := r.PathValue("id")
-								w.Write([]byte("ID: " + id))
+								_, _ = w.Write([]byte("ID: " + id))
 							},
 						},
 					},
@@ -810,7 +810,7 @@ func TestUse(t *testing.T) {
 	groupTest.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodOptions {
-				w.Write([]byte("OK"))
+				_, _ = w.Write([]byte("OK"))
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -819,7 +819,7 @@ func TestUse(t *testing.T) {
 
 	// Use HandleFunc to register for all methods, allowing middleware to intercept OPTIONS
 	groupTest.HandleFunc("/xxx", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("GET Test"))
+		_, _ = w.Write([]byte("GET Test"))
 	})
 
 	// OPTIONS request should be intercepted by middleware
@@ -902,10 +902,10 @@ func TestGreedyParam_StaticOverlapFallback(t *testing.T) {
 	mux.GET("/files/{p...}", func(w http.ResponseWriter, r *http.Request) {
 		gotP = r.PathValue("p")
 		gotStar = r.PathValue("*")
-		w.Write([]byte("wild"))
+		_, _ = w.Write([]byte("wild"))
 	})
 	mux.GET("/files/static/logo.png", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("static"))
+		_, _ = w.Write([]byte("static"))
 	})
 
 	// Request goes deeper than the static route — must fall back to the
@@ -925,7 +925,7 @@ func TestQueryMethod(t *testing.T) {
 	mux := NewMux()
 	mux.QUERY("/search", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		w.Write([]byte("query: " + string(body)))
+		_, _ = w.Write([]byte("query: " + string(body)))
 	})
 
 	// QUERY request with a body is routed to the handler
@@ -957,7 +957,7 @@ func TestMethodNotAllowed(t *testing.T) {
 	t.Run("basic 405", func(t *testing.T) {
 		mux := NewMux()
 		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("users"))
+			_, _ = w.Write([]byte("users"))
 		})
 
 		req, _ := http.NewRequest(http.MethodPost, "/users", nil)
@@ -1003,7 +1003,7 @@ func TestMethodNotAllowed(t *testing.T) {
 		mux := NewMux()
 		mux.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Write([]byte(`{"error":"method not allowed"}`))
+			_, _ = w.Write([]byte(`{"error":"method not allowed"}`))
 		})
 		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {})
 
@@ -1041,7 +1041,7 @@ func TestMethodNotAllowed(t *testing.T) {
 	t.Run("catch-all handler accepts any method", func(t *testing.T) {
 		mux := NewMux()
 		mux.HandleFunc("/any", func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("any"))
+			_, _ = w.Write([]byte("any"))
 		})
 
 		// HandleFunc registers with empty method — accepts all methods
@@ -1063,7 +1063,7 @@ func TestAutoHead(t *testing.T) {
 		mux := NewMux()
 		mux.GET("/users", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Custom", "value")
-			w.Write([]byte("users"))
+			_, _ = w.Write([]byte("users"))
 		})
 
 		req, _ := http.NewRequest(http.MethodHead, "/users", nil)
@@ -1293,7 +1293,6 @@ func TestMiddleWildcard_PathValue(t *testing.T) {
 		name      string
 		pattern   string
 		request   string
-		wantBody  string
 		wantValue string
 		// captureKey is the name passed to r.PathValue() inside the
 		// handler. For routes with a single `*` segment we always
@@ -1388,11 +1387,9 @@ func TestMiddleWildcard_DoesNotCrossSlashes(t *testing.T) {
 // Semantics:
 //   - `/files/a/b/c.txt`  → `path = "a/b/c.txt"`  (multi-segment)
 //   - `/files/x`          → `path = "x"`          (single segment)
-//   - `/files/`           → `path = ""`           (empty match after the `/`)
-//   - `/files`            → 404                   (no slash separator means
-//     the static prefix wasn't
-//     completed — same rule
-//     Go's std mux applies)
+//   - `/files/`           → 404                   (wildcards require a
+//     non-empty first segment)
+//   - `/files`            → 404                   (no slash separator)
 func TestGreedyNamedWildcard(t *testing.T) {
 	type want struct {
 		status int
@@ -1405,7 +1402,7 @@ func TestGreedyNamedWildcard(t *testing.T) {
 	}{
 		{"multi-segment value", "/files/a/b/c.txt", want{200, "a/b/c.txt"}},
 		{"single-segment value", "/files/x", want{200, "x"}},
-		{"trailing slash empty match", "/files/", want{200, ""}},
+		{"trailing slash empty segment", "/files/", want{404, ""}},
 		{"no slash separator → 404", "/files", want{404, ""}},
 	}
 
@@ -1476,17 +1473,15 @@ func TestGreedyAlongsideRegularParams(t *testing.T) {
 	}
 }
 
-// TestDocExample_MultipleCaptures pins the exact example shown in the
-// "Multiple captures in one route" section of guide/routing.md. Every
-// row in the doc table is exercised here so the documentation can't
-// silently drift from runtime behaviour.
+// TestGreedyMultipleCapturesRequiresNonEmptyTail exercises regular parameters
+// followed by a greedy capture, including the empty-tail rejection.
 //
 // Pattern: /users/{name}/files/{path...}
 //
 //	GET /users/alice/files/docs/note.md → name=alice path=docs/note.md
-//	GET /users/bob/files/               → name=bob   path=""
+//	GET /users/bob/files/               → 404
 //	GET /users/bob/files                → 404
-func TestDocExample_MultipleCaptures(t *testing.T) {
+func TestGreedyMultipleCapturesRequiresNonEmptyTail(t *testing.T) {
 	mux := NewMux()
 	mux.GET("/users/{name}/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(r.PathValue("name") + "|" + r.PathValue("path")))
@@ -1501,7 +1496,7 @@ func TestDocExample_MultipleCaptures(t *testing.T) {
 		want    want
 	}{
 		{"/users/alice/files/docs/note.md", want{200, "alice|docs/note.md"}},
-		{"/users/bob/files/", want{200, "bob|"}},
+		{"/users/bob/files/", want{404, ""}},
 		{"/users/bob/files", want{404, ""}},
 	}
 
@@ -1661,4 +1656,162 @@ func TestRejectsMultipleGreedy(t *testing.T) {
 
 	mux := NewMux()
 	mux.GET("/a/{x...}/{y...}", func(w http.ResponseWriter, r *http.Request) {})
+}
+
+// TestHandleWithMethodRejectsNonCanonicalMethod pins the regression where a
+// lowercase method registered a permanently dead route: entries are looked up
+// against r.Method, which net/http delivers verbatim and RFC 9110 defines as
+// case-sensitive, so `HandleWithMethod("get", "/lc", h)` silently produced a
+// route that answered 405 forever.
+//
+// It fails at registration like the ambiguous patterns trie_insert rejects,
+// rather than being upcased into a route the caller did not write.
+func TestHandleWithMethodRejectsNonCanonicalMethod(t *testing.T) {
+	panicMessage := func(t *testing.T, fn func()) string {
+		t.Helper()
+
+		var msg string
+
+		func() {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("expected a panic")
+				}
+
+				switch v := r.(type) {
+				case string:
+					msg = v
+				case error:
+					msg = v.Error()
+				}
+			}()
+
+			fn()
+		}()
+
+		return msg
+	}
+
+	for _, method := range []string{
+		"get",              // the reported case
+		"Get",              // mixed case
+		"GET ",             // trailing space is not a token character
+		"GET\n",            // header-injection shaped
+		"G/ET",             // separator
+		"POST,GET",         // comma
+		"\"GET\"",          // quoted-string
+		"GET\x00",          // NUL
+		"MÉTHODE",          // non-ASCII
+		"multipart/method", // slash
+	} {
+		t.Run(method, func(t *testing.T) {
+			msg := panicMessage(t, func() {
+				NewMux().HandleWithMethod(method, "/lc", func(http.ResponseWriter, *http.Request) {})
+			})
+			if !strings.Contains(msg, "invalid HTTP method") {
+				t.Errorf("panic message %q does not identify the cause", msg)
+			}
+		})
+	}
+
+	// RouteBuilder is the same entry point through ApplyRoutes and must
+	// reject identically.
+	t.Run("RouteBuilder", func(t *testing.T) {
+		msg := panicMessage(t, func() {
+			NewMux().ApplyRoutes(func(b *RouteBuilder) {
+				b.HandleWithMethod("get", "/lc", func(http.ResponseWriter, *http.Request) {})
+			})
+		})
+		if !strings.Contains(msg, "invalid HTTP method") {
+			t.Errorf("panic message %q does not identify the cause", msg)
+		}
+	})
+
+	// A panicking batch must leave the live table untouched.
+	t.Run("RouteBuilder leaves the table untouched", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/ok", func(http.ResponseWriter, *http.Request) {})
+
+		func() {
+			defer func() { _ = recover() }()
+
+			mux.ApplyRoutes(func(b *RouteBuilder) {
+				b.HandleWithMethod("get", "/lc", func(http.ResponseWriter, *http.Request) {})
+			})
+		}()
+
+		if got := len(mux.Routes()); got != 1 {
+			t.Errorf("routes = %d, want 1", got)
+		}
+	})
+}
+
+// TestHandleWithMethodAcceptsCanonicalMethods keeps the validator from
+// over-rejecting: every method the package registers itself, extension methods
+// made of ordinary token characters, and the documented empty catch-all.
+func TestHandleWithMethodAcceptsCanonicalMethods(t *testing.T) {
+	for _, method := range []string{
+		http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace, MethodQuery,
+		"PROPFIND", "MKCOL", "M-SEARCH", "X_CUSTOM", "R2",
+	} {
+		t.Run(method, func(t *testing.T) {
+			mux := NewMux()
+			mux.HandleWithMethod(method, "/ok", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("hit"))
+			})
+
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(method, "/ok", nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			// HEAD suppresses the body; the status above is the assertion.
+			if method != http.MethodHead && rec.Body.String() != "hit" {
+				t.Errorf("body = %q, want %q", rec.Body.String(), "hit")
+			}
+		})
+	}
+
+	// The empty method is the documented catch-all behind Handle and
+	// HandleFunc and must keep serving every method.
+	t.Run("empty catch-all", func(t *testing.T) {
+		mux := NewMux()
+		mux.HandleWithMethod("", "/any", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(r.Method))
+		})
+
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete, "PROPFIND"} {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(method, "/any", nil))
+
+			if rec.Code != http.StatusOK || rec.Body.String() != method {
+				t.Errorf("%s: status = %d body = %q", method, rec.Code, rec.Body.String())
+			}
+		}
+	})
+
+	t.Run("empty catch-all through HandleFunc and RouteBuilder", func(t *testing.T) {
+		mux := NewMux()
+		mux.HandleFunc("/hf", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("hf"))
+		})
+		mux.ApplyRoutes(func(b *RouteBuilder) {
+			b.HandleWithMethod("", "/rb", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("rb"))
+			})
+		})
+
+		for path, want := range map[string]string{"/hf": "hf", "/rb": "rb"} {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, path, nil))
+
+			if rec.Code != http.StatusOK || rec.Body.String() != want {
+				t.Errorf("%s: status = %d body = %q", path, rec.Code, rec.Body.String())
+			}
+		}
+	})
 }

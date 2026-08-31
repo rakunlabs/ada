@@ -68,7 +68,7 @@ func TestWithSessionStorePersistsAcrossRequests(t *testing.T) {
 		seen = identity.FromContext(r.Context())
 	})).ServeHTTP(rec, r)
 
-	if rec.Code == http.StatusTemporaryRedirect {
+	if rec.Code == http.StatusSeeOther {
 		t.Fatal("a persisted session redirected back to login")
 	}
 

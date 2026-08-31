@@ -7,16 +7,29 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/rakunlabs/ada/utils/bind"
 )
 
 type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) {
 	return 0, errors.New("read failed")
+}
+
+type countingJSONMarshaler struct {
+	calls *int
+}
+
+func (m countingJSONMarshaler) MarshalJSON() ([]byte, error) {
+	(*m.calls)++
+
+	return []byte(`{"value":"ok"}`), nil
 }
 
 func TestMuxWrap_UsesMuxErrorHandler(t *testing.T) {
@@ -402,6 +415,75 @@ func TestSendDoesNotOverrideContentType(t *testing.T) {
 	}
 }
 
+func TestSendJSONEncodingErrorCanBeHandled(t *testing.T) {
+	mux := NewMux()
+	mux.ErrorHandler(func(c *Context, err error) {
+		if c.Committed() {
+			t.Error("JSON encoding error committed the response")
+		}
+		if !strings.Contains(err.Error(), "unsupported type") {
+			t.Errorf("error = %q, want unsupported type", err)
+		}
+
+		_ = c.SendString("handled")
+	})
+	mux.GET("/json", func(c *Context) error {
+		c.SetStatus(http.StatusAccepted)
+
+		return c.SendJSON(make(chan int))
+	})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/json", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if got := rec.Header().Get(HeaderContentType); got != MIMETextPlainCharsetUTF8 {
+		t.Fatalf("Content-Type = %q, want %q", got, MIMETextPlainCharsetUTF8)
+	}
+	if got := rec.Body.String(); got != "handled" {
+		t.Fatalf("body = %q, want %q", got, "handled")
+	}
+}
+
+func TestSendJSONPBuffersPrettyResponseAndPreservesContentType(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c := NewContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	c.SetStatus(http.StatusCreated)
+	c.SetHeader(HeaderContentType, "application/problem+json")
+
+	if err := c.SendJSONP(map[string]string{"name": "ada"}, "  "); err != nil {
+		t.Fatalf("SendJSONP: %v", err)
+	}
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusCreated)
+	}
+	if got := rec.Header().Get(HeaderContentType); got != "application/problem+json" {
+		t.Fatalf("Content-Type = %q, want application/problem+json", got)
+	}
+	if got, want := rec.Body.String(), "{\n  \"name\": \"ada\"\n}\n"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+func TestSendJSONPMarshalsOnce(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c := NewContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	calls := 0
+
+	if err := c.SendJSONP(countingJSONMarshaler{calls: &calls}, "  "); err != nil {
+		t.Fatalf("SendJSONP: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("MarshalJSON calls = %d, want 1", calls)
+	}
+	if got, want := rec.Body.String(), "{\n  \"value\": \"ok\"\n}\n"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
 func TestSendZipPreparationErrorRemainsUncommitted(t *testing.T) {
 	mux := NewMux()
 	mux.GET("/zip", func(c *Context) error {
@@ -414,8 +496,63 @@ func TestSendZipPreparationErrorRemainsUncommitted(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
-	if !strings.Contains(rec.Body.String(), "read failed") {
-		t.Fatalf("body = %q, want read error", rec.Body.String())
+	// The Context stayed uncommitted, so the error handler could write the
+	// response. Its text is the redacted 500 body — the read failure itself is
+	// an internal detail and goes to the log, see TestErrorRedaction.
+	if got, want := rec.Body.String(), `{"message":"Internal Server Error"}`+"\n"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+// TestSendZipEntryOrderIsDeterministic pins archive layout against Go's
+// randomised map iteration. SendZip ranged over the map, so two responses
+// built from identical data differed byte for byte, defeating checksums,
+// caching and any reproducible-output test downstream.
+func TestSendZipEntryOrderIsDeterministic(t *testing.T) {
+	names := []string{"zeta.txt", "alpha.txt", "m/inner.txt", "beta.txt", "a/b/c.txt", "0.txt", "M.txt"}
+
+	want := slices.Clone(names)
+	slices.Sort(want)
+
+	var first []byte
+
+	// Repeat: one pass can match sorted order by luck, several cannot.
+	for i := range 8 {
+		files := make(map[string]io.Reader, len(names))
+		for _, name := range names {
+			files[name] = strings.NewReader("data:" + name)
+		}
+
+		rec := httptest.NewRecorder()
+		c := NewContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if err := c.SendZip("archive.zip", files); err != nil {
+			t.Fatalf("SendZip: %v", err)
+		}
+
+		body := rec.Body.Bytes()
+
+		zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+		if err != nil {
+			t.Fatalf("open zip: %v", err)
+		}
+
+		got := make([]string, 0, len(zr.File))
+		for _, f := range zr.File {
+			got = append(got, f.Name)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("run %d: entries = %v, want %v", i, got, want)
+		}
+
+		if first == nil {
+			first = body
+
+			continue
+		}
+		if !bytes.Equal(first, body) {
+			t.Fatalf("run %d produced a different archive for the same input", i)
+		}
 	}
 }
 
@@ -474,4 +611,63 @@ func TestSendZipUsesNormalizedSafeNames(t *testing.T) {
 	if len(zr.File) != 1 || zr.File[0].Name != "dir/file.txt" {
 		t.Fatalf("entries = %#v, want dir/file.txt", zr.File)
 	}
+}
+
+// TestBindForwardsOptions is the escape hatch for the 1 MiB default body
+// limit. The migration notes tell users to pass bind.WithBodyLimit(0), but
+// Context.Bind took no options, so a Context handler had no way to do it and
+// had to bypass Bind entirely.
+func TestBindForwardsOptions(t *testing.T) {
+	type payload struct {
+		Data string `json:"data"`
+	}
+
+	body := func() *strings.Reader {
+		big := strings.Repeat("x", int(bind.DefaultBodyLimit)+1)
+
+		return strings.NewReader(`{"data":"` + big + `"}`)
+	}
+
+	request := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/", body())
+		r.Header.Set(HeaderContentType, MIMEApplicationJSON)
+
+		return r
+	}
+
+	t.Run("default limit still applies", func(t *testing.T) {
+		c := NewContext(httptest.NewRecorder(), request())
+
+		var obj payload
+		if err := c.Bind(&obj); err == nil {
+			t.Fatal("Bind accepted a body over the default limit")
+		}
+	})
+
+	t.Run("option disables the limit", func(t *testing.T) {
+		c := NewContext(httptest.NewRecorder(), request())
+
+		var obj payload
+		if err := c.Bind(&obj, bind.WithBodyLimit(0)); err != nil {
+			t.Fatalf("Bind with WithBodyLimit(0): %v", err)
+		}
+		if len(obj.Data) != int(bind.DefaultBodyLimit)+1 {
+			t.Fatalf("bound %d bytes, want %d", len(obj.Data), int(bind.DefaultBodyLimit)+1)
+		}
+	})
+
+	t.Run("several options are forwarded", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/?ids=1|2|3", nil)
+		c := NewContext(httptest.NewRecorder(), r)
+
+		var obj struct {
+			IDs []string `query:"ids"`
+		}
+		if err := c.Bind(&obj, bind.WithBodyLimit(0), bind.WithQuerySeparator("|")); err != nil {
+			t.Fatalf("Bind: %v", err)
+		}
+		if want := []string{"1", "2", "3"}; !slices.Equal(obj.IDs, want) {
+			t.Fatalf("IDs = %v, want %v", obj.IDs, want)
+		}
+	})
 }

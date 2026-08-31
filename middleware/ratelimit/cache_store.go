@@ -7,17 +7,22 @@ import (
 )
 
 // NewCacheStore adapts an existing *cache.Cache into the ratelimit Store
-// interface. Use this when you need a non-default backend (for example
-// github.com/rakunlabs/cache/store/redis for cross-process limits across
-// several pika instances).
+// interface. This adapter is useful for legacy or best-effort deployments
+// that already use a github.com/rakunlabs/cache backend.
 //
 // The caller is responsible for configuring the underlying cache with
 // TTL=0: the limiter prunes per-attempt timestamps authoritatively on
 // every read, and a TTL on the cache would risk dropping an active bucket
 // mid-window, silently weakening the defense. Eviction under memory
-// pressure (LRU cap or redis key expiry driven by external policy) is
-// fine — a missing bucket just looks like "no attempts yet" to the
-// limiter, which is strictly safer than falsely blocking a user.
+// pressure (LRU cap or redis key expiry driven by external policy) resets the
+// affected limit because a missing bucket looks like "no attempts yet". Size
+// and configure the backend accordingly.
+//
+// NewCacheStore deliberately does not implement AtomicStore. Even with a
+// redis-backed cache, separate Get and Set calls cannot provide an atomic
+// multi-key read-modify-write, so this adapter does not guarantee cluster-wide
+// enforcement. Distributed deployments should provide a backend-native
+// AtomicStore and set Config.RequireAtomicStore.
 //
 // For the common case (single-node in-memory), prefer NewMemoryStore,
 // which applies the right config for you.
@@ -25,10 +30,8 @@ func NewCacheStore(c *cache.Cache[string, *Bucket]) Store {
 	return &cacheStore{c: c}
 }
 
-// cacheStore is the shared adapter used by both NewMemoryStore and
-// NewCacheStore. Kept unexported so callers go through the named
-// constructors and can't accidentally bypass the TTL invariant
-// documented on each.
+// cacheStore stays unexported so callers use NewCacheStore and encounter its
+// non-atomic and TTL requirements in the API documentation.
 type cacheStore struct {
 	c *cache.Cache[string, *Bucket]
 }

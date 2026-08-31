@@ -43,6 +43,29 @@ func handleUser(c *ada.Context) error {
 }
 ```
 
+## Request Body Limit
+
+Binding limits the total request body to **1 MiB** by default. The limit also
+applies when `Content-Length` is absent, and all bytes in the body count toward
+it, including trailing whitespace. Oversized requests return an error wrapping
+`bind.ErrBinding`.
+
+Choose an application-specific limit when larger payloads are expected:
+
+```go
+err := bind.Bind(r, &payload, bind.WithBodyLimit(4<<20)) // 4 MiB
+```
+
+To preserve the previous unlimited behavior during migration, explicitly set
+the limit to zero:
+
+```go
+err := bind.Bind(r, &payload, bind.WithBodyLimit(0))
+```
+
+`ada.Context.Bind` uses the secure default. Call `bind.Bind(c.Request, ...)`
+directly when an endpoint needs a custom limit.
+
 ## Supported Struct Tags
 
 Own struct types can implement the `encoding.TextUnmarshaler` interface for custom parsing logic.

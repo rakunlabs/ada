@@ -119,6 +119,53 @@ func TestSharedSecret(t *testing.T) {
 	}
 }
 
+func TestNoTrustBoundaryFailsClosed(t *testing.T) {
+	s := header.New("proxy")
+	rec := httptest.NewRecorder()
+
+	if _, outcome, _ := s.Login(rec, request("127.0.0.1:1", map[string]string{"X-Forwarded-User": "admin"})); outcome != strategy.OutcomeFailed {
+		t.Fatal("header auth without an explicit trust boundary accepted an identity")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d", rec.Code)
+	}
+}
+
+func TestUnsafeTrustAllRequiresExplicitOptIn(t *testing.T) {
+	s := header.New("proxy", header.WithUnsafeTrustAll())
+	rec := httptest.NewRecorder()
+
+	if _, outcome, _ := s.Login(rec, request("203.0.113.9:1", map[string]string{"X-Forwarded-User": "alice"})); outcome != strategy.OutcomeContinue {
+		t.Fatalf("explicit unsafe trust-all was rejected: %s", rec.Body)
+	}
+}
+
+func TestSharedSecretFieldsAreValidated(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		secret string
+	}{
+		{name: "empty header", secret: "secret"},
+		{name: "invalid header", header: "Bad Header", secret: "secret"},
+		{name: "empty secret", header: "X-Proxy-Secret"},
+		{name: "whitespace secret", header: "X-Proxy-Secret", secret: "  "},
+		{name: "newline secret", header: "X-Proxy-Secret", secret: "secret\nforged"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("invalid shared-secret configuration did not panic")
+				}
+			}()
+
+			_ = header.New("proxy", header.WithSharedSecret(tt.header, tt.secret))
+		})
+	}
+}
+
 // The rejection must be indistinguishable from a missing user header, so a
 // probe cannot learn that a shared secret exists.
 func TestRejectionIsIndistinguishable(t *testing.T) {
@@ -169,4 +216,24 @@ func TestBareIPInTrustedProxies(t *testing.T) {
 	if _, outcome, _ := s.Login(rec, r); outcome != strategy.OutcomeContinue {
 		t.Fatalf("bare IP should be accepted as a /32: %s", rec.Body)
 	}
+}
+
+func TestIPv6TrustedProxy(t *testing.T) {
+	s := header.New("proxy", header.WithTrustedProxies("2001:db8::/32"))
+	rec := httptest.NewRecorder()
+	r := request("[2001:0db8::5]:9000", map[string]string{"X-Forwarded-User": "alice"})
+
+	if _, outcome, _ := s.Login(rec, r); outcome != strategy.OutcomeContinue {
+		t.Fatalf("IPv6 trusted proxy was rejected: %s", rec.Body)
+	}
+}
+
+func TestTrustedProxyCIDRsAreValidated(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("invalid trusted CIDR did not panic")
+		}
+	}()
+
+	_ = header.WithTrustedProxies("invalid")
 }

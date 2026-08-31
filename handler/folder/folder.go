@@ -84,6 +84,11 @@ func New(cfg *Config) (*Folder, error) {
 	if cfg == nil {
 		cfg = &Config{}
 	}
+	snapshot := *cfg
+	snapshot.SPAIndexRegex = cloneRegexPathStores(cfg.SPAIndexRegex)
+	snapshot.FilePathRegex = cloneRegexPathStores(cfg.FilePathRegex)
+	snapshot.CacheRegex = cloneRegexCacheStores(cfg.CacheRegex)
+	cfg = &snapshot
 
 	if cfg.IndexName == "" {
 		cfg.IndexName = indexPage
@@ -96,6 +101,9 @@ func New(cfg *Config) (*Folder, error) {
 	}
 
 	for i := range cfg.SPAIndexRegex {
+		if cfg.SPAIndexRegex[i] == nil {
+			return nil, fmt.Errorf("spa index regex at index %d is nil", i)
+		}
 		rgx, err := regexp.Compile(cfg.SPAIndexRegex[i].Regex)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compile spa index regex %q: %w", cfg.SPAIndexRegex[i].Regex, err)
@@ -105,6 +113,9 @@ func New(cfg *Config) (*Folder, error) {
 	}
 
 	for i := range cfg.FilePathRegex {
+		if cfg.FilePathRegex[i] == nil {
+			return nil, fmt.Errorf("file path regex at index %d is nil", i)
+		}
 		rgx, err := regexp.Compile(cfg.FilePathRegex[i].Regex)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compile file path regex %q: %w", cfg.FilePathRegex[i].Regex, err)
@@ -114,6 +125,9 @@ func New(cfg *Config) (*Folder, error) {
 	}
 
 	for i := range cfg.CacheRegex {
+		if cfg.CacheRegex[i] == nil {
+			return nil, fmt.Errorf("cache regex at index %d is nil", i)
+		}
 		rgx, err := regexp.Compile(cfg.CacheRegex[i].Regex)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compile cache regex %q: %w", cfg.CacheRegex[i].Regex, err)
@@ -131,11 +145,40 @@ func New(cfg *Config) (*Folder, error) {
 	} else {
 		cfg.BasePath = "/"
 	}
+	if cfg.PrefixPath != "" {
+		cfg.PrefixPath = path.Clean("/" + strings.TrimPrefix(cfg.PrefixPath, "/"))
+	}
 
 	return &Folder{
 		cfg: cfg,
 		fs:  http.Dir(cfg.Path),
 	}, nil
+}
+
+func cloneRegexPathStores(stores []*RegexPathStore) []*RegexPathStore {
+	cloned := make([]*RegexPathStore, len(stores))
+	for i, store := range stores {
+		if store != nil {
+			copy := *store
+			copy.rgx = nil
+			cloned[i] = &copy
+		}
+	}
+
+	return cloned
+}
+
+func cloneRegexCacheStores(stores []*RegexCacheStore) []*RegexCacheStore {
+	cloned := make([]*RegexCacheStore, len(stores))
+	for i, store := range stores {
+		if store != nil {
+			copy := *store
+			copy.rgx = nil
+			cloned[i] = &copy
+		}
+	}
+
+	return cloned
 }
 
 func (f *Folder) SetCustomContent(customContent func(r *http.Request, name string, content io.ReadSeeker) io.ReadSeeker) {
@@ -154,10 +197,18 @@ func (f *Folder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	cPath := path.Clean(upath)
 	if f.cfg.PrefixPath != "" {
-		prefix := strings.TrimSuffix(f.cfg.PrefixPath, "/")
-		cPath = strings.TrimPrefix(cPath, prefix)
-		if cPath == "" {
-			cPath = "/"
+		prefix := f.cfg.PrefixPath
+		if prefix != "/" {
+			if cPath != prefix && !strings.HasPrefix(cPath, prefix+"/") {
+				handleError(w, newResponseError(http.StatusNotFound, nil))
+
+				return
+			}
+
+			cPath = strings.TrimPrefix(cPath, prefix)
+			if cPath == "" {
+				cPath = "/"
+			}
 		}
 	}
 
@@ -200,7 +251,7 @@ func (f *Folder) serveFile(w http.ResponseWriter, r *http.Request, uPath, cPath 
 
 		return toHTTPError(err)
 	}
-	defer file.Close()
+	defer func(file http.File) { _ = file.Close() }(file)
 
 	d, err := file.Stat()
 	if err != nil {
@@ -225,7 +276,7 @@ func (f *Folder) serveFile(w http.ResponseWriter, r *http.Request, uPath, cPath 
 		// use contents of index.html for directory, if present
 		ff, err := f.fs.Open(filepath.Join(cPath, f.cfg.IndexName))
 		if err == nil {
-			defer ff.Close()
+			defer func() { _ = ff.Close() }()
 			dd, err := ff.Stat()
 			if err == nil {
 				d = dd
@@ -275,19 +326,19 @@ func toHTTPError(err error) error {
 		return newResponseError(http.StatusForbidden, nil)
 	}
 
-	return err
+	return newResponseError(http.StatusInternalServerError, nil)
 }
 
 func (f *Folder) fsFile(w http.ResponseWriter, r *http.Request, file string) error {
 	hFile, err := f.fs.Open(file)
 	if err != nil {
-		return newResponseError(http.StatusNotFound, err)
+		return toHTTPError(err)
 	}
-	defer hFile.Close()
+	defer func() { _ = hFile.Close() }()
 
 	fi, err := hFile.Stat()
 	if err != nil {
-		return err
+		return toHTTPError(err)
 	}
 
 	f.serveContent(w, r, fi.Name(), fi.ModTime(), hFile)

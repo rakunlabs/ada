@@ -1,8 +1,10 @@
 package telemetry
 
 import (
+	"fmt"
 	"net/http"
 
+	"github.com/rakunlabs/ada/utils/proxy"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -20,6 +22,9 @@ type config struct {
 
 	SpanNameFormatter  func(routeName string, r *http.Request) string
 	MetricAttributesFn func(*http.Request) []attribute.KeyValue
+
+	proxyPolicy       proxy.Policy
+	unsafeProxyHeader bool
 }
 
 // Filter is a predicate used to determine whether a given http.request should be traced.
@@ -27,6 +32,16 @@ type config struct {
 type Filter func(*http.Request) bool
 
 type Option func(*config)
+
+// WithFilter adds a filter used to decide whether a request is instrumented.
+// All configured filters must return true for telemetry to be recorded.
+func WithFilter(filter Filter) Option {
+	return func(o *config) {
+		if filter != nil {
+			o.Filters = append(o.Filters, filter)
+		}
+	}
+}
 
 // WithMeterProvider specifies a meter provider to use for creating a metric.
 // If none is specified, the global provider is used.
@@ -86,4 +101,26 @@ func WithMetricAttributesFn(fn func(*http.Request) []attribute.KeyValue) Option 
 	return func(o *config) {
 		o.MetricAttributesFn = fn
 	}
+}
+
+// WithTrustedProxies permits matching immediate peers to supply client IP
+// forwarding headers. CIDRs are validated when this option is created; bare
+// IPs are accepted as single-address prefixes.
+func WithTrustedProxies(cidrs ...string) Option {
+	policy, err := proxy.New(cidrs...)
+	if err != nil {
+		panic(fmt.Errorf("telemetry: trusted proxies: %w", err))
+	}
+
+	return func(o *config) {
+		o.proxyPolicy = policy
+		o.unsafeProxyHeader = false
+	}
+}
+
+// WithUnsafeProxyHeaders trusts client IP forwarding headers from every peer.
+// It preserves the old behavior for deployments with an external boundary.
+// Prefer WithTrustedProxies.
+func WithUnsafeProxyHeaders() Option {
+	return func(o *config) { o.unsafeProxyHeader = true }
 }

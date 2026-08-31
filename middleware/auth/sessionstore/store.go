@@ -42,14 +42,35 @@ type DirectStore interface {
 	// when the id is unknown.
 	LoadByID(ctx context.Context, id string) (map[string]any, error)
 
-	// SaveByID persists values under id. A ttl of 0 means "no explicit
-	// expiry"; stores that cannot express that may apply their default.
+	// SaveByID persists values under id. A ttl of 0 means no expiry.
 	SaveByID(ctx context.Context, id string, values map[string]any, ttl time.Duration) error
 
 	// DeleteByID removes the record for id. Deleting an unknown id is not an
 	// error.
 	DeleteByID(ctx context.Context, id string) error
 }
+
+// AtomicTransaction computes an optional replacement for one stored value.
+// When commit is false, the record is unchanged. When commit is true, a nil
+// replacement deletes it and a non-nil replacement saves it. The callback is
+// invoked exactly once per TransactByID call and its error is returned after
+// applying a requested commit.
+type AtomicTransaction func(current map[string]any) (replacement map[string]any, commit bool, err error)
+
+// AtomicDirectStore is an optional DirectStore capability for an atomic
+// read-modify-write transaction. Implementations must prevent lost updates
+// across replicas. An optimistic implementation must return
+// ErrTransactionConflict rather than invoke the callback again; callers may
+// retry the complete TransactByID call. For a committed non-nil replacement,
+// ttl <= 0 preserves the record's current expiry exactly. Deletion ignores ttl.
+type AtomicDirectStore interface {
+	DirectStore
+	TransactByID(ctx context.Context, id string, ttl time.Duration, fn AtomicTransaction) (map[string]any, error)
+}
+
+// ErrTransactionConflict indicates that a concurrent update prevented an
+// atomic transaction from committing.
+var ErrTransactionConflict = errors.New("sessionstore: transaction conflict")
 
 // ErrNoSession is returned by DirectStore.LoadByID when the id is unknown.
 var ErrNoSession = errors.New("sessionstore: session not found")

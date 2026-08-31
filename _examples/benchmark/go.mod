@@ -7,7 +7,7 @@ replace github.com/rakunlabs/ada => ../../
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/labstack/echo/v5 v5.3.1
-	github.com/rakunlabs/ada v0.4.7
+	github.com/rakunlabs/ada v0.4.10
 )
 
 require (

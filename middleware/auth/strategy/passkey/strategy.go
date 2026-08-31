@@ -57,11 +57,14 @@ type Strategy struct {
 	// picks any resident credential.
 	userCreds UserCredentialsLookup
 
-	// updateSignCount persists the new sign counter after a
-	// successful login. Best-effort: errors are logged, the login
-	// still succeeds — losing one counter increment is preferable
-	// to a flaky write blocking authentication.
-	updateSignCount func(ctx context.Context, credentialID []byte, newCount uint32) error
+	// Legacy single-process persistence and the shared-store atomic path are
+	// mutually exclusive. Every persistence failure denies authentication.
+	updateSignCount            func(ctx context.Context, credentialID []byte, newCount uint32) error
+	compareAndAdvanceSignCount SignCountCompareAndAdvance
+
+	// Counter lookup, verification, and persistence are serialized per
+	// credential so synchronous updater backends cannot apply stale writes.
+	signCountLocks [64]sync.Mutex
 }
 
 // ChallengeStore persists in-flight WebAuthn ceremony state. The
@@ -89,6 +92,12 @@ type ChallengeStore interface {
 // translates that into a generic "invalid credential" response so
 // callers can't enumerate enrolled credentials.
 type CredentialLookup func(ctx context.Context, credentialID []byte) (*Credential, *identity.Identity, error)
+
+// SignCountCompareAndAdvance atomically advances a stored signature counter
+// from expectedCount to newCount. It returns advanced=false when the stored
+// value no longer equals expectedCount or newCount is not greater. A shared
+// store must perform the comparison and update in one transaction.
+type SignCountCompareAndAdvance func(ctx context.Context, credentialID []byte, expectedCount, newCount uint32) (advanced bool, err error)
 
 // UserCredentialsLookup resolves a user hint (handle bytes from the
 // SPA, or a free-form username typed into a login form) to the list
@@ -134,6 +143,13 @@ type UserHint struct {
 // converts this into a 401 with a generic message.
 var ErrCredentialNotFound = errors.New("passkey: credential not found")
 
+// ErrSignCountStale indicates that an assertion lost an atomic counter race.
+var ErrSignCountStale = errors.New("passkey: signature counter is stale")
+
+// ErrSignCountPersistenceRequired indicates that a counter-capable
+// authenticator was used without a configured persistence callback.
+var ErrSignCountPersistenceRequired = errors.New("passkey: signature counter persistence is required")
+
 // Option configures a Strategy.
 type Option func(*Strategy)
 
@@ -150,13 +166,25 @@ func WithChallengeStore(store ChallengeStore) Option {
 	return func(s *Strategy) { s.store = store }
 }
 
-// WithSignCountUpdater installs a callback invoked after a
-// successful login to persist the new sign counter. When unset,
-// sign counts are not persisted — acceptable for platform
-// authenticators (which always report 0) but defeats the
-// replay-detection for hardware keys.
+// WithSignCountUpdater installs the legacy single-process persistence callback.
+// Callback errors deny authentication. Lookup, verification, and persistence
+// are serialized per credential within one Strategy, so the callback must make
+// the new count visible to CredentialLookup before returning.
+//
+// This option cannot provide atomicity across Strategy instances or processes.
+// Shared stores must use WithSignCountCompareAndAdvance instead. Stores without
+// either callback remain compatible only with authenticators that always report
+// zero; nonzero counters fail closed rather than authenticating without replay
+// protection.
 func WithSignCountUpdater(fn func(ctx context.Context, credentialID []byte, newCount uint32) error) Option {
 	return func(s *Strategy) { s.updateSignCount = fn }
+}
+
+// WithSignCountCompareAndAdvance installs the authoritative shared-store
+// counter callback. Exactly one concurrent assertion can advance a given
+// expected counter; errors and advanced=false both deny authentication.
+func WithSignCountCompareAndAdvance(fn SignCountCompareAndAdvance) Option {
+	return func(s *Strategy) { s.compareAndAdvanceSignCount = fn }
 }
 
 // WithUserCredentialsLookup installs a callback that maps a user
@@ -191,14 +219,21 @@ func NewStrategy(name string, w *WebAuthn, lookup CredentialLookup, opts ...Opti
 	if lookup == nil {
 		return nil, errors.New("passkey: credential lookup required")
 	}
+	ownedWebAuthn, err := New(w.cfg)
+	if err != nil {
+		return nil, fmt.Errorf("passkey: invalid WebAuthn instance: %w", err)
+	}
 	s := &Strategy{
 		name:   name,
 		label:  name,
-		w:      w,
+		w:      ownedWebAuthn,
 		lookup: lookup,
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.updateSignCount != nil && s.compareAndAdvanceSignCount != nil {
+		return nil, errors.New("passkey: configure only one signature counter updater")
 	}
 	if s.store == nil {
 		s.store = newMemoryChallengeStore()
@@ -398,6 +433,11 @@ func (s *Strategy) handleFinish(w http.ResponseWriter, r *http.Request, body []b
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "missing rawId")
 		return nil, strategy.OutcomeFailed, nil
 	}
+	if s.updateSignCount != nil || s.compareAndAdvanceSignCount != nil {
+		counterLock := s.signCountLock(rawID)
+		counterLock.Lock()
+		defer counterLock.Unlock()
+	}
 
 	cred, id, err := s.lookup(r.Context(), rawID)
 	if err != nil || cred == nil || id == nil {
@@ -420,16 +460,49 @@ func (s *Strategy) handleFinish(w http.ResponseWriter, r *http.Request, body []b
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	if s.updateSignCount != nil && result.NewSignCount != cred.SignCount {
-		if err := s.updateSignCount(r.Context(), cred.ID, result.NewSignCount); err != nil {
-			// Don't fail the login on a write hiccup; log loudly so
-			// operators can investigate.
-			slog.Warn("passkey: persist sign count failed", "credential", encodeBase64URL(cred.ID), "error", err)
-		}
+	if err := s.persistSignCount(r.Context(), cred, result.NewSignCount); err != nil {
+		slog.Warn("passkey: persist sign count failed", "credential", encodeBase64URL(cred.ID), "error", err)
+		writeJSONError(w, http.StatusUnauthorized, "invalid_assertion", "passkey verification failed")
+		return nil, strategy.OutcomeFailed, nil
 	}
 
 	id.Provider = s.name
 	return id, strategy.OutcomeContinue, nil
+}
+
+func (s *Strategy) persistSignCount(ctx context.Context, credential *Credential, newCount uint32) error {
+	if newCount == 0 {
+		return nil
+	}
+	if newCount <= credential.SignCount {
+		return ErrSignCountStale
+	}
+	if s.compareAndAdvanceSignCount != nil {
+		advanced, err := s.compareAndAdvanceSignCount(ctx, credential.ID, credential.SignCount, newCount)
+		if err != nil {
+			return fmt.Errorf("compare and advance signature counter: %w", err)
+		}
+		if !advanced {
+			return ErrSignCountStale
+		}
+		return nil
+	}
+	if s.updateSignCount != nil {
+		if err := s.updateSignCount(ctx, credential.ID, newCount); err != nil {
+			return fmt.Errorf("update signature counter: %w", err)
+		}
+		return nil
+	}
+	return ErrSignCountPersistenceRequired
+}
+
+func (s *Strategy) signCountLock(credentialID []byte) *sync.Mutex {
+	var hash uint32 = 2166136261
+	for _, b := range credentialID {
+		hash ^= uint32(b)
+		hash *= 16777619
+	}
+	return &s.signCountLocks[hash%uint32(len(s.signCountLocks))]
 }
 
 // detectPhase classifies the request body. A body containing an
@@ -511,7 +584,7 @@ func newMemoryChallengeStore() *memoryChallengeStore {
 func (s *memoryChallengeStore) Save(_ context.Context, id string, d *SessionData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries[id] = d
+	s.entries[id] = cloneSessionData(d)
 	return nil
 }
 

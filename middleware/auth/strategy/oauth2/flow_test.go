@@ -460,7 +460,7 @@ func TestFlowCookieIsOneShot(t *testing.T) {
 	}
 }
 
-func TestCallbackSurfacesIdPError(t *testing.T) {
+func TestCallbackRedactsIdPErrorDetails(t *testing.T) {
 	p := newIDP(t)
 	s := newStrategy(t, p, nil)
 
@@ -472,19 +472,70 @@ func TestCallbackSurfacesIdPError(t *testing.T) {
 			loc.Query().Get("state"), nil)
 	r.AddCookie(flow)
 
-	// An IdP error arrives with no code, so this goes through handleInitiate
-	// unless the error is detected first. Force the callback path.
-	r.URL.RawQuery += "&code=ignored"
-
 	_, outcome, _ := s.Login(rec, r)
 
 	if outcome != strategy.OutcomeFailed {
 		t.Fatal("an IdP error response must fail the login")
 	}
 
-	if !strings.Contains(rec.Body.String(), "access_denied") {
-		t.Errorf("the IdP's own error should be reported, got %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), "access_denied") || strings.Contains(rec.Body.String(), "nope") {
+		t.Errorf("the IdP's raw error should be redacted, got %s", rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), "authorization_denied") {
+		t.Errorf("body = %s, want generic denial", rec.Body.String())
+	}
+
+	assertFlowCookieCleared(t, rec)
+}
+
+func TestCallbackDenialRequiresValidStateAndFlow(t *testing.T) {
+	p := newIDP(t)
+	s := newStrategy(t, p, nil)
+
+	loc, flow := initiate(t, s)
+
+	tests := []struct {
+		name   string
+		state  string
+		cookie *http.Cookie
+	}{
+		{name: "missing flow cookie", state: loc.Query().Get("state")},
+		{name: "state mismatch", state: "not-the-state", cookie: flow},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet,
+				"https://app.example/auth/login/callback/idp?error=access_denied&state="+
+					url.QueryEscape(tc.state), nil)
+			if tc.cookie != nil {
+				r.AddCookie(tc.cookie)
+			}
+
+			_, outcome, _ := s.Login(rec, r)
+			if outcome != strategy.OutcomeFailed {
+				t.Fatalf("outcome = %v, want failed", outcome)
+			}
+			if !strings.Contains(rec.Body.String(), "state_invalid") {
+				t.Errorf("body = %s, want state_invalid", rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), "authorization_denied") {
+				t.Errorf("invalid flow was reported as a provider denial: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func assertFlowCookieCleared(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "auth_flow_idp" && c.MaxAge < 0 {
+			return
+		}
+	}
+
+	t.Error("flow cookie must be cleared after callback denial")
 }
 
 // Without a key set and without a userinfo endpoint there is nothing that can

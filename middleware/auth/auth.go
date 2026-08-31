@@ -169,6 +169,8 @@ type Auth struct {
 
 	secondFactor  SecondFactor
 	pendingIssuer issuer.Issuer
+	customIssuer  bool
+	customPending bool
 
 	// deferred holds the first error produced by a chained With* call, so the
 	// builder can stay fluent and still fail loudly at Init.
@@ -203,6 +205,8 @@ type paths struct {
 func New(cfg Config) *Auth {
 	cfg.SuccessCookie = cfg.SuccessCookie.withDefaults()
 	cfg.MFA = cfg.MFA.withDefaults()
+	cfg.UI = cloneUIConfig(cfg.UI)
+	cfg.CookieNameHosts = append([]session.HostCookieName(nil), cfg.CookieNameHosts...)
 
 	// Normalize Base to always start and end with "/". The path builders
 	// below concatenate as `cfg.Base + "login/..."` and expect Base to
@@ -219,7 +223,7 @@ func New(cfg Config) *Auth {
 	}
 	a.registry.SetRemovalHook(a.retainStrategy)
 
-	uiCopy := cfg.UI
+	uiCopy := cloneUIConfig(cfg.UI)
 	a.liveUI.Store(&uiCopy)
 
 	a.resolvedPaths = paths{
@@ -251,7 +255,39 @@ func (a *Auth) Strategy(s strategy.Authenticator) *Auth {
 
 // WithIssuer overrides the default issuer. Must be called before Init.
 func (a *Auth) WithIssuer(i issuer.Issuer) *Auth {
+	if i == nil {
+		if a.deferred == nil {
+			a.deferred = fmt.Errorf("auth: nil issuer")
+		}
+
+		return a
+	}
+
 	a.issuer = i
+	a.customIssuer = true
+
+	return a
+}
+
+// WithPendingIssuer configures the issuer used only for identities waiting for
+// MFA. It must implement issuer.AtomicUpdater and enforce a lifetime no longer
+// than Config.MFA.TTL.
+//
+// This option is required when WithIssuer is combined with WithSecondFactor:
+// the auth package cannot infer or shorten a custom issuer's normal session
+// TTL. Default and WithBackend/WithSessionStore configurations build an
+// isolated short-lived pending issuer automatically.
+func (a *Auth) WithPendingIssuer(i issuer.Issuer) *Auth {
+	if i == nil {
+		if a.deferred == nil {
+			a.deferred = fmt.Errorf("auth: nil pending issuer")
+		}
+
+		return a
+	}
+
+	a.pendingIssuer = i
+	a.customPending = true
 
 	return a
 }
@@ -311,16 +347,43 @@ func (a *Auth) Init(_ context.Context) error {
 		a.issuer = issuer.NewDefault(a.backend, a.cfg.IssuerConfig)
 	}
 
-	// A parked login gets its own issuer so it expires on the MFA window
-	// rather than the session window — minutes, not days.
-	if a.secondFactor != nil && a.backend != nil {
-		a.pendingIssuer = issuer.NewDefault(a.backend, issuer.Config{
-			AccessTTL:  a.cfg.MFA.TTL,
-			RefreshTTL: a.cfg.MFA.TTL,
-			// Rotation would invalidate the refresh token the attempt counter
-			// is written through.
-			DisableRefreshRotation: true,
-		})
+	if a.secondFactor != nil {
+		// A parked login gets its own issuer so it expires on the MFA window
+		// rather than the session window — minutes, not days.
+		if a.pendingIssuer == nil {
+			if a.customIssuer {
+				return fmt.Errorf("auth: MFA with WithIssuer requires WithPendingIssuer")
+			}
+			if a.backend == nil {
+				return fmt.Errorf("auth: MFA requires a pending issuer")
+			}
+
+			pendingBackend, err := backend.NewNamespace(a.backend, "mfa")
+			if err != nil {
+				return fmt.Errorf("auth: pending issuer namespace: %w", err)
+			}
+
+			a.pendingIssuer = issuer.NewDefault(pendingBackend, issuer.Config{
+				AccessTTL:  a.cfg.MFA.TTL,
+				RefreshTTL: a.cfg.MFA.TTL,
+				// Rotation would invalidate the refresh token the attempt counter
+				// is written through.
+				DisableRefreshRotation: true,
+			})
+		}
+
+		if _, ok := a.pendingIssuer.(issuer.Updater); !ok {
+			return fmt.Errorf("auth: pending issuer %T does not implement issuer.Updater", a.pendingIssuer)
+		}
+
+		atomic, ok := a.pendingIssuer.(issuer.AtomicUpdater)
+		if !ok || !atomic.AtomicUpdates() {
+			if a.customPending {
+				return fmt.Errorf("auth: custom pending issuer %T does not provide atomic updates", a.pendingIssuer)
+			}
+
+			return fmt.Errorf("auth: pending issuer %T does not provide atomic updates", a.pendingIssuer)
+		}
 	}
 
 	a.session = &session.Session{
@@ -562,16 +625,30 @@ func sameStrategyInstance(a, b strategy.Authenticator) bool {
 func (a *Auth) SetUI(cfg UIConfig) {
 	// Preserve ExternalFolder from the original cfg — it drives mounting.
 	cfg.ExternalFolder = a.cfg.UI.ExternalFolder
-	uiCopy := cfg
+	uiCopy := cloneUIConfig(cfg)
 	a.liveUI.Store(&uiCopy)
 }
 
 // currentUI returns the live UI snapshot. Always non-nil after New.
 func (a *Auth) currentUI() UIConfig {
 	if p := a.liveUI.Load(); p != nil {
-		return *p
+		return cloneUIConfig(*p)
 	}
-	return a.cfg.UI
+	return cloneUIConfig(a.cfg.UI)
+}
+
+func cloneUIConfig(cfg UIConfig) UIConfig {
+	if cfg.Theme == nil {
+		return cfg
+	}
+
+	theme := make(map[string]string, len(cfg.Theme))
+	for key, value := range cfg.Theme {
+		theme[key] = value
+	}
+	cfg.Theme = theme
+
+	return cfg
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -649,7 +726,7 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	id, outcome, err := auth.Login(w, r)
 	if err != nil {
 		slog.Error("auth: strategy login error", "strategy", name, "error", err.Error())
-		writeError(w, http.StatusInternalServerError, "login_failed", err.Error())
+		writeError(w, http.StatusInternalServerError, "login_failed", "authentication failed")
 
 		return
 	}
@@ -682,7 +759,7 @@ func (a *Auth) handleLogin(w http.ResponseWriter, r *http.Request) {
 	pair, err := a.issuer.Issue(r.Context(), id)
 	if err != nil {
 		slog.Error("auth: issue session", "error", err.Error())
-		writeError(w, http.StatusInternalServerError, "issue_failed", err.Error())
+		writeError(w, http.StatusInternalServerError, "issue_failed", "could not create session")
 
 		return
 	}
@@ -718,7 +795,7 @@ func (a *Auth) handleRegister(w http.ResponseWriter, r *http.Request) {
 	id, outcome, err := reg.Register(w, r)
 	if err != nil {
 		slog.Error("auth: strategy register error", "strategy", name, "error", err.Error())
-		writeError(w, http.StatusInternalServerError, "register_failed", err.Error())
+		writeError(w, http.StatusInternalServerError, "register_failed", "registration failed")
 
 		return
 	}
@@ -740,10 +817,16 @@ func (a *Auth) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Auto-login after registration is still a login. It must cross the same
+	// second-factor boundary before a real session can be minted.
+	if a.beginSecondFactor(w, r, id, name) {
+		return
+	}
+
 	pair, err := a.issuer.Issue(r.Context(), id)
 	if err != nil {
 		slog.Error("auth: issue session", "error", err.Error())
-		writeError(w, http.StatusInternalServerError, "issue_failed", err.Error())
+		writeError(w, http.StatusInternalServerError, "issue_failed", "could not create session")
 
 		return
 	}
@@ -787,22 +870,89 @@ func (a *Auth) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	pair, err := a.issuer.Resolve(r.Context(), sessionID)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "no_session", err.Error())
+		if errors.Is(err, issuer.ErrTransactionConflict) {
+			slog.Warn("auth: resolve refresh session conflicted", "error", err.Error())
+			writeError(w, http.StatusServiceUnavailable, "refresh_unavailable", "session could not be refreshed")
+
+			return
+		}
+		if !errors.Is(err, issuer.ErrNotFound) {
+			slog.Warn("auth: resolve refresh session", "error", err.Error())
+		}
+		writeError(w, http.StatusUnauthorized, "no_session", "session not found")
+
+		return
+	}
+	if PendingIdentity(pair.Identity) {
+		writeError(w, http.StatusUnauthorized, "no_session", "session not found")
 
 		return
 	}
 
-	newPair, err := a.issuer.Refresh(r.Context(), sessionID, pair.Refresh.Value)
+	newPair, err := a.refreshResolvedPair(r.Context(), sessionID, pair)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "refresh_failed", err.Error())
+		if errors.Is(err, issuer.ErrTransactionConflict) {
+			slog.Warn("auth: refresh session conflicted", "error", err.Error())
+			writeError(w, http.StatusServiceUnavailable, "refresh_unavailable", "session could not be refreshed")
+
+			return
+		}
+		if !errors.Is(err, issuer.ErrRefreshInvalid) && !errors.Is(err, issuer.ErrRefreshExpired) && !errors.Is(err, issuer.ErrNotFound) {
+			slog.Warn("auth: refresh session", "error", err.Error())
+		}
+		writeError(w, http.StatusUnauthorized, "refresh_failed", "session could not be refreshed")
 
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"session_id": newPair.SessionID,
-		"identity":   newPair.Identity,
+		"identity": newPair.Identity,
 	})
+}
+
+// refreshResolvedPair retries only with credentials re-read from server-side
+// storage. This recovery is safe here because no refresh bearer is accepted
+// from the request; the browser carries only the opaque session ID.
+func (a *Auth) refreshResolvedPair(ctx context.Context, sessionID string, pair *issuer.Pair) (*issuer.Pair, error) {
+	const attempts = 3
+
+	for attempt := range attempts {
+		accessToken := pair.Access.Value
+		refreshToken := pair.Refresh.Value
+		refreshed, err := a.issuer.Refresh(ctx, sessionID, refreshToken)
+		if err == nil {
+			return refreshed, nil
+		}
+		if !errors.Is(err, issuer.ErrTransactionConflict) && !errors.Is(err, issuer.ErrRefreshInvalid) {
+			return nil, err
+		}
+
+		current, resolveErr := a.issuer.Resolve(ctx, sessionID)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, issuer.ErrNotFound) {
+				return nil, resolveErr
+			}
+
+			return nil, fmt.Errorf("auth: refresh recovery resolve: %v: %w", resolveErr, issuer.ErrTransactionConflict)
+		}
+		if PendingIdentity(current.Identity) {
+			return nil, issuer.ErrNotFound
+		}
+		changed := current.Access.Value != accessToken || current.Refresh.Value != refreshToken
+		if errors.Is(err, issuer.ErrRefreshInvalid) && !changed {
+			return nil, err
+		}
+		if changed && !current.Access.Expired() {
+			return current, nil
+		}
+		if attempt+1 == attempts {
+			return nil, issuer.ErrTransactionConflict
+		}
+
+		pair = current
+	}
+
+	return nil, issuer.ErrTransactionConflict
 }
 
 func (a *Auth) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -815,16 +965,23 @@ func (a *Auth) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 	pair, _ := a.issuer.Resolve(r.Context(), sessionID)
 
+	if err := a.issuer.Revoke(r.Context(), sessionID); err != nil {
+		slog.Warn("auth: revoke session", "error", err.Error())
+		if errors.Is(err, issuer.ErrTransactionConflict) {
+			writeError(w, http.StatusServiceUnavailable, "logout_unavailable", "session could not be revoked")
+		} else {
+			writeError(w, http.StatusInternalServerError, "logout_failed", "session could not be revoked")
+		}
+
+		return
+	}
+
 	if pair != nil && pair.Identity != nil {
 		if auth := a.registry.Get(pair.Identity.Provider); auth != nil {
 			if err := auth.Logout(r.Context(), pair.Identity); err != nil {
 				slog.Warn("auth: strategy logout", "strategy", pair.Identity.Provider, "error", err.Error())
 			}
 		}
-	}
-
-	if err := a.issuer.Revoke(r.Context(), sessionID); err != nil {
-		slog.Warn("auth: revoke session", "error", err.Error())
 	}
 
 	a.session.ClearCookie(w, r)
@@ -877,7 +1034,10 @@ func (a *Auth) identity(w http.ResponseWriter, r *http.Request) (*identity.Ident
 
 	pair, err := a.issuer.Resolve(r.Context(), sessionID)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "no_session", err.Error())
+		if !errors.Is(err, issuer.ErrNotFound) {
+			slog.Warn("auth: resolve identity", "error", err.Error())
+		}
+		writeError(w, http.StatusUnauthorized, "no_session", "session not found")
 
 		return nil, false
 	}

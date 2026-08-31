@@ -37,6 +37,12 @@ const guides = [
      description: 'Bind request data to structs',
      href: './binding'
   },
+  {
+    icon: '🔒',
+    title: 'Security Migration',
+    description: 'Migrate trusted proxies, authentication, CORS, and request limits',
+    href: './security-migration'
+  },
   // {
   //   icon: '🔧',
   //   title: 'API Reference',

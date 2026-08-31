@@ -47,6 +47,34 @@ func TestMemoryChallengeStoreConcurrentConsumeIsAtomic(t *testing.T) {
 	}
 }
 
+func TestMemoryChallengeStoreSnapshotsSessionData(t *testing.T) {
+	store := newMemoryChallengeStore()
+	t.Cleanup(func() { _ = store.Close() })
+
+	session := &SessionData{
+		Challenge:            []byte{1, 2},
+		UserHandle:           []byte{3, 4},
+		UserVerification:     UVRequired,
+		Expires:              time.Now().Add(time.Minute),
+		AllowedCredentialIDs: [][]byte{{5, 6}},
+	}
+	if err := store.Save(context.Background(), "session", session); err != nil {
+		t.Fatal(err)
+	}
+	session.Challenge[0] = 9
+	session.UserHandle[0] = 9
+	session.UserVerification = UVDiscouraged
+	session.AllowedCredentialIDs[0][0] = 9
+
+	stored, err := store.Consume(context.Background(), "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Challenge[0] != 1 || stored.UserHandle[0] != 3 || stored.UserVerification != UVRequired || stored.AllowedCredentialIDs[0][0] != 5 {
+		t.Fatalf("stored session aliases caller data: %+v", stored)
+	}
+}
+
 type trackingChallengeStore struct {
 	closes int
 }

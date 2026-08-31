@@ -7,6 +7,7 @@ export default withMermaid(defineConfig({
   description: "Go Web Framework",
   head: [["link", { rel: "icon", href: "/ada/assets/favicon.ico" }]],
   base: "/ada/",
+  ignoreDeadLinks: false,
   // Configure syntax highlighting with Monokai theme
   markdown: {
     theme: {
@@ -33,7 +34,7 @@ export default withMermaid(defineConfig({
       },
       {
         text: "Guide",
-        link: "/guide.md",
+        link: "/guide/",
         items: [
           {
             text: "Start Server",
@@ -52,8 +53,12 @@ export default withMermaid(defineConfig({
             link: "/guide/binding.md",
           },
           {
+            text: "Security Migration",
+            link: "/guide/security-migration.md",
+          },
+          {
             text: "Middleware",
-            link: "/guide/middleware.md",
+            link: "/guide/middleware/",
             items: [
               {
                 text: "Recover",
@@ -66,6 +71,10 @@ export default withMermaid(defineConfig({
               {
                 text: "Log",
                 link: "/guide/middleware/log.md",
+              },
+              {
+                text: "Rate Limit",
+                link: "/guide/middleware/ratelimit.md",
               },
               {
                 text: "Cors",

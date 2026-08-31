@@ -58,7 +58,7 @@ Source code: [`_examples/benchmark/`](https://github.com/rakunlabs/ada/tree/main
 
 - **Middleware scaling**: 0 to 10 middlewares adds only ~27 ns because the chain is pre-built at registration time. The per-request cost is a function-call chain, not a loop.
 - **Route count scaling**: 50 routes to 200 routes adds only ~5 ns due to the radix trie structure — lookup is O(path length), not O(route count).
-- **Slot / Pipeline overhead**: ~3-5 ns over an equivalent static middleware. Both use pre-built handler chains with zero allocations. The only per-request cost is two atomic pointer loads. When `WithTimeout` variants are active, one context derivation is added per request (~400 ns); this cost is only paid when timeout-based cancellation is in use.
+- **Slot / Pipeline overhead**: ~3-5 ns over an equivalent static middleware. Both use pre-built handler chains with zero allocations. The only per-request cost is one atomic pointer load. When `WithTimeout` variants are active, one context derivation is added per request (~400 ns); this cost is only paid when timeout-based cancellation is in use.
 - **404/405 allocations**: The remaining allocations on these paths come from stdlib `http.Error` / `http.NotFound` (header map write + body formatting). The middleware chain itself is pre-built at registration time and allocation-free per request.
 
 ## Optimizations
@@ -73,7 +73,7 @@ Ada's router achieves its performance through several key optimizations:
 - **Pre-chained error handlers**: The 404/405 middleware chains are composed at registration time, not per request. The `Allow` header for 405/auto-OPTIONS responses is pre-computed on each node at registration.
 - **Pre-built middleware chains**: Middleware is composed into a single handler closure at route registration time. Per-request cost is zero — no chain resolution, no allocation, no loop.
 - **Slice-based method dispatch**: Per-node method handlers live in a small `[]methodEntry` slice scanned linearly instead of a `map[string]http.HandlerFunc`. For the typical 1-4 methods per node, a string comparison beats map hashing. The entry also carries the route pattern and pre-computed param names, so dispatch resolves handler, pattern, and params in a single lookup with no wrapper closure.
-- **Pre-built Slot/Pipeline chains**: Both Slot and Pipeline pre-build handler chains at mutation time (not per-request). The hot path is two atomic pointer loads (~2 ns) with zero allocations. Cancel contexts for `WithTimeout` variants are opt-in — only created when timeout-based cancellation is actually used.
+- **Pre-built Slot/Pipeline chains**: Both Slot and Pipeline pre-build handler chains at mutation time (not per-request). The hot path is one atomic pointer load (~1 ns) with zero allocations. Cancel contexts for `WithTimeout` variants are opt-in — only created when timeout-based cancellation is actually used.
 - **Leak-free context merging**: When `WithTimeout` is active, `mergeContexts` returns a cleanup function that deregisters watchers from the generation context, preventing unbounded memory growth across requests.
 - **Direct method strings**: HTTP methods from `net/http` are already uppercase per RFC 7230, so no `strings.ToUpper` conversion is needed.
 

@@ -1,13 +1,12 @@
 package ratelimit
 
 import (
-	"net"
+	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/rakunlabs/ada/utils/proxy"
 	"github.com/rakunlabs/tummy"
 )
 
@@ -45,47 +44,105 @@ func LimitByIP(requestLimit int, windowLength time.Duration) func(http.Handler) 
 	return newSimpleLimiter(requestLimit, windowLength, KeyByIP).handler
 }
 
-// LimitByRealIP limits requests per client IP, preferring the proxy-supplied
-// real IP headers (True-Client-IP, X-Real-IP, X-Forwarded-For) and falling
-// back to r.RemoteAddr. Equivalent to httprate.LimitByRealIP.
-func LimitByRealIP(requestLimit int, windowLength time.Duration) func(http.Handler) http.Handler {
-	return newSimpleLimiter(requestLimit, windowLength, KeyByRealIP).handler
+// RealIPOption configures trusted-proxy handling for LimitByRealIP.
+type RealIPOption func(*realIPConfig)
+
+type realIPConfig struct {
+	policy proxy.Policy
+	unsafe bool
 }
 
-// KeyByIP returns the canonical client IP from r.RemoteAddr (port stripped).
-func KeyByIP(r *http.Request) string {
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+// WithTrustedProxies permits matching immediate peers to supply client IP
+// forwarding headers. CIDRs are validated when this option is created; bare
+// IPs are accepted as single-address prefixes.
+func WithTrustedProxies(cidrs ...string) RealIPOption {
+	policy, err := proxy.New(cidrs...)
 	if err != nil {
-		ip = strings.TrimSpace(r.RemoteAddr)
+		panic(fmt.Errorf("ratelimit: trusted proxies: %w", err))
 	}
-	return canonicalIP(ip)
+
+	return func(cfg *realIPConfig) {
+		cfg.policy = policy
+		cfg.unsafe = false
+	}
 }
 
-// KeyByRealIP returns the client IP, trusting common proxy headers first.
-//   - True-Client-IP / X-Real-IP are used verbatim (single IP).
-//   - X-Forwarded-For uses the first (left-most) entry.
-//   - Falls back to r.RemoteAddr when no header is present.
+// WithUnsafeProxyHeaders trusts client IP forwarding headers from every peer.
+// It preserves legacy behavior for deployments with an external trust
+// boundary. Prefer WithTrustedProxies.
+func WithUnsafeProxyHeaders() RealIPOption {
+	return func(cfg *realIPConfig) { cfg.unsafe = true }
+}
+
+// LimitByRealIP limits requests by the canonical immediate peer address. It
+// ignores forwarding headers unless WithTrustedProxies or the explicitly
+// unsafe compatibility option is supplied.
+func LimitByRealIP(requestLimit int, windowLength time.Duration, opts ...RealIPOption) func(http.Handler) http.Handler {
+	cfg := realIPConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return newSimpleLimiter(requestLimit, windowLength, realIPKey(cfg)).handler
+}
+
+// KeyByIP returns the canonical client IP from r.RemoteAddr (port stripped),
+// or a stable bounded identity when the immediate peer is not an IP transport.
+func KeyByIP(r *http.Request) string {
+	ip, _ := proxy.ClientIP(r)
+	return ip
+}
+
+// KeyByRealIP returns the canonical immediate peer address and safely ignores
+// forwarding headers. Use KeyByRealIPWithTrustedProxies to configure a proxy
+// boundary.
 func KeyByRealIP(r *http.Request) string {
-	if tcip := r.Header.Get("True-Client-IP"); tcip != "" {
-		return canonicalIP(tcip)
-	}
-	if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
-		return canonicalIP(xrip)
-	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			xff = xff[:i]
-		}
-		return canonicalIP(strings.TrimSpace(xff))
-	}
 	return KeyByIP(r)
 }
 
-func canonicalIP(ip string) string {
-	if parsed := net.ParseIP(strings.TrimSpace(ip)); parsed != nil {
-		return parsed.String()
+// KeyByRealIPWithTrustedProxies returns a key function backed by a validated
+// trusted-proxy policy.
+func KeyByRealIPWithTrustedProxies(cidrs ...string) func(*http.Request) string {
+	policy, err := proxy.New(cidrs...)
+	if err != nil {
+		panic(fmt.Errorf("ratelimit: trusted proxies: %w", err))
 	}
-	return strings.TrimSpace(ip)
+
+	return realIPKey(realIPConfig{policy: policy})
+}
+
+// KeyByRealIPUnsafe trusts common client IP forwarding headers from every
+// peer. Prefer KeyByRealIPWithTrustedProxies.
+func KeyByRealIPUnsafe(r *http.Request) string {
+	return realIPKey(realIPConfig{unsafe: true})(r)
+}
+
+// LimitByRealIPUnsafe preserves the legacy trust-all forwarding-header
+// behavior under an explicit name.
+func LimitByRealIPUnsafe(requestLimit int, windowLength time.Duration) func(http.Handler) http.Handler {
+	return LimitByRealIP(requestLimit, windowLength, WithUnsafeProxyHeaders())
+}
+
+func realIPKey(cfg realIPConfig) func(*http.Request) string {
+	return func(r *http.Request) string {
+		var (
+			ip  string
+			err error
+		)
+		if cfg.unsafe {
+			ip, err = proxy.UnsafeClientIP(r)
+		} else {
+			ip, err = cfg.policy.ClientIP(r)
+		}
+		if err == nil {
+			return ip
+		}
+
+		// A malformed forwarded value must not become a new limiter key or
+		// disable limiting. Group it under the canonical immediate peer.
+		ip, _ = proxy.ClientIP(r)
+		return ip
+	}
 }
 
 // simpleLimiter is a sliding-window-counter rate limiter. It is safe for
@@ -135,7 +192,7 @@ func (l *simpleLimiter) handler(next http.Handler) http.Handler {
 
 		allowed, retryAfter := l.allow(key)
 		if !allowed {
-			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+			w.Header().Set("Retry-After", formatRetryAfter(retryAfter))
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
@@ -161,8 +218,9 @@ func (l *simpleLimiter) allow(key string) (bool, time.Duration) {
 	}
 
 	elapsed := now.Sub(win.start)
+	expiry := saturatedDurationMultiply(l.window, 2)
 	switch {
-	case elapsed >= 2*l.window:
+	case elapsed >= expiry:
 		// Both windows are stale.
 		win.prev = 0
 		win.curr = 0
@@ -202,7 +260,7 @@ func (l *simpleLimiter) gcLocked(now time.Time) {
 	}
 	l.lastGC = now
 
-	cutoff := 2 * l.window
+	cutoff := saturatedDurationMultiply(l.window, 2)
 	for k, win := range l.windows {
 		if now.Sub(win.start) >= cutoff {
 			delete(l.windows, k)

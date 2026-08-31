@@ -4,7 +4,10 @@ import (
 	"encoding"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -141,38 +144,73 @@ func Bind(req *http.Request, obj any, opts ...Option) (err error) {
 	cache := getFieldCache(rt)
 
 	opt := applyOptions(opts...)
+	if opt.err != nil {
+		return fmt.Errorf("invalid option: %w", opt.err)
+	}
 
 	// Bind based on content type
 	contentType := req.Header.Get("Content-Type")
-
-	// Parse form data if it's a form type
-	if strings.Contains(contentType, "application/x-www-form-urlencoded") || strings.Contains(contentType, "multipart/form-data") {
-		if err := req.ParseForm(); err != nil {
-			return fmt.Errorf("failed to parse form: %w", err)
-		}
-
-		if strings.HasPrefix(contentType, "multipart/") {
-			if err := req.ParseMultipartForm(opt.MultipartFormMaxMemory); err != nil {
-				return fmt.Errorf("failed to parse multipart form: %w", err)
-			}
+	mediaType := ""
+	if contentType != "" {
+		var parseErr error
+		mediaType, _, parseErr = mime.ParseMediaType(contentType)
+		if parseErr != nil {
+			return fmt.Errorf("failed to parse Content-Type: %w", parseErr)
 		}
 	}
 
-	switch {
-	case strings.Contains(contentType, "application/json"):
+	var limitedBody *bodyLimitReadCloser
+	if hasSupportedRequestBody(mediaType) {
+		limitedBody, err = limitRequestBody(req, opt.BodyLimit, requestBodyWasParsed(req, mediaType))
+		if err != nil {
+			return err
+		}
+	}
+
+	ownsMultipartForm := false
+	defer func() {
+		if limitedBody != nil && limitedBody.err != nil {
+			err = limitedBody.err
+		}
+		if err == nil || !ownsMultipartForm || req.MultipartForm == nil {
+			return
+		}
+
+		form := req.MultipartForm
+		req.MultipartForm = nil
+		if cleanupErr := form.RemoveAll(); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to remove multipart temporary files: %w", cleanupErr))
+		}
+	}()
+
+	switch mediaType {
+	case "application/json":
 		if err := bindJSON(req, rv); err != nil {
 			return err
 		}
-	case strings.Contains(contentType, "application/xml"), strings.Contains(contentType, "text/xml"):
+	case "application/xml", "text/xml":
 		if err := bindXML(req, rv); err != nil {
 			return err
 		}
-	case strings.Contains(contentType, "application/x-www-form-urlencoded"):
+	case "application/x-www-form-urlencoded":
+		if err := req.ParseForm(); err != nil {
+			return fmt.Errorf("failed to parse form: %w", err)
+		}
 		if err := bindForm(req, rv, cache); err != nil {
 			return err
 		}
-	case strings.Contains(contentType, "multipart/form-data"):
+	case "multipart/form-data":
+		multipartFormWasNil := req.MultipartForm == nil
+		if err := req.ParseMultipartForm(opt.MultipartFormMaxMemory); err != nil {
+			return fmt.Errorf("failed to parse multipart form: %w", err)
+		}
+		ownsMultipartForm = multipartFormWasNil && req.MultipartForm != nil
 		if err := bindMultipartForm(req, rv, cache); err != nil {
+			return err
+		}
+	}
+	if limitedBody != nil {
+		if _, err := io.Copy(io.Discard, req.Body); err != nil {
 			return err
 		}
 	}
@@ -193,7 +231,16 @@ func Bind(req *http.Request, obj any, opts ...Option) (err error) {
 	return nil
 }
 
-// bindJSON binds JSON data from request body.
+func hasSupportedRequestBody(mediaType string) bool {
+	switch mediaType {
+	case "application/json", "application/xml", "text/xml", "application/x-www-form-urlencoded", "multipart/form-data":
+		return true
+	default:
+		return false
+	}
+}
+
+// bindJSON binds one JSON value from the request body.
 func bindJSON(req *http.Request, rv reflect.Value) error {
 	if req.Body == nil {
 		return nil
@@ -206,10 +253,18 @@ func bindJSON(req *http.Request, rv reflect.Value) error {
 		return fmt.Errorf("failed to decode JSON: %w", err)
 	}
 
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("failed to decode JSON: multiple JSON values")
+		}
+		return fmt.Errorf("failed to decode JSON: trailing data: %w", err)
+	}
+
 	return nil
 }
 
-// bindXML binds XML data from request body.
+// bindXML binds one XML value from the request body.
 func bindXML(req *http.Request, rv reflect.Value) error {
 	if req.Body == nil {
 		return nil
@@ -221,7 +276,102 @@ func bindXML(req *http.Request, rv reflect.Value) error {
 		return fmt.Errorf("failed to decode XML: %w", err)
 	}
 
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to decode XML: trailing data: %w", err)
+		}
+		switch token := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(token)) == "" {
+				continue
+			}
+		case xml.Comment, xml.ProcInst:
+			continue
+		}
+		return fmt.Errorf("failed to decode XML: trailing data")
+	}
+
 	return nil
+}
+
+type bodyLimitReadCloser struct {
+	body      io.ReadCloser
+	remaining uint64
+	limit     int64
+	err       error
+}
+
+func (r *bodyLimitReadCloser) Read(p []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+
+	maxRead := r.remaining + 1
+	if uint64(len(p)) > maxRead {
+		p = p[:int(maxRead)]
+	}
+
+	n, err := r.body.Read(p)
+	if uint64(n) <= r.remaining {
+		r.remaining -= uint64(n)
+		return n, err
+	}
+
+	n = int(r.remaining)
+	r.remaining = 0
+	r.err = bodyLimitError(r.limit)
+	return n, r.err
+}
+
+func (r *bodyLimitReadCloser) Close() error {
+	return r.body.Close()
+}
+
+func limitRequestBody(req *http.Request, bodyLimit int64, bodyWasParsed bool) (*bodyLimitReadCloser, error) {
+	if bodyLimit == 0 {
+		return nil, nil
+	}
+	if req.ContentLength > bodyLimit {
+		return nil, bodyLimitError(bodyLimit)
+	}
+	if bodyWasParsed {
+		// Parsed forms retain values, not the encoded byte count, so only the
+		// original fixed-length framing can prove the body was within the limit.
+		if req.ContentLength < 0 || len(req.TransferEncoding) != 0 {
+			return nil, bodyLimitError(bodyLimit)
+		}
+		return nil, nil
+	}
+	if req.Body == nil {
+		return nil, nil
+	}
+
+	limited := &bodyLimitReadCloser{
+		body:      req.Body,
+		remaining: uint64(bodyLimit),
+		limit:     bodyLimit,
+	}
+	req.Body = limited
+	return limited, nil
+}
+
+func requestBodyWasParsed(req *http.Request, mediaType string) bool {
+	switch mediaType {
+	case "application/x-www-form-urlencoded":
+		return req.Form != nil || req.PostForm != nil
+	case "multipart/form-data":
+		return req.MultipartForm != nil
+	default:
+		return false
+	}
+}
+
+func bodyLimitError(bodyLimit int64) error {
+	return fmt.Errorf("request body exceeds limit of %d bytes", bodyLimit)
 }
 
 // bindForm binds form data to struct fields with "form" tags.
@@ -314,11 +464,11 @@ func bindFormData(values url.Values, rv reflect.Value, fields []fieldInfo, sep s
 
 		// comma separated values
 		if sep != "" {
-			for i, v := range formValues {
-				if strings.Contains(v, sep) {
-					formValues = append(formValues[:i], append(strings.Split(v, sep), formValues[i+1:]...)...)
-				}
+			expandedValues := make([]string, 0, len(formValues))
+			for _, value := range formValues {
+				expandedValues = append(expandedValues, strings.Split(value, sep)...)
 			}
+			formValues = expandedValues
 		}
 
 		// Handle json.RawMessage specially (it's a []byte but should be treated as a single value)
@@ -515,9 +665,7 @@ func setSliceField(field reflect.Value, fieldType reflect.StructField, values []
 		}
 	}
 
-	for i := range slice.Len() {
-		field.Set(reflect.Append(field, slice.Index(i)))
-	}
+	field.Set(slice)
 
 	return nil
 }
@@ -553,10 +701,7 @@ func shouldJSONUnmarshal(field reflect.Value) bool {
 
 		elemKind := elemType.Kind()
 		if elemKind == reflect.Struct {
-			if elemType == typeTime {
-				return false
-			}
-			return true
+			return elemType != typeTime
 		}
 		if elemKind == reflect.Map {
 			return true
@@ -576,10 +721,7 @@ func shouldJSONUnmarshalElem(elemType reflect.Type) bool {
 	kind := elemType.Kind()
 
 	if kind == reflect.Struct {
-		if elemType == typeTime {
-			return false
-		}
-		return true
+		return elemType != typeTime
 	}
 
 	if kind == reflect.Map {
@@ -595,10 +737,7 @@ func shouldJSONUnmarshalElem(elemType reflect.Type) bool {
 
 		pointedKind := pointedType.Kind()
 		if pointedKind == reflect.Struct {
-			if pointedType == typeTime {
-				return false
-			}
-			return true
+			return pointedType != typeTime
 		}
 		if pointedKind == reflect.Map {
 			return true

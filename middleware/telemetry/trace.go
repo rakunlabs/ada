@@ -1,13 +1,40 @@
 package telemetry
 
 import (
+	"fmt"
 	"net/http"
 
+	"github.com/rakunlabs/ada/utils/proxy"
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 )
 
+// RequestTraceAttrs returns HTTP server span attributes using the immediate
+// peer as client.address. Forwarding headers are ignored.
 func RequestTraceAttrs(req *http.Request) []attribute.KeyValue {
+	return requestTraceAttrs(req, proxy.Policy{}, false)
+}
+
+// TrustedRequestTraceAttrs returns an attribute helper backed by validated
+// trusted proxy CIDRs.
+func TrustedRequestTraceAttrs(cidrs ...string) func(*http.Request) []attribute.KeyValue {
+	policy, err := proxy.New(cidrs...)
+	if err != nil {
+		panic(fmt.Errorf("telemetry: trusted proxies: %w", err))
+	}
+
+	return func(req *http.Request) []attribute.KeyValue {
+		return requestTraceAttrs(req, policy, false)
+	}
+}
+
+// UnsafeRequestTraceAttrs trusts client IP forwarding headers from every
+// peer. Prefer TrustedRequestTraceAttrs.
+func UnsafeRequestTraceAttrs(req *http.Request) []attribute.KeyValue {
+	return requestTraceAttrs(req, proxy.Policy{}, true)
+}
+
+func requestTraceAttrs(req *http.Request, policy proxy.Policy, unsafe bool) []attribute.KeyValue {
 	count := 3 // ServerAddress, Method, Scheme
 
 	var host string
@@ -29,10 +56,11 @@ func RequestTraceAttrs(req *http.Request) []attribute.KeyValue {
 		count++
 	}
 
-	scheme := scheme(req.TLS != nil)
+	scheme := schemeReq(req)
 
-	peer, peerPort := splitHostPort(req.RemoteAddr)
-	if peer != "" {
+	_, peerPort := splitHostPort(req.RemoteAddr)
+	peer, peerErr := proxy.ClientIP(req)
+	if peerErr == nil {
 		// The Go HTTP server sets RemoteAddr to "IP:port", this will not be a
 		// file-path that would be interpreted with a sock family.
 		count++
@@ -46,8 +74,14 @@ func RequestTraceAttrs(req *http.Request) []attribute.KeyValue {
 		count++
 	}
 
-	clientIP := serverClientIP(req.Header.Get("X-Forwarded-For"))
-	if clientIP == "" {
+	var clientIP string
+	var clientErr error
+	if unsafe {
+		clientIP, clientErr = proxy.UnsafeClientIP(req)
+	} else {
+		clientIP, clientErr = policy.ClientIP(req)
+	}
+	if clientErr != nil {
 		clientIP = peer
 	}
 	if clientIP != "" {
@@ -85,7 +119,7 @@ func RequestTraceAttrs(req *http.Request) []attribute.KeyValue {
 		attrs = append(attrs, methodOriginal)
 	}
 
-	if peer, peerPort := splitHostPort(req.RemoteAddr); peer != "" {
+	if peer != "" {
 		// The Go HTTP server sets RemoteAddr to "IP:port", this will not be a
 		// file-path that would be interpreted with a sock family.
 		attrs = append(attrs, semconv.NetworkPeerAddress(peer))

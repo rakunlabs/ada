@@ -150,6 +150,52 @@ func TestRuntimeRemoveParamAndWildcard(t *testing.T) {
 	}
 }
 
+func TestRemoveGreedyFallsBackToParentGreedy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remove func(*Mux) bool
+	}{
+		{
+			name: "Remove",
+			remove: func(mux *Mux) bool {
+				return mux.Remove("", "/api/*")
+			},
+		},
+		{
+			name: "ApplyRoutes",
+			remove: func(mux *Mux) bool {
+				var removed bool
+				mux.ApplyRoutes(func(b *RouteBuilder) {
+					removed = b.Remove("", "/api/*")
+				})
+
+				return removed
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := NewMux()
+			mux.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("root"))
+			})
+			mux.HandleFunc("/api/*", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("api"))
+			})
+
+			if code, body := statusOf(t, mux, http.MethodGet, "/api/users"); code != http.StatusOK || body != "api" {
+				t.Fatalf("before removal: status = %d body = %q", code, body)
+			}
+			if !tc.remove(mux) {
+				t.Fatal("greedy route was not removed")
+			}
+
+			if code, body := statusOf(t, mux, http.MethodGet, "/api/users"); code != http.StatusOK || body != "root" {
+				t.Fatalf("after removal: status = %d body = %q, want root fallback", code, body)
+			}
+		})
+	}
+}
+
 // TestRuntimeGroupSharesRouteTable pins that a Group registers into — and
 // removes from — the same table as its parent, with its prefix applied.
 func TestRuntimeGroupSharesRouteTable(t *testing.T) {
@@ -276,6 +322,58 @@ func TestRuntimeReloadUnderLoad(t *testing.T) {
 	writersWG.Wait()
 	stop.Store(true)
 	readersWG.Wait()
+}
+
+func TestRuntimeConcurrentRegistrationMiddlewareIsolation(t *testing.T) {
+	mux := NewMux()
+	noop := func(next http.Handler) http.Handler { return next }
+
+	// Spare capacity makes an append-based implementation write every
+	// per-route middleware into the same backing-array slot.
+	const registrations = 128
+	mux.middlewares = make([]MiddlewareFunc, 1, registrations+1)
+	mux.middlewares[0] = noop
+	mux.GET("/stable", func(http.ResponseWriter, *http.Request) {})
+	if code, _ := statusOf(t, mux, http.MethodGet, "/stable"); code != http.StatusOK {
+		t.Fatalf("warmup status = %d, want 200", code)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(registrations)
+
+	for i := range registrations {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start
+
+			tag := fmt.Sprintf("route-%d", i)
+			middleware := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("X-Route-Middleware", tag)
+					next.ServeHTTP(w, r)
+				})
+			}
+			mux.HandleWithMethod(http.MethodGet, "/"+tag, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tag))
+			}, middleware)
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	for i := range registrations {
+		tag := fmt.Sprintf("route-%d", i)
+		rec := serve(mux, http.MethodGet, "/"+tag)
+		if rec.Code != http.StatusOK || rec.Body.String() != tag {
+			t.Fatalf("%s: status = %d body = %q", tag, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("X-Route-Middleware"); got != tag {
+			t.Fatalf("%s: middleware tag = %q", tag, got)
+		}
+	}
 }
 
 // TestRouteTableStartupDoesNotClonePerRoute pins the lazy-publication

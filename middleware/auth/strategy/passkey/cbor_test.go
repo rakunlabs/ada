@@ -129,16 +129,12 @@ func TestDecodeCBOR_simpleValues(t *testing.T) {
 	}
 }
 
-func TestDecodeCBOR_rejectsIndefiniteLength(t *testing.T) {
-	// 0x5f (indefinite-length byte string)
-	_, _, err := decodeCBOR([]byte{0x5f, 0x40, 0xff})
-	if err == nil {
-		t.Error("expected error for indefinite-length bytes")
-	}
-	// 0x9f (indefinite-length array)
-	_, _, err = decodeCBOR([]byte{0x9f, 0x01, 0xff})
-	if err == nil {
-		t.Error("expected error for indefinite-length array")
+func TestDecodeCBOR_rejectsAdditionalInformation31ForEveryMajorType(t *testing.T) {
+	for major := byte(0); major < 8; major++ {
+		input := []byte{major<<5 | 31}
+		if _, _, err := decodeCBOR(input); err == nil {
+			t.Errorf("major type %d accepted additional information 31", major)
+		}
 	}
 }
 
@@ -182,5 +178,47 @@ func TestDecodeCBOR_taggedValue(t *testing.T) {
 	}
 	if !bytes.Equal(v.([]byte), []byte{1, 2}) {
 		t.Errorf("tagged inner mismatch: %v", v)
+	}
+}
+
+func TestDecodeCBOR_rejectsHugeLengthsWithoutPanic(t *testing.T) {
+	huge := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	for _, major := range []byte{0x5b, 0x7b, 0x9b, 0xbb} {
+		input := append([]byte{major}, huge...)
+		if _, _, err := decodeCBOR(input); err == nil {
+			t.Errorf("decodeCBOR(%x) unexpectedly succeeded", input)
+		}
+	}
+}
+
+func TestDecodeCBOR_enforcesAllocationLimits(t *testing.T) {
+	cases := [][]byte{
+		{0x5a, 0x00, 0x10, 0x00, 0x01}, // byte string: 1 MiB + 1
+		{0x7a, 0x00, 0x10, 0x00, 0x01}, // text string: 1 MiB + 1
+		{0x99, 0x04, 0x01},             // array: 1025 items
+		{0xb9, 0x04, 0x01},             // map: 1025 pairs
+	}
+	for _, input := range cases {
+		if _, _, err := decodeCBOR(input); err == nil {
+			t.Errorf("decodeCBOR(%x) unexpectedly succeeded", input)
+		}
+	}
+}
+
+func TestDecodeCBOR_rejectsImplausibleCollections(t *testing.T) {
+	cases := [][]byte{
+		{0x98, 0x18}, // 24 array items, no item bytes
+		{0xb8, 0x18}, // 24 map pairs, no key/value bytes
+	}
+	for _, input := range cases {
+		if _, _, err := decodeCBOR(input); !errors.Is(err, ErrTruncated) {
+			t.Errorf("decodeCBOR(%x) error = %v, want ErrTruncated", input, err)
+		}
+	}
+}
+
+func TestCBORUintToInt_rejectsOverflow(t *testing.T) {
+	if _, ok := cborUintToInt(^uint64(0)); ok {
+		t.Fatal("cborUintToInt(MaxUint64) unexpectedly succeeded")
 	}
 }

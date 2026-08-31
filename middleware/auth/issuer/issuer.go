@@ -19,6 +19,9 @@ var (
 	ErrRefreshExpired = errors.New("issuer: refresh token expired")
 	ErrRefreshInvalid = errors.New("issuer: refresh token invalid")
 	ErrRevoked        = errors.New("issuer: session revoked")
+	// ErrTransactionConflict indicates that a concurrent write prevented an
+	// atomic backend transaction from committing.
+	ErrTransactionConflict = errors.New("issuer: transaction conflict")
 )
 
 // Token is one of our opaque tokens. Value never leaves the server in clear
@@ -63,6 +66,18 @@ type Cipher interface {
 	Decrypt(ciphertext []byte) ([]byte, error)
 }
 
+// AssociatedDataCipher optionally binds ciphertext to external metadata that
+// is authenticated but not encrypted. SessionStore uses the storage key as
+// associated data so a valid encrypted pair cannot be moved to another key.
+//
+// Cipher remains unchanged for compatibility; backends detect this stronger
+// capability at runtime.
+type AssociatedDataCipher interface {
+	Cipher
+	EncryptWithAssociatedData(plaintext, associatedData []byte) ([]byte, error)
+	DecryptWithAssociatedData(ciphertext, associatedData []byte) ([]byte, error)
+}
+
 // Revoker is an optional Issuer capability: dropping every session belonging
 // to one subject, e.g. after a password change or an account lockout.
 type Revoker interface {
@@ -78,8 +93,22 @@ type Revoker interface {
 // within one session (a failed-attempt counter, a step-up marker) needs this.
 type Updater interface {
 	// Update applies fn to the stored identity and persists the result.
-	// Returning an error from fn aborts the write.
+	// Returning an error from fn aborts the write. Implementations must
+	// serialize concurrent updates for the same session ID; MFA relies on that
+	// atomic read-modify-write guarantee for attempt limits and completion. fn
+	// is invoked at most once per Update call and exactly once after the stored
+	// identity is loaded, including when an optimistic commit returns
+	// ErrTransactionConflict. Implementations must not retry fn internally.
 	Update(ctx context.Context, sessionID string, fn func(*identity.Identity) error) (*Pair, error)
+}
+
+// AtomicUpdater is an Updater whose read-modify-write operation is atomic
+// across every issuer instance and application replica sharing its backend.
+// Auth requires this stronger capability for caller-supplied pending-MFA
+// issuers so concurrent completions cannot mint multiple real sessions.
+type AtomicUpdater interface {
+	Updater
+	AtomicUpdates() bool
 }
 
 // Issuer mints and manages our own access/refresh tokens keyed by SessionID.

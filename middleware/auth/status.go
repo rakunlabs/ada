@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"text/template"
 )
@@ -39,7 +40,8 @@ func newStatusHandler() (*statusHandler, error) {
 func (s *statusHandler) serve(w http.ResponseWriter, _ *http.Request, cookieName string) {
 	var buf bytes.Buffer
 	if err := s.tmpl.Execute(&buf, map[string]any{"cookie": cookieName}); err != nil {
-		http.Error(w, "render error: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("auth: render status iframe", "error", err.Error())
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 
 		return
 	}

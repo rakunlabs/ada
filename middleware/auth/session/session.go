@@ -13,6 +13,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,6 +173,12 @@ func (s *Session) resolve(w http.ResponseWriter, r *http.Request) (*identity.Ide
 	ctx := r.Context()
 	pair, err := s.Issuer.Resolve(ctx, cookie.Value)
 	if err != nil {
+		if errors.Is(err, issuer.ErrTransactionConflict) {
+			slog.Warn("session: resolve conflicted", "error", err.Error())
+			s.writeUnavailable(w)
+
+			return nil, false
+		}
 		if errors.Is(err, issuer.ErrNotFound) {
 			s.RedirectToLogin(w, r, true, true)
 
@@ -185,8 +192,14 @@ func (s *Session) resolve(w http.ResponseWriter, r *http.Request) (*identity.Ide
 	}
 
 	if pair.Access.Expired() {
-		newPair, err := s.Issuer.Refresh(ctx, cookie.Value, pair.Refresh.Value)
+		newPair, err := s.refreshResolvedPair(ctx, cookie.Value, pair)
 		if err != nil {
+			if errors.Is(err, issuer.ErrTransactionConflict) {
+				slog.Warn("session: refresh conflicted", "error", err.Error())
+				s.writeUnavailable(w)
+
+				return nil, false
+			}
 			s.RedirectToLogin(w, r, true, true)
 
 			return nil, false
@@ -202,6 +215,48 @@ func (s *Session) resolve(w http.ResponseWriter, r *http.Request) (*identity.Ide
 	}
 
 	return pair.Identity, true
+}
+
+// refreshResolvedPair retries only with refresh credentials re-read from the
+// server-side issuer. Issuer.Refresh itself intentionally never accepts a stale
+// bearer token merely because another replica already rotated it.
+func (s *Session) refreshResolvedPair(ctx context.Context, sessionID string, pair *issuer.Pair) (*issuer.Pair, error) {
+	const attempts = 3
+
+	for attempt := range attempts {
+		accessToken := pair.Access.Value
+		refreshToken := pair.Refresh.Value
+		refreshed, err := s.Issuer.Refresh(ctx, sessionID, refreshToken)
+		if err == nil {
+			return refreshed, nil
+		}
+		if !errors.Is(err, issuer.ErrTransactionConflict) && !errors.Is(err, issuer.ErrRefreshInvalid) {
+			return nil, err
+		}
+
+		current, resolveErr := s.Issuer.Resolve(ctx, sessionID)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, issuer.ErrNotFound) {
+				return nil, resolveErr
+			}
+
+			return nil, fmt.Errorf("refresh recovery resolve: %v: %w", resolveErr, issuer.ErrTransactionConflict)
+		}
+		changed := current.Access.Value != accessToken || current.Refresh.Value != refreshToken
+		if errors.Is(err, issuer.ErrRefreshInvalid) && !changed {
+			return nil, err
+		}
+		if changed && !current.Access.Expired() {
+			return current, nil
+		}
+		if attempt+1 == attempts {
+			return nil, issuer.ErrTransactionConflict
+		}
+
+		pair = current
+	}
+
+	return nil, issuer.ErrTransactionConflict
 }
 
 // IssueCookie writes the session cookie carrying the opaque session ID.
@@ -251,7 +306,9 @@ func (s *Session) RedirectToLogin(w http.ResponseWriter, r *http.Request, addRed
 		target = appendRedirectPath(target, r)
 	}
 
-	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	// See Other deliberately converts a non-idempotent request to GET at the
+	// interactive login page instead of replaying its body there.
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 // writeUnauthorized answers a request that opted out of the login
@@ -275,6 +332,15 @@ func (s *Session) writeUnauthorized(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error":   "unauthorized",
 		"message": "invalid or missing credentials",
+	})
+}
+
+func (s *Session) writeUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":   "session_unavailable",
+		"message": "session could not be refreshed",
 	})
 }
 

@@ -1,6 +1,8 @@
 package passkey
 
 import (
+	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -8,7 +10,14 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/rakunlabs/ada/middleware/auth/identity"
 )
 
 // fakeAuthenticator simulates the WebAuthn data an authenticator
@@ -358,6 +367,28 @@ func TestLogin_rejectsSignCountRegression(t *testing.T) {
 	}
 }
 
+func TestLogin_rejectsEqualNonzeroSignCount(t *testing.T) {
+	cfg := newTestConfig()
+	wa, _ := New(cfg)
+	authn := newFakeAuthenticator(t)
+	user := User{Handle: []byte("u1"), Name: "u1"}
+	cred := registerHelper(t, wa, authn, user, cfg.RPID, "http://localhost")
+	cred.UserHandle = user.Handle
+	cred.SignCount = 7
+	authn.signCount = 7
+
+	_, session, _ := wa.BeginLogin([][]byte{authn.credID})
+	clientData := clientDataJSON(t, clientDataTypeGet, encodeBase64URL(session.Challenge), "http://localhost")
+	authData := authn.buildAuthData(t, cfg.RPID, flagUserPresent|flagUserVerified, false)
+	hash := sha256.Sum256(clientData)
+	signature := signWith(t, authn.priv, append(authData, hash[:]...))
+	body := assertionBody(t, authn.credID, clientData, authData, signature, user.Handle)
+
+	if _, err := wa.FinishLogin(session, cred, body); err == nil {
+		t.Error("expected equal nonzero sign count to fail")
+	}
+}
+
 func TestLogin_acceptsZeroSignCount(t *testing.T) {
 	// Platform authenticators always report 0 — that's not a
 	// regression, it's the documented behavior. Our verifier must
@@ -379,6 +410,135 @@ func TestLogin_acceptsZeroSignCount(t *testing.T) {
 
 	if _, err := wa.FinishLogin(sess, cred, body); err != nil {
 		t.Errorf("zero sign count rejected: %v", err)
+	}
+}
+
+func TestRegistrationRejectsUnofferedAlgorithm(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Algorithms = []CredentialAlgorithm{{COSE: algEdDSA, Name: "EdDSA"}}
+	wa, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authn := newFakeAuthenticator(t)
+	user := User{Handle: []byte("user"), Name: "user"}
+	options, session, err := wa.BeginRegistration(user, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientData := clientDataJSON(t, clientDataTypeCreate, options.Challenge, "http://localhost")
+	attestation := authn.buildAttestationObject(t, cfg.RPID)
+	body, err := json.Marshal(RegistrationResponseJSON{
+		Type:  "public-key",
+		ID:    encodeBase64URL(authn.credID),
+		RawID: encodeBase64URL(authn.credID),
+		Response: struct {
+			ClientDataJSON    string   `json:"clientDataJSON"`
+			AttestationObject string   `json:"attestationObject"`
+			Transports        []string `json:"transports,omitempty"`
+		}{
+			ClientDataJSON:    encodeBase64URL(clientData),
+			AttestationObject: encodeBase64URL(attestation),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wa.FinishRegistration(session, body); err == nil {
+		t.Fatal("FinishRegistration accepted an unoffered ES256 credential")
+	}
+}
+
+func TestStrategyConcurrentSignCountUpdatesRemainMonotonic(t *testing.T) {
+	cfg := newTestConfig()
+	wa, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authn := newFakeAuthenticator(t)
+	user := User{Handle: []byte("user"), Name: "user"}
+	registered := registerHelper(t, wa, authn, user, cfg.RPID, "http://localhost")
+	registered.UserHandle = cloneBytes(user.Handle)
+
+	var storeMu sync.Mutex
+	stored := *registered
+	lookup := func(_ context.Context, credentialID []byte) (*Credential, *identity.Identity, error) {
+		storeMu.Lock()
+		defer storeMu.Unlock()
+		if !constantTimeBytesEqual(credentialID, stored.ID) {
+			return nil, nil, ErrCredentialNotFound
+		}
+		credential := stored
+		credential.ID = cloneBytes(stored.ID)
+		credential.UserHandle = cloneBytes(stored.UserHandle)
+		credential.PublicKey = cloneBytes(stored.PublicKey)
+		return &credential, &identity.Identity{Subject: "user"}, nil
+	}
+
+	const assertions = 16
+	strategy, err := NewStrategy("passkey", wa, lookup, WithSignCountUpdater(
+		func(_ context.Context, _ []byte, newCount uint32) error {
+			// Without per-credential serialization, delayed lower writes can
+			// overwrite a newer counter after concurrent stale lookups.
+			time.Sleep(time.Duration(assertions-int(newCount)) * time.Millisecond)
+			storeMu.Lock()
+			stored.SignCount = newCount
+			storeMu.Unlock()
+			return nil
+		},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = strategy.Close() })
+
+	bodies := make([][]byte, assertions)
+	for i := range assertions {
+		count := uint32(i + 1)
+		_, session, err := strategy.w.BeginLogin([][]byte{authn.credID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessionID := fmt.Sprintf("session-%d", count)
+		if err := strategy.store.Save(context.Background(), sessionID, session); err != nil {
+			t.Fatal(err)
+		}
+
+		authn.signCount = count
+		clientData := clientDataJSON(t, clientDataTypeGet, encodeBase64URL(session.Challenge), "http://localhost")
+		authData := authn.buildAuthData(t, cfg.RPID, flagUserPresent|flagUserVerified, false)
+		hash := sha256.Sum256(clientData)
+		signature := signWith(t, authn.priv, append(authData, hash[:]...))
+		assertionJSON := assertionBody(t, authn.credID, clientData, authData, signature, user.Handle)
+		var assertion AssertionResponseJSON
+		if err := json.Unmarshal(assertionJSON, &assertion); err != nil {
+			t.Fatal(err)
+		}
+		bodies[i], err = json.Marshal(finishRequest{SessionID: sessionID, Assertion: assertion})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, body := range bodies {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+			_, _, _ = strategy.Login(httptest.NewRecorder(), request)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	storeMu.Lock()
+	finalCount := stored.SignCount
+	storeMu.Unlock()
+	if finalCount != assertions {
+		t.Fatalf("final sign count = %d, want %d", finalCount, assertions)
 	}
 }
 

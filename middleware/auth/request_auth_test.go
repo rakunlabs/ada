@@ -115,7 +115,7 @@ func TestRequireAPIKeyOutcomes(t *testing.T) {
 		{
 			name: "no credentials falls through to the session redirect",
 			// The cookie path is untouched: browsers still get the login page.
-			wantStatus: http.StatusTemporaryRedirect,
+			wantStatus: http.StatusSeeOther,
 		},
 		{
 			name: "validator fault is a 500, not a 401",
@@ -340,7 +340,7 @@ func TestRequireDisableRequestAuth(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusTemporaryRedirect {
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("expected the legacy redirect, got %d", rec.Code)
 	}
 }
@@ -370,7 +370,7 @@ func TestRequireIgnoresInteractiveStrategies(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusTemporaryRedirect {
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("expected redirect, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }

@@ -82,10 +82,10 @@ server.GET("/posts/{postID}/comments/{commentID}", func(w http.ResponseWriter, r
 
 Ada has two wildcard forms:
 
-| Form        | Position       | Matches                                                  | Access via            |
-| ----------- | -------------- | -------------------------------------------------------- | --------------------- |
-| `*`         | Middle or trailing (1 per route) | One segment if middle, rest of the path if trailing      | `r.PathValue("*")`    |
-| `{name...}` | Trailing only  | Rest of the path (incl. `/`)                             | `r.PathValue("name")` |
+| Form        | Position       | Matches                                                               | Access via            |
+| ----------- | -------------- | --------------------------------------------------------------------- | --------------------- |
+| `*`         | Middle or trailing (1 per route) | A non-empty descendant: one segment if middle, the rest if trailing   | `r.PathValue("*")`    |
+| `{name...}` | Trailing only  | A non-empty descendant: the rest of the path (including `/`)          | `r.PathValue("name")` |
 
 `{name...}` is just a **named alias** for a trailing `*` — same matching, only the `PathValue` key differs. Use it when a descriptive name reads better than `"*"`, especially in routes that already have another capture.
 
@@ -107,9 +107,19 @@ server.POST("/api/v1/external/*/test", func(w http.ResponseWriter, r *http.Reque
 server.GET("/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
     path := r.PathValue("path")
     // GET /files/a/b/c.txt → path == "a/b/c.txt"
-    // GET /files/          → path == ""
+    // GET /files/          → 404 (empty descendants do not match)
     // GET /files           → 404 (separator required)
 })
+```
+
+`HandleFuncWildcard` and `HandleWildcard` add the trailing wildcard for you,
+but they remain descendant-only. Passing `"/assets"` registers
+`"/assets/*"`; neither `"/assets"` nor `"/assets/"` matches it. Add a separate
+exact handler when the base path should also resolve:
+
+```go
+server.HandleFunc("/assets", assetsHandler)         // exact base path
+server.HandleFuncWildcard("/assets", assetsHandler) // non-empty descendants
 ```
 
 #### Combining captures
@@ -139,6 +149,79 @@ server.GET("/a/*/b/*", h)        // panics: more than one '*'
 server.GET("/a/{x...}/b", h)     // panics: greedy must be trailing
 ```
 
+## Path Handling And Captured Values {#path-handling}
+
+::: danger Captured values are attacker-controlled
+Ada matches on the **decoded** `r.URL.Path` exactly as received. It does **not**
+run `path.Clean` and it does **not** redirect, unlike `net/http.ServeMux`.
+Every value returned by `r.PathValue` — and greedy captures especially — is raw
+attacker input. **Validate or clean it before using it as a filesystem path, a
+key, a redirect target, or anything else with authority.**
+:::
+
+`net/http.ServeMux` cleans the request path and answers with a `301` to the
+canonical form. Ada deliberately does neither: the path you registered is the
+path that is matched, so proxies, signed URLs, and pass-through handlers see
+byte-identical paths. The cost is that normalisation is your responsibility.
+
+### Traversal segments reach your handler
+
+`.` and `..` are ordinary path characters to the router. They are not resolved,
+not rejected, and — because `r.URL.Path` is already percent-decoded — an encoded
+`..%2f` is indistinguishable from a literal `../` by the time matching happens:
+
+```go
+server.GET("/static/{path...}", func(w http.ResponseWriter, r *http.Request) {
+    p := r.PathValue("path")
+    // GET /static/../../etc/passwd      → p == "../../etc/passwd"
+    // GET /static/..%2f..%2fetc/passwd  → p == "../../etc/passwd"
+})
+```
+
+Both requests reach the handler with a `200`. Handing `p` to `os.Open`,
+`filepath.Join`, or `http.ServeFile` without checking is a directory traversal.
+
+Clean and confine the value before it touches the filesystem:
+
+```go
+server.GET("/static/{path...}", func(w http.ResponseWriter, r *http.Request) {
+    // Anchor at "/" so ".." can never climb above the root, then trim it.
+    clean := strings.TrimPrefix(path.Clean("/"+r.PathValue("path")), "/")
+
+    f, err := root.Open(clean) // root is an *os.Root or fs.FS
+    if err != nil {
+        http.NotFound(w, r)
+        return
+    }
+    defer f.Close()
+    // ...
+})
+```
+
+Prefer `os.OpenRoot` (Go 1.24+) or an `fs.FS` rooted at the directory you intend
+to serve: they enforce the boundary in the kernel/VFS layer instead of relying on
+string hygiene. Ada's own [`handler/folder`](./handler/folder) already does
+this — reach for it before hand-rolling a file server.
+
+### `%2F` cannot be captured by a `{name}` param
+
+Because matching runs on the decoded path, a percent-encoded slash becomes a
+real separator before the router sees it. A single-segment param can therefore
+**never** contain a `/`, encoded or not:
+
+```go
+server.GET("/users/{id}", getUser)
+
+// GET /users/a%2Fb  → decoded to /users/a/b → 404, not id == "a/b"
+```
+
+If an identifier can legitimately contain `/`, do not put it in a path segment.
+Use a query parameter, a request body, or an encoding without `/` (base64url,
+hex) instead. The same applies to `%2E%2E`, which decodes to `..` and is matched
+as such.
+
+Note also that empty segments are preserved: `/users//a` is not folded to
+`/users/a` and will 404 against `/users/{id}`.
 
 ## Route Groups
 

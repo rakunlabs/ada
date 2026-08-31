@@ -182,6 +182,60 @@ func TestParseCOSE_RS256_rejectsShortModulus(t *testing.T) {
 	}
 }
 
+func TestParseCOSE_RS256_rejectsOversizedModulus(t *testing.T) {
+	n := make([]byte, maxRSAModulusBits/8+1)
+	n[0] = 0x80
+	n[len(n)-1] = 1
+	blob := encodeCOSEKey(t, algRS256, coseKtyRSA, map[int]any{
+		coseLabelN: n,
+		coseLabelE: []byte{0x01, 0x00, 0x01},
+	})
+	if _, err := parseCOSEPublicKey(blob); err == nil {
+		t.Error("expected oversized modulus to be rejected")
+	}
+}
+
+func TestParseCOSE_RS256_rejectsInvalidModulus(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first byte
+		last  byte
+	}{
+		{name: "too few bits", first: 0x7f, last: 1},
+		{name: "even", first: 0x80, last: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := make([]byte, minRSAModulusBits/8)
+			n[0] = tc.first
+			n[len(n)-1] = tc.last
+			blob := encodeCOSEKey(t, algRS256, coseKtyRSA, map[int]any{
+				coseLabelN: n,
+				coseLabelE: []byte{0x01, 0x00, 0x01},
+			})
+			if _, err := parseCOSEPublicKey(blob); err == nil {
+				t.Error("expected invalid modulus to be rejected")
+			}
+		})
+	}
+}
+
+func TestParseCOSE_RS256_rejectsOversizedExponent(t *testing.T) {
+	n := make([]byte, minRSAModulusBits/8)
+	n[0], n[len(n)-1] = 0x80, 1
+	for _, exponent := range [][]byte{
+		{0x01, 0x00, 0x00, 0x00, 0x01}, // more than four bytes
+		{0x80, 0x00, 0x00, 0x01},       // greater than MaxInt32
+	} {
+		blob := encodeCOSEKey(t, algRS256, coseKtyRSA, map[int]any{
+			coseLabelN: n,
+			coseLabelE: exponent,
+		})
+		if _, err := parseCOSEPublicKey(blob); err == nil {
+			t.Errorf("expected exponent %x to be rejected", exponent)
+		}
+	}
+}
+
 func TestParseCOSE_rejectsUnknownKty(t *testing.T) {
 	blob := encodeCOSEKey(t, algES256, 99, nil)
 	if _, err := parseCOSEPublicKey(blob); err == nil {

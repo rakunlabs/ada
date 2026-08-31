@@ -6,10 +6,19 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 )
 
 // MiddlewareFunc is the canonical middleware signature used by ada.
 type MiddlewareFunc = func(next http.Handler) http.Handler
+
+const (
+	reloadTargetCompactMin = 16
+	// reloadTaskQueueLimit bounds the queued-mutation backlog for both Slot
+	// and Pipeline. It is unexported, so the exported Slot/Pipeline godoc
+	// spells the number out instead of naming it — keep those in sync.
+	reloadTaskQueueLimit = 64
+)
 
 // NoOp returns a middleware that does nothing and passes through to the next handler.
 // Useful as a placeholder for disabled Slots or empty Pipelines.
@@ -50,10 +59,10 @@ type slotTarget struct {
 	binding atomic.Pointer[reloadBinding]
 }
 
-// bind pre-builds this target's binding for the given state.
+// prepare pre-builds this target's binding for the given state.
 //   - A chain is ALWAYS stored — the bare next handler when the slot is
 //     disabled — so the request path never has to test for nil.
-func (t *slotTarget) bind(st *slotState) {
+func (t *slotTarget) prepare(st *slotState) *reloadBinding {
 	binding := &reloadBinding{chain: t.next}
 
 	if st != nil {
@@ -64,7 +73,7 @@ func (t *slotTarget) bind(st *slotState) {
 		}
 	}
 
-	t.binding.Store(binding)
+	return binding
 }
 
 // Slot wraps a middleware in an atomic pointer, allowing it to be replaced,
@@ -73,6 +82,17 @@ func (t *slotTarget) bind(st *slotState) {
 // A Slot may be registered with server.Use, Group, or as a per-route middleware
 // argument. All registration points share the same underlying state; a single
 // Replace/Disable/Enable call affects every location where the Slot was used.
+//
+// Slot serializes middleware construction. A mutation requested reentrantly or
+// concurrently while construction is active is queued and returns immediately;
+// the active caller drains queued work in FIFO order before returning. Each task
+// derives only from the latest successfully published state. If queued work
+// panics, later tasks still run and the first panic is rethrown by the active
+// caller after the queue is drained.
+//
+// At most 64 tasks wait internally. Further concurrent submissions block until
+// a dequeue signals space, bounding retained task state. The normally empty
+// queue keeps one-time reentrant mutations deferred.
 //
 // Cost: one atomic pointer load per request. When a WithTimeout variant is
 // active, one context derivation is added per request.
@@ -92,9 +112,17 @@ func (t *slotTarget) bind(st *slotState) {
 //	auth.Disable()   // bypass
 //	auth.Enable()    // restore
 type Slot struct {
-	state   atomic.Pointer[slotState]
-	mu      sync.Mutex    // serializes writes to targets
-	targets []*slotTarget // registration points for pre-built chain rebuild
+	state atomic.Pointer[slotState]
+	mu    sync.Mutex
+
+	// targets are weak so replacing or removing a route releases its handler
+	// chain without requiring explicit unregistration. Protected by mu.
+	targets     []weak.Pointer[slotTarget]
+	compactAt   int
+	processing  bool
+	tasks       []func()
+	taskCond    *sync.Cond
+	taskWaiters int
 }
 
 // NewSlot creates a new enabled Slot initialized with the given middleware.
@@ -108,8 +136,9 @@ func NewSlot(mw MiddlewareFunc) *Slot {
 		mw = NoOp()
 	}
 
-	s := &Slot{}
-	s.state.Store(&slotState{mw: mw, enabled: true})
+	s := &Slot{compactAt: reloadTargetCompactMin}
+	state := &slotState{mw: mw, enabled: true}
+	s.state.Store(state)
 
 	return s
 }
@@ -118,7 +147,7 @@ func NewSlot(mw MiddlewareFunc) *Slot {
 // with server.Use, Group, or route-level middleware arguments.
 //
 // The returned closure uses a pre-built handler chain that is rebuilt only
-// on mutation. Per-request cost is two atomic pointer loads (~2 ns) with
+// on mutation. Per-request cost is one atomic pointer load (~1 ns) with
 // zero allocations.
 //
 // Every call returns a new closure, but all closures read from the same
@@ -128,18 +157,24 @@ func NewSlot(mw MiddlewareFunc) *Slot {
 // Note: if the same Slot is registered in stacked locations (e.g. root Use
 // AND a child Group), the middleware runs once per registration point per
 // request in that group. This matches how non-slotted middlewares behave.
+//
+// Middleware constructors run outside Slot locks. A registration requested
+// during construction returns with a complete pass-through binding and is
+// rebound by its queued task before the active caller returns.
 func (s *Slot) Middleware() MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		target := &slotTarget{next: next}
+		target.binding.Store(&reloadBinding{chain: next})
 
-		// Register and build in ONE critical section. Splitting them let a
-		// concurrent mutation rebuild every *already registered* target and
-		// then miss this one, leaving it bound to a stale chain — or, before
-		// a chain was stored at all, to nil.
-		s.mu.Lock()
-		target.bind(s.state.Load())
-		s.targets = append(s.targets, target)
-		s.mu.Unlock()
+		s.submit(func() {
+			s.mu.Lock()
+			s.targets = append(s.targets, weak.Make(target))
+			s.maybeCompactTargetsLocked()
+			state := s.state.Load()
+			s.mu.Unlock()
+
+			target.binding.Store(target.prepare(state))
+		})
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			binding := target.binding.Load()
@@ -166,7 +201,11 @@ func (s *Slot) Replace(mw MiddlewareFunc) {
 		mw = NoOp()
 	}
 
-	s.storeAndRebuild(&slotState{mw: mw, enabled: true})
+	s.submit(func() {
+		s.mutate(func(*slotState) *slotState {
+			return &slotState{mw: mw, enabled: true}
+		})
+	})
 }
 
 // ReplaceWithTimeout atomically swaps the underlying middleware and cancels
@@ -186,16 +225,26 @@ func (s *Slot) ReplaceWithTimeout(mw MiddlewareFunc, grace time.Duration) {
 		mw = NoOp()
 	}
 
-	newCtx, newCancel := context.WithCancel(context.Background())
+	s.submit(func() {
+		newCtx, newCancel := context.WithCancel(context.Background())
+		published := false
+		defer func() {
+			if !published {
+				newCancel()
+			}
+		}()
 
-	old := s.storeAndRebuild(&slotState{
-		mw:      mw,
-		enabled: true,
-		cancel:  newCancel,
-		ctx:     newCtx,
+		old := s.mutate(func(*slotState) *slotState {
+			return &slotState{
+				mw:      mw,
+				enabled: true,
+				cancel:  newCancel,
+				ctx:     newCtx,
+			}
+		})
+		published = true
+		cancelOldGeneration(old, grace)
 	})
-
-	cancelOldGeneration(old, grace)
 }
 
 // Disable makes the slot a pass-through without discarding the underlying
@@ -203,7 +252,9 @@ func (s *Slot) ReplaceWithTimeout(mw MiddlewareFunc, grace time.Duration) {
 // with Enable.
 // In-flight requests using the old middleware finish normally.
 func (s *Slot) Disable() {
-	s.mutate(disabledFrom)
+	s.submit(func() {
+		s.mutate(disabledFrom)
+	})
 }
 
 // DisableWithTimeout makes the slot a pass-through and cancels in-flight
@@ -211,18 +262,23 @@ func (s *Slot) Disable() {
 //
 // A grace of 0 cancels immediately.
 func (s *Slot) DisableWithTimeout(grace time.Duration) {
-	cancelOldGeneration(s.mutate(disabledFrom), grace)
+	s.submit(func() {
+		old := s.mutate(disabledFrom)
+		cancelOldGeneration(old, grace)
+	})
 }
 
 // Enable restores the slot to its previously-set middleware.
 // If the slot is already enabled, this is a no-op.
 func (s *Slot) Enable() {
-	s.mutate(func(old *slotState) *slotState {
-		if old == nil || old.enabled {
-			return nil // already enabled, or nothing to restore
-		}
+	s.submit(func() {
+		s.mutate(func(old *slotState) *slotState {
+			if old == nil || old.enabled {
+				return nil // already enabled, or nothing to restore
+			}
 
-		return &slotState{mw: old.mw, enabled: true}
+			return &slotState{mw: old.mw, enabled: true}
+		})
 	})
 }
 
@@ -243,46 +299,187 @@ func disabledFrom(old *slotState) *slotState {
 	return &slotState{mw: mw, enabled: false}
 }
 
-// storeAndRebuild publishes a new state and rebinds every registration point
-// in one critical section, returning the state it replaced.
-//
-// Publishing outside the lock — as this used to — let two concurrent mutations
-// interleave so that the stored state and the built chains disagreed
-// permanently: Enabled() reported one middleware while requests ran another,
-// with no way to resync.
-func (s *Slot) storeAndRebuild(state *slotState) *slotState {
+// mutate constructs and publishes one queued operation transactionally.
+func (s *Slot) mutate(fn func(old *slotState) *slotState) *slotState {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.storeAndRebuildLocked(state)
-}
-
-func (s *Slot) storeAndRebuildLocked(state *slotState) *slotState {
 	old := s.state.Load()
-	s.state.Store(state)
+	state := fn(old)
+	if state == nil {
+		s.mu.Unlock()
 
-	for _, t := range s.targets {
-		t.bind(state)
+		return old
 	}
+	targets := s.liveTargetsLocked()
+	s.mu.Unlock()
+
+	bindings := make([]*reloadBinding, len(targets))
+	for i, target := range targets {
+		bindings[i] = target.prepare(state)
+	}
+
+	s.mu.Lock()
+	for i, target := range targets {
+		target.binding.Store(bindings[i])
+	}
+	s.state.Store(state)
+	s.mu.Unlock()
 
 	return old
 }
 
-// mutate applies fn to the current state and publishes the result atomically,
-// so a read-modify-write mutator (Disable, Enable) cannot clobber a concurrent
-// Replace. Returning nil from fn makes the call a no-op.
-func (s *Slot) mutate(fn func(old *slotState) *slotState) *slotState {
+func (s *Slot) submit(task func()) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.initTaskCondLocked()
+	for len(s.tasks) >= reloadTaskQueueLimit && s.processing {
+		s.taskWaiters++
+		s.taskCond.Wait()
+		s.taskWaiters--
+	}
+	if len(s.tasks) >= reloadTaskQueueLimit {
+		initial := s.tasks[0]
+		s.tasks[0] = nil
+		s.tasks = s.tasks[1:]
+		s.tasks = append(s.tasks, task)
+		s.processing = true
+		s.taskCond.Signal()
+		s.mu.Unlock()
 
-	old := s.state.Load()
+		s.processTasks(initial)
 
-	state := fn(old)
-	if state == nil {
-		return old
+		return
+	}
+	s.tasks = append(s.tasks, task)
+	if s.processing {
+		s.mu.Unlock()
+
+		return
+	}
+	s.processing = true
+	s.mu.Unlock()
+
+	s.processTasks(nil)
+}
+
+func (s *Slot) processTasks(initial func()) {
+	released := false
+	defer func() {
+		if released {
+			return
+		}
+		s.mu.Lock()
+		s.processing = false
+		s.initTaskCondLocked()
+		s.taskCond.Broadcast()
+		s.mu.Unlock()
+	}()
+
+	var firstPanic any
+	task := initial
+	for {
+		if task == nil {
+			s.mu.Lock()
+			if len(s.tasks) == 0 {
+				s.tasks = nil
+				s.processing = false
+				s.initTaskCondLocked()
+				s.taskCond.Broadcast()
+				released = true
+				s.mu.Unlock()
+				if firstPanic != nil {
+					panic(firstPanic)
+				}
+
+				return
+			}
+			task = s.tasks[0]
+			s.tasks[0] = nil
+			s.tasks = s.tasks[1:]
+			s.initTaskCondLocked()
+			s.taskCond.Signal()
+			s.mu.Unlock()
+		}
+
+		if recovered := runReloadTask(task); recovered != nil && firstPanic == nil {
+			firstPanic = recovered
+		}
+		task = nil
+	}
+}
+
+func (s *Slot) initTaskCondLocked() {
+	if s.taskCond == nil {
+		s.taskCond = sync.NewCond(&s.mu)
+	}
+}
+
+func runReloadTask(task func()) (recovered any) {
+	defer func() {
+		recovered = recover()
+	}()
+	task()
+
+	return nil
+}
+
+// liveTargetsLocked returns strong references for one rebuild and drops dead
+// weak entries from the registry. Caller must hold s.mu.
+func (s *Slot) liveTargetsLocked() []*slotTarget {
+	registered := s.targets
+	targets := make([]*slotTarget, 0, len(s.targets))
+	live := registered[:0]
+
+	for _, ref := range registered {
+		if target := ref.Value(); target != nil {
+			targets = append(targets, target)
+			live = append(live, ref)
+		}
 	}
 
-	return s.storeAndRebuildLocked(state)
+	s.targets = compactWeakSlotTargets(registered, live)
+	s.compactAt = nextReloadTargetCompaction(len(s.targets))
+
+	return targets
+}
+
+// maybeCompactTargetsLocked performs geometric registration-time cleanup.
+// Scans happen at exponentially increasing thresholds when targets stay live,
+// making registration amortized O(1); every mutation still compacts eagerly.
+func (s *Slot) maybeCompactTargetsLocked() {
+	if s.compactAt == 0 {
+		s.compactAt = reloadTargetCompactMin
+	}
+	if len(s.targets) < s.compactAt {
+		return
+	}
+
+	registered := s.targets
+	live := registered[:0]
+	for _, ref := range registered {
+		if ref.Value() != nil {
+			live = append(live, ref)
+		}
+	}
+
+	s.targets = compactWeakSlotTargets(registered, live)
+	s.compactAt = nextReloadTargetCompaction(len(s.targets))
+}
+
+func nextReloadTargetCompaction(live int) int {
+	next := live * 2
+	if next < reloadTargetCompactMin {
+		return reloadTargetCompactMin
+	}
+
+	return next
+}
+
+func compactWeakSlotTargets(registered, live []weak.Pointer[slotTarget]) []weak.Pointer[slotTarget] {
+	clear(registered[len(live):])
+	if len(live)*2 < len(registered) {
+		return append([]weak.Pointer[slotTarget](nil), live...)
+	}
+
+	return live
 }
 
 // cancelOldGeneration cancels the old generation's context after the grace period.

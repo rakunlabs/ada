@@ -53,6 +53,32 @@ func TestNonceIsFresh(t *testing.T) {
 	}
 }
 
+func TestAssociatedDataIsAuthenticated(t *testing.T) {
+	c, _ := crypto.New("0123456789abcdef0123456789abcdef")
+	sealed, err := c.EncryptWithAssociatedData([]byte("payload"), []byte("session-a"))
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	plain, err := c.DecryptWithAssociatedData(sealed, []byte("session-a"))
+	if err != nil || string(plain) != "payload" {
+		t.Fatalf("decrypt: %q, %v", plain, err)
+	}
+	if _, err := c.DecryptWithAssociatedData(sealed, []byte("session-b")); !errors.Is(err, crypto.ErrCiphertext) {
+		t.Fatalf("wrong associated data error = %v, want ErrCiphertext", err)
+	}
+}
+
+func TestAssociatedDataDecryptsLegacyCiphertext(t *testing.T) {
+	c, _ := crypto.New("0123456789abcdef0123456789abcdef")
+	legacy, _ := c.Encrypt([]byte("payload"))
+
+	plain, err := c.DecryptWithAssociatedData(legacy, []byte("session-a"))
+	if err != nil || string(plain) != "payload" {
+		t.Fatalf("legacy decrypt: %q, %v", plain, err)
+	}
+}
+
 func TestTamperingIsDetected(t *testing.T) {
 	c, _ := crypto.New("0123456789abcdef0123456789abcdef")
 
@@ -165,3 +191,4 @@ func TestWirePrefix(t *testing.T) {
 
 // Compile-time proof that Cipher satisfies the interface the issuer expects.
 var _ issuer.Cipher = (*crypto.Cipher)(nil)
+var _ issuer.AssociatedDataCipher = (*crypto.Cipher)(nil)

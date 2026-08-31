@@ -101,7 +101,11 @@ func WithHTTPServerFunc(fn func(server *http.Server) *http.Server) OptionStart {
 }
 
 // WithReadHeaderTimeout sets the ReadHeaderTimeout for the http.Server.
-//   - Default is 5 seconds.
+//   - Default is DefaultReadHeaderTimeout (10 seconds).
+//   - A value of 0 selects the default, it does NOT disable the timeout.
+//     There is deliberately no opt-out through this option; to run with an
+//     unbounded header read, set ReadHeaderTimeout to 0 on the server passed
+//     to WithHTTPServerFunc.
 func WithReadHeaderTimeout(d time.Duration) OptionStart {
 	return func(opt *optionStart) {
 		opt.ReadHeaderTimeout = d

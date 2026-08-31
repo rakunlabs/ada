@@ -29,10 +29,10 @@ type staticChild struct {
 	node *node
 }
 
-// methodEntry bundles everything needed to dispatch one method on a node:
-// the handler, the route pattern (set on r.Pattern before the call), and the
-// pre-computed param names. Nodes hold these in a small slice instead of
-// maps — a linear scan over 1-4 entries beats map hashing on the hot path.
+// methodEntry bundles everything needed to dispatch one method on a node: the
+// handler, route pattern, and pre-computed param names. Nodes hold these in a
+// small slice instead of maps — a linear scan over 1-4 entries beats map hashing
+// on the hot path.
 type methodEntry struct {
 	method  string
 	pattern string
@@ -41,8 +41,8 @@ type methodEntry struct {
 }
 
 type node struct {
-	// Possible marks a trailing (greedy) wildcard child: the node can
-	// consume the entire remaining path.
+	// Possible marks a trailing (greedy) wildcard child: after consuming a
+	// non-empty first segment, the node can consume the entire remaining path.
 	Possible bool
 
 	// Inlined static trie fields. StaticKey is the compressed radix
@@ -68,14 +68,9 @@ type node struct {
 	entries  []methodEntry
 	catchAll *methodEntry
 
-	// errorScope is the Mux whose 404/405/auto-OPTIONS chains apply to
-	// requests that reach this subtree without matching a route.
-	//
-	// It is attached at `prefix + "/*"` by Use/NotFound/MethodNotAllowed
-	// and by Group, so a group's middlewares still run on its unmatched
-	// paths. Crucially it is NOT a route: registering one (as this
-	// package used to) makes the node answer every method, which shadows
-	// 405, auto-OPTIONS and any user-registered catch-all.
+	// errorScope is the Mux whose error chains apply at and below this
+	// structural prefix. If multiple Groups claim the same prefix, the most
+	// recent scopeErrors call replaces this pointer for all routes below it.
 	errorScope *Mux
 
 	// allow is the pre-computed Allow header value for 405/auto-OPTIONS
@@ -195,7 +190,7 @@ func (n *node) Insert(method, path string, handler http.HandlerFunc) {
 // the terminal node, the captured parameter descriptors, and the type of the
 // last emitted segment.
 //   - No handler is installed, so callers can also attach non-routing metadata
-//     to a subtree (see Mux.scopeErrors).
+//     to a prefix (see Mux.scopeErrors).
 func (n *node) insertPath(path string) (*node, []paramInfo, typeNode) {
 	pathSegments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	segmentTypes := make([]typeNode, len(pathSegments))
@@ -281,7 +276,7 @@ func (n *node) insertPath(path string) (*node, []paramInfo, typeNode) {
 	//   - Interior empty segments are collapsed ("/a//b" ≡ "/a/b"), but
 	//     a trailing empty segment keeps its '/' in the key: "/users/"
 	//     only matches "/users/", never "/users".
-	var typeNodeSegment typeNode = typeNodeSelf
+	typeNodeSegment := typeNodeSelf
 	var params []paramInfo
 	current := n
 	var run []byte
@@ -510,7 +505,7 @@ func parseRouteSegment(part string) (typeNode, string, error) {
 // inner name must be non-empty so we don't accidentally accept the
 // degenerate `{...}` form, which would be ambiguous with a regular
 // `{}` param missing its name. Greedy params are also the named
-// counterpart of the trailing `*` wildcard: they always match the
+// counterpart of the trailing `*` wildcard: they match a non-empty
 // remaining path, including embedded slashes, and they can only
 // appear as the last segment of a route (enforced in Insert).
 func isGreedyParam(seg string) bool {
