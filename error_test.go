@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/rakunlabs/ada/utils/bind"
 )
 
 // TestErrorStatus_NeverSucceeds guards the worst default in the old behaviour:
@@ -379,6 +383,170 @@ func TestErrorRedaction_ClientErrorIsNotLogged(t *testing.T) {
 	}
 	if logged.Len() != 0 {
 		t.Errorf("4xx wrote to the error log: %q", logged.String())
+	}
+}
+
+// servePost drives a Mux with a request body, which serve cannot do.
+func servePost(m *Mux, path, contentType string, body io.Reader) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+
+	req := httptest.NewRequest(http.MethodPost, path, body)
+	if contentType != "" {
+		req.Header.Set(HeaderContentType, contentType)
+	}
+	m.ServeHTTP(rec, req)
+
+	return rec
+}
+
+// TestBodyTooLarge_IsAnActionable413 is the end-to-end shape of an oversized
+// request body. Both a bind limit and an http.MaxBytesReader used to surface as
+// a bare 500 whose body was `{"message":"Internal Server Error"}`: the status
+// told the client to retry a request that can never succeed, and the one fact
+// that would let it succeed — the limit — was only in the server log.
+func TestBodyTooLarge_IsAnActionable413(t *testing.T) {
+	type payload struct {
+		Value string `json:"value"`
+	}
+
+	const limit = 16
+
+	oversized := `{"value":"` + strings.Repeat("x", 512) + `"}`
+	secret := `dsn=postgres://u:p@db:5432`
+
+	for _, tc := range []struct {
+		name    string
+		handler HandlerFunc
+		code    int
+		body    string
+	}{
+		{
+			// bind.WithBodyLimit, through Context.Bind.
+			name: "bind limit",
+			handler: func(c *Context) error {
+				var obj payload
+
+				return c.Bind(&obj, bind.WithBodyLimit(limit))
+			},
+			code: http.StatusRequestEntityTooLarge,
+			body: `{"message":"request body exceeds limit of 16 bytes"}` + "\n",
+		},
+		{
+			// A handler that never binds: the bodylimit middleware wraps the
+			// body and io.ReadAll fails with *http.MaxBytesError.
+			name: "MaxBytesReader without bind",
+			handler: func(c *Context) error {
+				c.Request.Body = http.MaxBytesReader(c.Response, c.Request.Body, limit)
+
+				_, err := io.ReadAll(c.Request.Body)
+
+				return err
+			},
+			code: http.StatusRequestEntityTooLarge,
+			body: `{"message":"request body exceeds limit of 16 bytes"}` + "\n",
+		},
+		{
+			// Wrapper text is still withheld: the 413 is inferred from the
+			// chain, so it must not license publishing the whole chain.
+			name: "wrapper text is not published",
+			handler: func(c *Context) error {
+				var obj payload
+				if err := c.Bind(&obj, bind.WithBodyLimit(limit)); err != nil {
+					return fmt.Errorf("upload to %s: %w", secret, err)
+				}
+
+				return nil
+			},
+			code: http.StatusRequestEntityTooLarge,
+			body: `{"message":"request body exceeds limit of 16 bytes"}` + "\n",
+		},
+		{
+			// An explicit HTTPError still wins over the inferred 413, even
+			// with the body-limit error kept in the chain below it: inference
+			// only fills the gap where the handler said nothing.
+			name: "explicit HTTPError wins",
+			handler: func(c *Context) error {
+				var obj payload
+				if err := c.Bind(&obj, bind.WithBodyLimit(limit)); err != nil {
+					return &HTTPError{Code: http.StatusBadRequest, Message: "upload rejected", Err: err}
+				}
+
+				return nil
+			},
+			code: http.StatusBadRequest,
+			body: `{"message":"upload rejected"}` + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := NewMux()
+			mux.POST("/upload", tc.handler)
+
+			rec := servePost(mux, "/upload", MIMEApplicationJSON, strings.NewReader(oversized))
+
+			if rec.Code != tc.code {
+				t.Errorf("status = %d, want %d", rec.Code, tc.code)
+			}
+			if got := rec.Body.String(); got != tc.body {
+				t.Errorf("body = %q, want %q", got, tc.body)
+			}
+			if strings.Contains(rec.Body.String(), "postgres://") {
+				t.Errorf("body leaked the wrapper text: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestBodyTooLarge_SentinelIsReachable is the caller-side half of the 413: the
+// status is inferred from the error chain, so the chain has to carry the fact
+// in a form other code can match on too.
+func TestBodyTooLarge_SentinelIsReachable(t *testing.T) {
+	var bound error
+
+	mux := NewMux()
+	mux.POST("/upload", func(c *Context) error {
+		var obj struct {
+			Value string `json:"value"`
+		}
+		bound = c.Bind(&obj, bind.WithBodyLimit(16))
+
+		return bound
+	})
+
+	rec := servePost(mux, "/upload", MIMEApplicationJSON, strings.NewReader(`{"value":"`+strings.Repeat("x", 512)+`"}`))
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if !errors.Is(bound, bind.ErrBodyTooLarge) {
+		t.Fatalf("handler error %v does not wrap bind.ErrBodyTooLarge", bound)
+	}
+}
+
+// TestBodyTooLarge_DefaultBindIsUnlimited pins the retired default from the
+// outside: a 2 MiB JSON body used to be answered 413-worthy... but as a 500,
+// because bind imposed a 1 MiB cap nobody asked for.
+func TestBodyTooLarge_DefaultBindIsUnlimited(t *testing.T) {
+	const size = 2 << 20
+
+	mux := NewMux()
+	mux.POST("/upload", func(c *Context) error {
+		var obj struct {
+			Value string `json:"value"`
+		}
+		if err := c.Bind(&obj); err != nil {
+			return err
+		}
+
+		return c.SendString(strconv.Itoa(len(obj.Value)))
+	})
+
+	rec := servePost(mux, "/upload", MIMEApplicationJSON, strings.NewReader(`{"value":"`+strings.Repeat("x", size)+`"}`))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %q, want 200", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != strconv.Itoa(size) {
+		t.Fatalf("bound %s bytes, want %d", got, size)
 	}
 }
 

@@ -14,18 +14,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 )
 
 // Errors returned while verifying an ID token.
 var (
 	ErrNoKeySet       = errors.New("oauth2: no JWKS endpoint configured")
 	ErrUnknownKey     = errors.New("oauth2: signing key not found in JWKS")
+	ErrMissingKeyID   = errors.New("oauth2: id_token has no kid and JWKS contains multiple keys")
 	ErrBadSignature   = errors.New("oauth2: id_token signature invalid")
 	ErrUnsupportedAlg = errors.New("oauth2: unsupported id_token algorithm")
 )
@@ -39,19 +41,33 @@ type keySet struct {
 	uri    string
 	client *http.Client
 
-	minRefresh time.Duration
+	minRefresh   time.Duration
+	retryRefresh time.Duration
+	now          func() time.Time
 
-	mu          sync.RWMutex
-	keys        map[string]crypto.PublicKey
+	mu         sync.RWMutex
+	keys       map[string]crypto.PublicKey
+	usableKeys int
+
+	refreshMu   sync.Mutex
+	refreshing  *refreshCall
 	lastFetched time.Time
+	lastAttempt time.Time
+}
+
+type refreshCall struct {
+	done chan struct{}
+	err  error
 }
 
 func newKeySet(uri string, client *http.Client) *keySet {
 	return &keySet{
-		uri:        uri,
-		client:     client,
-		minRefresh: time.Minute,
-		keys:       make(map[string]crypto.PublicKey),
+		uri:          uri,
+		client:       client,
+		minRefresh:   time.Minute,
+		retryRefresh: 2 * time.Second,
+		now:          time.Now,
+		keys:         make(map[string]crypto.PublicKey),
 	}
 }
 
@@ -61,6 +77,10 @@ func newKeySet(uri string, client *http.Client) *keySet {
 // of several at random would let a token signed by the weakest key stand in
 // for any other.
 func (k *keySet) key(ctx context.Context, kid string) (crypto.PublicKey, error) {
+	if kid == "" && k.keyCount() > 1 {
+		return nil, ErrMissingKeyID
+	}
+
 	if key, ok := k.lookup(kid); ok {
 		return key, nil
 	}
@@ -69,11 +89,25 @@ func (k *keySet) key(ctx context.Context, kid string) (crypto.PublicKey, error) 
 		return nil, err
 	}
 
+	if kid == "" && k.keyCount() > 1 {
+		return nil, ErrMissingKeyID
+	}
 	if key, ok := k.lookup(kid); ok {
 		return key, nil
 	}
 
 	return nil, fmt.Errorf("%w: kid=%q", ErrUnknownKey, kid)
+}
+
+func (k *keySet) keyCount() int {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+
+	if k.usableKeys > 0 {
+		return k.usableKeys
+	}
+
+	return len(k.keys)
 }
 
 func (k *keySet) lookup(kid string) (crypto.PublicKey, bool) {
@@ -98,52 +132,96 @@ func (k *keySet) lookup(kid string) (crypto.PublicKey, bool) {
 }
 
 func (k *keySet) refresh(ctx context.Context) error {
-	k.mu.Lock()
-	if time.Since(k.lastFetched) < k.minRefresh {
-		k.mu.Unlock()
+	k.refreshMu.Lock()
+	if call := k.refreshing; call != nil {
+		k.refreshMu.Unlock()
+
+		select {
+		case <-call.done:
+			return call.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	now := k.now()
+	last, cooldown := k.lastFetched, k.minRefresh
+	if k.lastAttempt.After(k.lastFetched) {
+		last, cooldown = k.lastAttempt, k.retryRefresh
+	}
+	if !last.IsZero() && now.Sub(last) < cooldown {
+		k.refreshMu.Unlock()
 
 		return fmt.Errorf("%w: refresh throttled", ErrUnknownKey)
 	}
 
-	k.lastFetched = time.Now()
-	k.mu.Unlock()
+	call := &refreshCall{done: make(chan struct{})}
+	k.refreshing = call
+	k.refreshMu.Unlock()
+
+	keys, usableKeys, err := k.fetch(ctx)
+	completed := k.now()
+	if err == nil {
+		k.mu.Lock()
+		k.keys = keys
+		k.usableKeys = usableKeys
+		k.mu.Unlock()
+	}
+
+	k.refreshMu.Lock()
+	if err != nil {
+		k.lastAttempt = completed
+	} else {
+		k.lastFetched = completed
+		k.lastAttempt = time.Time{}
+	}
+	call.err = err
+	k.refreshing = nil
+	close(call.done)
+	k.refreshMu.Unlock()
+
+	return err
+}
+
+func (k *keySet) fetch(ctx context.Context) (map[string]crypto.PublicKey, int, error) {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && k.client.Timeout <= 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, k.uri, nil)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := k.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("oauth2: fetch jwks: %w", err)
+		return nil, 0, fmt.Errorf("oauth2: fetch jwks: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := bodylimit.ReadUpstream(resp.Body, maxUpstreamResponseBytes)
 	if err != nil {
-		return fmt.Errorf("oauth2: read jwks: %w", err)
+		return nil, 0, fmt.Errorf("oauth2: read jwks: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("oauth2: jwks: %s", strings.TrimSpace(string(body)))
+		return nil, 0, fmt.Errorf("oauth2: jwks: %s", strings.TrimSpace(string(body)))
 	}
 
-	keys, err := parseJWKS(body)
+	keys, usableKeys, err := parseJWKS(body)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 
 	if len(keys) == 0 {
-		return errors.New("oauth2: jwks contains no usable key")
+		return nil, 0, errors.New("oauth2: jwks contains no usable key")
 	}
 
-	k.mu.Lock()
-	k.keys = keys
-	k.mu.Unlock()
-
-	return nil
+	return keys, usableKeys, nil
 }
 
 type jwk struct {
@@ -158,16 +236,17 @@ type jwk struct {
 	Y   string `json:"y"`
 }
 
-func parseJWKS(body []byte) (map[string]crypto.PublicKey, error) {
+func parseJWKS(body []byte) (map[string]crypto.PublicKey, int, error) {
 	var set struct {
 		Keys []jwk `json:"keys"`
 	}
 
 	if err := json.Unmarshal(body, &set); err != nil {
-		return nil, fmt.Errorf("oauth2: decode jwks: %w", err)
+		return nil, 0, fmt.Errorf("oauth2: decode jwks: %w", err)
 	}
 
 	out := make(map[string]crypto.PublicKey, len(set.Keys))
+	usable := 0
 
 	for _, k := range set.Keys {
 		// "enc" keys are for encryption, not signatures. Using one to verify
@@ -182,9 +261,10 @@ func parseJWKS(body []byte) (map[string]crypto.PublicKey, error) {
 		}
 
 		out[k.Kid] = key
+		usable++
 	}
 
-	return out, nil
+	return out, usable, nil
 }
 
 func (k jwk) publicKey() (crypto.PublicKey, error) {

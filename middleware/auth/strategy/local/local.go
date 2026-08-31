@@ -9,15 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
+
+// maxBodyBytes caps login and registration request bodies at 64 KiB.
+const maxBodyBytes = 1 << 16
 
 // ErrInvalidCredentials is returned by Verifier when username/password do not
 // match. It surfaces as 401 invalid_credentials to the client.
@@ -257,9 +260,9 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	username, password, err := s.readCredentials(r)
+	username, password, err := s.readCredentials(w, r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		writeBadRequest(w, err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -344,13 +347,13 @@ func (s *Strategy) Register(w http.ResponseWriter, r *http.Request) (*identity.I
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	req, err := s.readRegister(r)
+	req, err := s.readRegister(w, r)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrPasswordMismatch):
 			writeError(w, http.StatusBadRequest, "password_mismatch", "passwords do not match")
 		default:
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			writeBadRequest(w, err)
 		}
 
 		return nil, strategy.OutcomeFailed, nil
@@ -410,10 +413,10 @@ func (s *Strategy) Register(w http.ResponseWriter, r *http.Request) (*identity.I
 // "password_confirm" field is never forwarded to the Registrar; when declared
 // in the register fields, a missing or mismatched value yields
 // ErrPasswordMismatch.
-func (s *Strategy) readRegister(r *http.Request) (RegisterRequest, error) {
+func (s *Strategy) readRegister(w http.ResponseWriter, r *http.Request) (RegisterRequest, error) {
 	contentType := r.Header.Get("Content-Type")
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	body, err := bodylimit.Read(w, r, maxBodyBytes)
 	if err != nil {
 		return RegisterRequest{}, fmt.Errorf("read body: %w", err)
 	}
@@ -475,10 +478,10 @@ func (s *Strategy) readRegister(r *http.Request) (RegisterRequest, error) {
 	return req, nil
 }
 
-func (s *Strategy) readCredentials(r *http.Request) (string, string, error) {
+func (s *Strategy) readCredentials(w http.ResponseWriter, r *http.Request) (string, string, error) {
 	contentType := r.Header.Get("Content-Type")
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	body, err := bodylimit.Read(w, r, maxBodyBytes)
 	if err != nil {
 		return "", "", fmt.Errorf("read body: %w", err)
 	}
@@ -503,6 +506,16 @@ func (s *Strategy) readCredentials(r *http.Request) (string, string, error) {
 	}
 
 	return "", "", fmt.Errorf("unsupported content type %q", contentType)
+}
+
+func writeBadRequest(w http.ResponseWriter, err error) {
+	if status, message, tooLarge := bodylimit.Reject(err); tooLarge {
+		writeError(w, status, bodylimit.Code, message)
+
+		return
+	}
+
+	writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

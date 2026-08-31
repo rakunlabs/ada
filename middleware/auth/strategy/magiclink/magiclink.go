@@ -16,7 +16,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -27,9 +26,13 @@ import (
 
 	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 	"github.com/rakunlabs/ada/utils/proxy"
 )
+
+// maxBodyBytes caps request-a-link bodies at 64 KiB.
+const maxBodyBytes = 1 << 16
 
 // Sender delivers the magic link/code to the user. The token is the random
 // value; the strategy builds the full verify URL and passes it too.
@@ -281,9 +284,9 @@ func (s *Strategy) Close() error {
 // stores it, builds the verify URL, calls the Sender, and writes a 200 JSON
 // response.
 func (s *Strategy) handleSendLink(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
-	email, err := s.readEmail(r)
+	email, err := s.readEmail(w, r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		writeBadRequest(w, err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -388,10 +391,10 @@ func (s *Strategy) handleVerifyToken(w http.ResponseWriter, r *http.Request) (*i
 }
 
 // readEmail extracts the email from JSON or form-encoded request body.
-func (s *Strategy) readEmail(r *http.Request) (string, error) {
+func (s *Strategy) readEmail(w http.ResponseWriter, r *http.Request) (string, error) {
 	contentType := r.Header.Get("Content-Type")
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	body, err := bodylimit.Read(w, r, maxBodyBytes)
 	if err != nil {
 		return "", fmt.Errorf("read body: %w", err)
 	}
@@ -415,6 +418,16 @@ func (s *Strategy) readEmail(r *http.Request) (string, error) {
 	}
 
 	return "", fmt.Errorf("unsupported content type %q", contentType)
+}
+
+func writeBadRequest(w http.ResponseWriter, err error) {
+	if status, message, tooLarge := bodylimit.Reject(err); tooLarge {
+		writeError(w, status, bodylimit.Code, message)
+
+		return
+	}
+
+	writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 }
 
 // buildVerifyURL constructs the full verify URL for the magic link.

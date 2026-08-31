@@ -10,6 +10,34 @@
 // All time-related logic uses tummy.Now() so tests can advance the clock
 // deterministically.
 //
+// # Fail-closed buffering and streaming
+//
+// The default ErrorPolicyFailClosed must not let a single byte reach the
+// client before the attempt has been durably counted, otherwise a store
+// failure at the wrong moment would leak a successful response that was never
+// charged against the limit. It achieves that by buffering the entire
+// downstream response in memory until persistence succeeds. Two consequences
+// follow directly, and neither can be engineered away — buffering and
+// streaming are mutually exclusive:
+//
+//   - Streaming does not work. SSE, chunked progress output, long polling and
+//     anything else relying on http.Flusher or http.ResponseController.Flush
+//     will be withheld until the handler returns, and an endless SSE stream
+//     will simply never respond. Flush attempts return an error wrapping
+//     ErrStreamingUnsupported and are reported to Config.OnError so the
+//     misconfiguration is visible rather than silent. Hijacking (WebSocket
+//     upgrades) is likewise unavailable.
+//   - Responses are bounded by Config.ResponseBufferLimit, 1 MiB by default.
+//     A response that does not fit cannot be delivered and is answered with
+//     500 "response_too_large" plus a *ResponseTooLargeError on
+//     Config.OnError; the attempt is still counted.
+//
+// Both restrictions disappear under ErrorPolicyFailOpen, which writes straight
+// through. If an endpoint must stream and must be limited, either use
+// ErrorPolicyFailOpen and accept that a store outage stops enforcing, or scope
+// this middleware to the small non-streaming request that authenticates the
+// stream.
+//
 // Typical usage:
 //
 //	store, _ := ratelimit.NewMemoryStore(10_000)
@@ -61,7 +89,20 @@ const (
 )
 
 var (
-	ErrResponseTooLarge                 = errors.New("ratelimit: downstream response exceeds buffer limit")
+	// ErrResponseTooLarge reports that the downstream response did not fit in
+	// Config.ResponseBufferLimit while ErrorPolicyFailClosed was buffering it.
+	// Config.OnError receives an error wrapping this sentinel; the client
+	// receives 500 with error code "response_too_large".
+	ErrResponseTooLarge = errors.New("ratelimit: downstream response exceeds buffer limit")
+
+	// ErrStreamingUnsupported reports that a handler tried to flush while
+	// ErrorPolicyFailClosed was buffering its response. Buffering and streaming
+	// are mutually exclusive: the fail-closed guarantee is precisely that no
+	// byte reaches the client before the attempt is durably counted.
+	// http.ResponseController.Flush returns an error wrapping this sentinel,
+	// and Config.OnError observes the attempt.
+	ErrStreamingUnsupported = errors.New("ratelimit: cannot flush while ErrorPolicyFailClosed buffers the response; use ErrorPolicyFailOpen or apply this middleware only to non-streaming routes")
+
 	errReservationExpired               = errors.New("ratelimit: reservation lease expired")
 	errReservationRenewalUnconfirmed    = errors.New("ratelimit: reservation lease renewal could not be confirmed")
 	errReservationRenewalWorkerPanicked = errors.New("ratelimit: reservation lease renewal worker panicked")
@@ -99,6 +140,27 @@ func (e *StoreError) Error() string {
 }
 
 func (e *StoreError) Unwrap() error { return e.Err }
+
+// ResponseTooLargeError describes a downstream response that overflowed
+// Config.ResponseBufferLimit under ErrorPolicyFailClosed. It is passed to
+// Config.OnError and unwraps to ErrResponseTooLarge, so it is distinguishable
+// from a *StoreError: this is a server-side response fault, not a limiter or
+// store fault.
+type ResponseTooLargeError struct {
+	// Limit is the configured Config.ResponseBufferLimit in bytes.
+	Limit int64
+	// Buffered is how many bytes were accepted before the overflowing write.
+	Buffered int64
+	// Discarded is the size of the write that did not fit.
+	Discarded int64
+}
+
+func (e *ResponseTooLargeError) Error() string {
+	return fmt.Sprintf("ratelimit: downstream response exceeds buffer limit: buffered %d bytes, discarded a %d byte write, limit %d bytes",
+		e.Buffered, e.Discarded, e.Limit)
+}
+
+func (e *ResponseTooLargeError) Unwrap() error { return ErrResponseTooLarge }
 
 // Decision is the limiter's per-key evaluation outcome. It is passed to
 // OnAttempt for observability after the wrapped handler runs.
@@ -139,7 +201,8 @@ type Bucket struct {
 }
 
 // Config controls the middleware. Window, KeyFunc, ShouldCount and Store are
-// required; zero disables either threshold.
+// required. Zero disables an individual threshold, but at least one threshold
+// must be enabled.
 type Config struct {
 	// Window is the sliding-window length. Attempts older than this are
 	// dropped from the bucket on every observation.
@@ -191,14 +254,34 @@ type Config struct {
 	// store errors and preserves the downstream response on post-handler errors.
 	ErrorPolicy ErrorPolicy `cfg:"error_policy"`
 
-	// OnError observes Store failures after operation and key context have
-	// been attached. Optional. ErrorPolicy still determines request handling.
+	// OnError observes failures the middleware cannot report to the client in
+	// detail. Optional. Three distinguishable classes arrive here:
+	//
+	//   - *StoreError for Store failures, after operation and key context
+	//     have been attached. ErrorPolicy determines request handling.
+	//   - *ResponseTooLargeError (errors.Is ErrResponseTooLarge) when a
+	//     fail-closed buffered response exceeded ResponseBufferLimit. The
+	//     client receives 500 "response_too_large"; ErrorPolicy is not
+	//     consulted because the limiter itself did not fail.
+	//   - ErrStreamingUnsupported when a handler attempted to flush while
+	//     fail-closed buffering was active. The response is unaffected; this
+	//     exists so the misconfiguration is visible instead of silent.
 	OnError func(r *http.Request, err error)
 
 	// ResponseBufferLimit bounds responses buffered by the default fail-closed
-	// policy while it waits for post-handler persistence. Zero uses 1 MiB;
-	// negative disables the limit. Streaming endpoints should use FailOpen or
-	// place this middleware only around their small authentication response.
+	// policy while it waits for post-handler persistence. Zero uses
+	// DefaultResponseBufferLimit (1 MiB); negative disables the limit.
+	//
+	// A response that does not fit cannot be delivered — releasing a truncated
+	// body would corrupt it, and releasing nothing after the handler already
+	// chose a status is a server fault. The middleware therefore answers 500
+	// with error code "response_too_large", reports a *ResponseTooLargeError
+	// to OnError, and still counts the attempt (the handler ran and produced a
+	// countable status; not counting it would be a free bypass).
+	//
+	// Buffering also makes streaming impossible: see the package
+	// documentation. Streaming endpoints must use ErrorPolicyFailOpen, or this
+	// middleware must wrap only their small non-streaming responses.
 	ResponseBufferLimit int64 `cfg:"response_buffer_limit"`
 
 	// StoreOperationTimeout bounds each AtomicStore transaction. Initial
@@ -256,6 +339,9 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 	if cfg.HardThreshold < 0 {
 		panic("ratelimit: Config.HardThreshold must not be negative")
 	}
+	if cfg.SoftThreshold == 0 && cfg.HardThreshold == 0 {
+		panic("ratelimit: Config.SoftThreshold or Config.HardThreshold must be enabled")
+	}
 	if cfg.SoftThreshold > 0 && cfg.HardThreshold > 0 && cfg.SoftThreshold >= cfg.HardThreshold {
 		panic("ratelimit: Config.SoftThreshold must be less than Config.HardThreshold")
 	}
@@ -280,6 +366,12 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 	}
 	if cfg.StoreOperationTimeout == 0 {
 		cfg.StoreOperationTimeout = DefaultStoreOperationTimeout
+	}
+	// Tell a capacity-bounded store how long a bucket stays relevant, so it
+	// can reclaim aged-out buckets instead of either growing without bound or
+	// evicting one that is still enforcing a limit.
+	if observer, ok := cfg.Store.(windowObserver); ok {
+		observer.ObserveWindow(cfg.Window)
 	}
 
 	locks := newKeyLocks()
@@ -352,33 +444,18 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				waitedAtCount = maxCount
 			}
 
-			status := http.StatusOK
-			var responseErr error
-			flush := func() {}
-			if cfg.ErrorPolicy == ErrorPolicyFailOpen {
-				capture := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-				next.ServeHTTP(capture, r)
-				status = capture.status
-			} else {
-				response := newResponseBuffer(cfg.ResponseBufferLimit)
-				next.ServeHTTP(response, r)
-				status = response.status
-				responseErr = response.err
-				flush = func() { response.flush(w) }
-			}
+			status, commit, captureObservations, captureErr := serveCaptured(w, r, next, cfg)
 
 			if !cfg.ShouldCount(r, status) {
 				holders.unlock()
-				if responseErr != nil {
-					writeStoreUnavailable(w)
-				} else {
-					flush()
-				}
+				observeCaptureErrors(r, cfg, captureObservations)
+				releaseResponse(w, captureErr, commit)
 				return
 			}
 
 			decisions, err := recordAttempts(ctx, cfg, keys, appliedDelay)
 			holders.unlock()
+			observeCaptureErrors(r, cfg, captureObservations)
 			if err != nil {
 				observeStoreError(r, cfg, err)
 				if cfg.ErrorPolicy == ErrorPolicyFailClosed {
@@ -386,11 +463,10 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				}
 				return
 			}
-			if responseErr != nil {
-				writeStoreUnavailable(w)
-				return
-			}
-			flush()
+			// The attempt is persisted whether or not the response could be
+			// captured, so OnAttempt must fire either way; otherwise the
+			// stored counter and the observability stream disagree.
+			releaseResponse(w, captureErr, commit)
 			if cfg.OnAttempt != nil {
 				for _, decision := range decisions {
 					cfg.OnAttempt(r, decision, status)
@@ -473,20 +549,8 @@ func serveAtomic(w http.ResponseWriter, r *http.Request, next http.Handler, cfg 
 		return
 	}
 
-	status := http.StatusOK
-	var responseErr error
-	flush := func() {}
-	if cfg.ErrorPolicy == ErrorPolicyFailOpen {
-		capture := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(capture, r)
-		status = capture.status
-	} else {
-		response := newResponseBuffer(cfg.ResponseBufferLimit)
-		next.ServeHTTP(response, r)
-		status = response.status
-		responseErr = response.err
-		flush = func() { response.flush(w) }
-	}
+	status, commit, captureObservations, captureErr := serveCaptured(w, r, next, cfg)
+	observeCaptureErrors(r, cfg, captureObservations)
 	if leaseErr := lease.stop(); leaseErr != nil {
 		// Fail-open responses are written directly and must be preserved. A
 		// fail-closed response is still buffered and must never be released
@@ -510,11 +574,7 @@ func serveAtomic(w http.ResponseWriter, r *http.Request, next http.Handler, cfg 
 			}
 			return
 		}
-		if responseErr != nil {
-			writeStoreUnavailable(w)
-		} else {
-			flush()
-		}
+		releaseResponse(w, captureErr, commit)
 		return
 	}
 
@@ -529,11 +589,9 @@ func serveAtomic(w http.ResponseWriter, r *http.Request, next http.Handler, cfg 
 		return
 	}
 	reserved = false
-	if responseErr != nil {
-		writeStoreUnavailable(w)
-		return
-	}
-	flush()
+	// The attempt is persisted whether or not the response could be captured,
+	// so OnAttempt must fire either way.
+	releaseResponse(w, captureErr, commit)
 	if cfg.OnAttempt != nil {
 		for _, decision := range decisions {
 			cfg.OnAttempt(r, decision, status)
@@ -1028,6 +1086,65 @@ func writeStoreUnavailable(w http.ResponseWriter) {
 	_, _ = w.Write([]byte(`{"error":"rate_limit_unavailable","message":"rate limiter temporarily unavailable"}`))
 }
 
+// writeResponseTooLarge answers a downstream response that could not be
+// buffered.
+//
+// 500 rather than 503: the limiter and its store worked correctly, so
+// "rate_limit_unavailable" would blame the wrong subsystem and invite an
+// operator to look at the store. Nothing about this is temporary either — the
+// same request will overflow the same buffer every time — so the retry
+// semantics of 503 are wrong. 502 would claim a gateway relationship that does
+// not exist; the handler runs in this process. RFC 9110 15.6.1 "the server
+// encountered an unexpected condition that prevented it from fulfilling the
+// request" is exactly the situation: the server produced a response its own
+// configuration cannot deliver.
+func writeResponseTooLarge(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	_, _ = w.Write([]byte(`{"error":"response_too_large","message":"response exceeds the rate limiter buffer limit and cannot be delivered"}`))
+}
+
+// serveCaptured runs next under the writer required by cfg.ErrorPolicy and
+// reports the observed status, any failure to capture the response, and the
+// commit function that releases a buffered response to w.
+//
+// Capture failures are returned for the caller to observe exactly once outside
+// key and store locks. This also ensures a later store error cannot suppress
+// them.
+func serveCaptured(w http.ResponseWriter, r *http.Request, next http.Handler, cfg Config) (status int, commit func(), observations []error, captureErr error) {
+	if cfg.ErrorPolicy == ErrorPolicyFailOpen {
+		capture := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(capture, r)
+		return capture.status, func() {}, nil, nil
+	}
+
+	response := newResponseBuffer(cfg.ResponseBufferLimit)
+	next.ServeHTTP(response, r)
+	if response.flushAttempted {
+		observations = append(observations, ErrStreamingUnsupported)
+	}
+	if response.err != nil {
+		observations = append(observations, response.err)
+	}
+	return response.status, func() { response.flush(w) }, observations, response.err
+}
+
+func observeCaptureErrors(r *http.Request, cfg Config, observations []error) {
+	for _, err := range observations {
+		observeStoreError(r, cfg, err)
+	}
+}
+
+// releaseResponse commits the captured response, or replaces it with an
+// accurate error when it could not be captured at all.
+func releaseResponse(w http.ResponseWriter, captureErr error, commit func()) {
+	if captureErr != nil {
+		writeResponseTooLarge(w)
+		return
+	}
+	commit()
+}
+
 func waitContext(ctx context.Context, delay time.Duration) bool {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -1101,13 +1218,29 @@ func computeBackoff(cfg Config, count int) time.Duration {
 
 // responseBuffer delays committing the downstream response until persistence
 // succeeds, allowing the default policy to fail closed on Set errors.
+//
+// It deliberately implements neither Unwrap() http.ResponseWriter nor
+// http.Flusher:
+//
+//   - Unwrap would let http.ResponseController reach the real ResponseWriter
+//     and commit the status line behind the buffer's back, which is exactly
+//     the fail-closed guarantee this type exists to provide.
+//   - A Flush() method would make w.(http.Flusher) succeed and silently do
+//     nothing, so an SSE handler would appear to stream and instead hang until
+//     it returned.
+//
+// It does implement FlushError, which http.ResponseController.Flush prefers
+// over http.Flusher. That turns the generic "feature not supported" into an
+// error naming this middleware and the fix, without making the type falsely
+// advertise a Flusher to code that type-asserts.
 type responseBuffer struct {
-	header      http.Header
-	body        bytes.Buffer
-	status      int
-	wroteHeader bool
-	limit       int64
-	err         error
+	header         http.Header
+	body           bytes.Buffer
+	status         int
+	wroteHeader    bool
+	limit          int64
+	err            error
+	flushAttempted bool
 }
 
 func newResponseBuffer(limit int64) *responseBuffer {
@@ -1115,6 +1248,14 @@ func newResponseBuffer(limit int64) *responseBuffer {
 }
 
 func (s *responseBuffer) Header() http.Header { return s.header }
+
+// FlushError satisfies the interface http.ResponseController.Flush looks for
+// before http.Flusher. It never flushes; it records the attempt so the
+// middleware can report it and returns an actionable error.
+func (s *responseBuffer) FlushError() error {
+	s.flushAttempted = true
+	return ErrStreamingUnsupported
+}
 
 func (s *responseBuffer) WriteHeader(code int) {
 	if s.wroteHeader {
@@ -1134,8 +1275,18 @@ func (s *responseBuffer) Write(b []byte) (int, error) {
 		s.status = http.StatusOK
 		s.wroteHeader = true
 	}
+	// Sticky: once the buffer overflowed the response is unrecoverable, so
+	// every later write must fail too rather than silently appending to a
+	// body that will never be sent.
+	if s.err != nil {
+		return 0, s.err
+	}
 	if s.limit >= 0 && int64(s.body.Len()+len(b)) > s.limit {
-		s.err = ErrResponseTooLarge
+		s.err = &ResponseTooLargeError{
+			Limit:     s.limit,
+			Buffered:  int64(s.body.Len()),
+			Discarded: int64(len(b)),
+		}
 		return 0, s.err
 	}
 	return s.body.Write(b)

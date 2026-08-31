@@ -130,6 +130,10 @@ func TestAtomicStoreLimitsConcurrentMiddlewareInstances(t *testing.T) {
 			t.Fatalf("only %d handlers entered, want %d reservations", i, cfg.HardThreshold)
 		}
 	}
+	reservedBucket, ok, err := store.Get(t.Context(), "static")
+	if err != nil || !ok || len(reservedBucket.Attempts)+len(reservedBucket.Reservations) != cfg.HardThreshold {
+		t.Fatalf("live records while handlers run: bucket=%+v ok=%v err=%v, want %d", reservedBucket, ok, err, cfg.HardThreshold)
+	}
 	rejected := 0
 	for rejected < requests-cfg.HardThreshold {
 		select {
@@ -160,6 +164,10 @@ func TestAtomicStoreLimitsConcurrentMiddlewareInstances(t *testing.T) {
 	}
 	if passed != cfg.HardThreshold || rejected != requests-cfg.HardThreshold {
 		t.Fatalf("passed=%d rejected=%d, want %d and %d", passed, rejected, cfg.HardThreshold, requests-cfg.HardThreshold)
+	}
+	finalBucket, ok, err := store.Get(t.Context(), "static")
+	if err != nil || !ok || len(finalBucket.Attempts) != cfg.HardThreshold || len(finalBucket.Reservations) != 0 {
+		t.Fatalf("final hard-threshold state: bucket=%+v ok=%v err=%v", finalBucket, ok, err)
 	}
 }
 
@@ -1242,6 +1250,160 @@ func TestMemoryStoreDoesNotEvictActiveReservation(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreDoesNotEvictLiveAttemptAtCapacity(t *testing.T) {
+	useTummy(t)
+	now := tummy.Now()
+
+	for _, tc := range []struct {
+		name   string
+		insert func(context.Context, ratelimit.Store, ratelimit.AtomicStore) error
+	}{
+		{
+			name: "Set",
+			insert: func(ctx context.Context, store ratelimit.Store, _ ratelimit.AtomicStore) error {
+				return store.Set(ctx, "new", &ratelimit.Bucket{Attempts: []time.Time{now}})
+			},
+		},
+		{
+			name: "Transaction",
+			insert: func(ctx context.Context, _ ratelimit.Store, atomicStore ratelimit.AtomicStore) error {
+				return atomicStore.Transaction(ctx, []string{"new"}, func(buckets map[string]*ratelimit.Bucket) error {
+					buckets["new"] = &ratelimit.Bucket{Attempts: []time.Time{now}}
+					return nil
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, atomicStore := newAtomicStore(t, 1)
+			_ = ratelimit.Middleware(defaultConfig(store))
+			if err := store.Set(t.Context(), "live", &ratelimit.Bucket{Attempts: []time.Time{now}}); err != nil {
+				t.Fatalf("seed live attempt: %v", err)
+			}
+
+			if err := tc.insert(t.Context(), store, atomicStore); err == nil || !strings.Contains(err.Error(), "none are reclaimable") {
+				t.Fatalf("capacity error = %v, want no reclaimable buckets", err)
+			}
+			live, ok, err := store.Get(t.Context(), "live")
+			if err != nil || !ok || len(live.Attempts) != 1 || !live.Attempts[0].Equal(now) {
+				t.Fatalf("live bucket changed: bucket=%+v ok=%v err=%v", live, ok, err)
+			}
+			if bucket, ok, err := store.Get(t.Context(), "new"); err != nil || ok || bucket != nil {
+				t.Fatalf("failed insert partially persisted: bucket=%+v ok=%v err=%v", bucket, ok, err)
+			}
+		})
+	}
+}
+
+func TestMemoryStoreCapacityErrorFollowsPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		policy           ratelimit.ErrorPolicy
+		wantStatus       int
+		wantHandlerCalls int32
+	}{
+		{name: "default fail closed", wantStatus: http.StatusServiceUnavailable, wantHandlerCalls: 1},
+		{name: "fail open", policy: ratelimit.ErrorPolicyFailOpen, wantStatus: http.StatusUnauthorized, wantHandlerCalls: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _ := newAtomicStore(t, 1)
+			cfg := defaultConfig(store)
+			cfg.ErrorPolicy = tc.policy
+			cfg.KeyFunc = func(r *http.Request) []string { return []string{r.Header.Get("X-Key")} }
+			var handlerCalls atomic.Int32
+			var observed []error
+			cfg.OnError = func(_ *http.Request, err error) { observed = append(observed, err) }
+			handler := ratelimit.Middleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				handlerCalls.Add(1)
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			sendKey := func(key string) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodPost, "/login", nil)
+				req.Header.Set("X-Key", key)
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				return rec
+			}
+
+			if rec := sendKey("live"); rec.Code != http.StatusUnauthorized {
+				t.Fatalf("seed status = %d, want 401", rec.Code)
+			}
+			if rec := sendKey("new"); rec.Code != tc.wantStatus {
+				t.Fatalf("capacity status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if got := handlerCalls.Load(); got != tc.wantHandlerCalls {
+				t.Fatalf("handler calls = %d, want %d", got, tc.wantHandlerCalls)
+			}
+			if len(observed) != 1 {
+				t.Fatalf("OnError calls = %d, want 1: %v", len(observed), observed)
+			}
+			var storeErr *ratelimit.StoreError
+			if !errors.As(observed[0], &storeErr) || storeErr.Operation != ratelimit.StoreOperationTransaction || !strings.Contains(observed[0].Error(), "none are reclaimable") {
+				t.Fatalf("OnError = %#v, want transaction capacity StoreError", observed[0])
+			}
+			live, ok, err := store.Get(t.Context(), "live")
+			if err != nil || !ok || len(live.Attempts) != 1 {
+				t.Fatalf("live enforcing bucket changed: bucket=%+v ok=%v err=%v", live, ok, err)
+			}
+			if bucket, ok, err := store.Get(t.Context(), "new"); err != nil || ok || bucket != nil {
+				t.Fatalf("capacity failure persisted new bucket: bucket=%+v ok=%v err=%v", bucket, ok, err)
+			}
+		})
+	}
+}
+
+func TestMemoryStoreReclaimsAttemptsAfterObservedWindow(t *testing.T) {
+	useTummy(t)
+	store, _ := newAtomicStore(t, 1)
+	cfg := defaultConfig(store)
+	cfg.Window = time.Minute
+	_ = ratelimit.Middleware(cfg)
+	now := tummy.Now()
+	if err := store.Set(t.Context(), "expired", &ratelimit.Bucket{Attempts: []time.Time{now}}); err != nil {
+		t.Fatalf("seed attempt: %v", err)
+	}
+
+	tummy.AddDuration(cfg.Window + time.Nanosecond)
+	if err := store.Set(t.Context(), "new", &ratelimit.Bucket{Attempts: []time.Time{tummy.Now()}}); err != nil {
+		t.Fatalf("reclaim expired attempt: %v", err)
+	}
+	if bucket, ok, err := store.Get(t.Context(), "expired"); err != nil || ok || bucket != nil {
+		t.Fatalf("expired bucket was not reclaimed: bucket=%+v ok=%v err=%v", bucket, ok, err)
+	}
+}
+
+func TestMemoryStoreUsesLongestObservedWindow(t *testing.T) {
+	useTummy(t)
+	store, _ := newAtomicStore(t, 1)
+	short := defaultConfig(store)
+	short.Window = time.Minute
+	long := defaultConfig(store)
+	long.Window = 2 * time.Minute
+	_ = ratelimit.Middleware(short)
+	_ = ratelimit.Middleware(long)
+	now := tummy.Now()
+	if err := store.Set(t.Context(), "shared", &ratelimit.Bucket{Attempts: []time.Time{now}}); err != nil {
+		t.Fatalf("seed shared attempt: %v", err)
+	}
+
+	tummy.AddDuration(90 * time.Second)
+	if err := store.Set(t.Context(), "too-soon", &ratelimit.Bucket{Attempts: []time.Time{tummy.Now()}}); err == nil {
+		t.Fatal("store reclaimed bucket before longest observed window elapsed")
+	}
+	shared, ok, err := store.Get(t.Context(), "shared")
+	if err != nil || !ok || len(shared.Attempts) != 1 {
+		t.Fatalf("shared bucket changed before longest window: bucket=%+v ok=%v err=%v", shared, ok, err)
+	}
+
+	tummy.AddDuration(31 * time.Second)
+	if err := store.Set(t.Context(), "new", &ratelimit.Bucket{Attempts: []time.Time{tummy.Now()}}); err != nil {
+		t.Fatalf("reclaim after longest window: %v", err)
+	}
+	if bucket, ok, err := store.Get(t.Context(), "shared"); err != nil || ok || bucket != nil {
+		t.Fatalf("shared bucket was not reclaimed: bucket=%+v ok=%v err=%v", bucket, ok, err)
+	}
+}
+
 func TestMemoryStoreEvictsExpiredLeasedReservationAtCapacity(t *testing.T) {
 	useTummy(t)
 	now := tummy.Now()
@@ -1371,6 +1533,7 @@ func TestInvalidConfigPanics(t *testing.T) {
 		{"negative window", func(cfg *ratelimit.Config) { cfg.Window = -time.Second }},
 		{"negative soft threshold", func(cfg *ratelimit.Config) { cfg.SoftThreshold = -1 }},
 		{"negative hard threshold", func(cfg *ratelimit.Config) { cfg.HardThreshold = -1 }},
+		{"both thresholds disabled", func(cfg *ratelimit.Config) { cfg.SoftThreshold, cfg.HardThreshold = 0, 0 }},
 		{"equal thresholds", func(cfg *ratelimit.Config) { cfg.SoftThreshold = cfg.HardThreshold }},
 		{"soft above hard", func(cfg *ratelimit.Config) { cfg.SoftThreshold = cfg.HardThreshold + 1 }},
 		{"negative backoff base", func(cfg *ratelimit.Config) { cfg.BackoffBase = -time.Second }},

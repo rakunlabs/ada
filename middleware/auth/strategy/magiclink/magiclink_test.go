@@ -2,6 +2,7 @@ package magiclink_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -90,6 +91,25 @@ func TestVerifyURLUsesMountedCallbackBase(t *testing.T) {
 
 	if u.Query().Get("token") == "" {
 		t.Error("verify url carries no token")
+	}
+}
+
+func TestSendBodyOver64KiBReturns413(t *testing.T) {
+	s, capture, _ := newStrategy(t)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", (1<<16)+1)))
+	r.Header.Set("Content-Type", "application/json")
+	_, _, _ = s.Login(rec, r)
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge || body["error"] != "body_too_large" || !strings.Contains(body["message"], "65536") {
+		t.Fatalf("response = %d %s", rec.Code, rec.Body)
+	}
+	if capture.calls != 0 {
+		t.Fatal("sender called for oversized body")
 	}
 }
 

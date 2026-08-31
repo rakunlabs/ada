@@ -10,20 +10,49 @@ import (
 	"github.com/rakunlabs/tummy"
 )
 
-// DefaultMemoryCapacity is the LRU cap applied by NewMemoryStore when the
-// caller passes a non-positive capacity. 10_000 entries is enough to hold
-// independent buckets for a sustained attack while staying well under 5 MB.
+// DefaultMemoryCapacity is the cap applied by NewMemoryStore when the caller
+// passes a non-positive capacity. It bounds bucket keys, not the attempt and
+// reservation records retained inside each bucket.
 const DefaultMemoryCapacity = 10_000
 
 // NewMemoryStore returns an in-process Store that also implements AtomicStore.
-// Capacity is the LRU cap; when reached, the least-recently-used bucket without
-// an active reservation is dropped. An update fails without changing state if
-// every possible eviction would discard an in-flight reservation. Pass 0 (or
-// negative) for the default.
+// Pass 0 (or negative) for DefaultMemoryCapacity.
+//
+// # Capacity is enforced, never bypassed
+//
+// Capacity is a hard bound on the number of buckets, but it is deliberately
+// not a plain LRU. Dropping a bucket that is still enforcing a limit is a
+// rate-limit bypass: the next request for that key sees "no attempts yet", so
+// anyone who controls the key input can reset their own counter by pushing
+// enough unrelated keys through the store. Reclamation is therefore restricted
+// to buckets that can no longer change a decision:
+//
+//  1. Empty buckets and buckets holding only expired reservation leases.
+//  2. Buckets whose every attempt is older than the observed limiter Window,
+//     which the limiter would prune to nothing on its next read anyway.
+//     Middleware supplies that window through WindowObserver; a store used
+//     without a Middleware never learns it and skips this class.
+//  3. Nothing else. A bucket with an in-flight reservation, or with an attempt
+//     that still counts, is never discarded to make room.
+//
+// When capacity pressure leaves nothing reclaimable, the write fails with an
+// error instead of silently weakening the limiter. Config.ErrorPolicy then
+// decides: the default ErrorPolicyFailClosed rejects the request with 503,
+// ErrorPolicyFailOpen lets it through. That is the tradeoff — under sustained
+// pressure from more distinct live keys than capacity, this store degrades
+// availability rather than enforcement, and the fix is to raise capacity or
+// move to a shared backend.
+//
+// Capacity does not bound total memory. Each counted attempt in Window needs a
+// timestamp, and each in-flight atomic request needs reservation and lease
+// records. HardThreshold bounds the combined live attempts and reservations for
+// a key under a fixed limiter configuration. With only SoftThreshold enabled,
+// exact sliding-window backoff decisions require retaining every attempt still
+// in Window; BackoffMax caps delay, not retained state.
 //
 // The store has no automatic TTL. The limiter prunes timestamps inside each
 // Bucket, so a second, coarser expiry could drop active state mid-window and
-// silently weaken the defense. Memory pressure is bounded by the LRU cap.
+// silently weaken the defense.
 //
 // The returned Store is safe for concurrent use. Its transactions coordinate
 // every Middleware instance that shares this value, but as an in-process store
@@ -44,6 +73,24 @@ type memoryStore struct {
 	capacity int
 	entries  map[string]*list.Element
 	lru      *list.List
+	// window is the longest Config.Window observed through ObserveWindow.
+	// Zero means unknown, in which case no bucket holding an attempt is
+	// considered reclaimable.
+	window time.Duration
+}
+
+// ObserveWindow implements windowObserver. It keeps the longest window seen so
+// that a store shared by limiters with different windows never reclaims a
+// bucket the slowest of them still needs.
+func (s *memoryStore) ObserveWindow(window time.Duration) {
+	if window <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if window > s.window {
+		s.window = window
+	}
 }
 
 type memoryEntry struct {
@@ -72,9 +119,9 @@ func (s *memoryStore) Set(_ context.Context, key string, bucket *Bucket) error {
 		return nil
 	}
 	if _, ok := s.entries[key]; !ok && len(s.entries) >= s.capacity {
-		oldest := s.oldestEvictableLocked(tummy.Now())
+		oldest := s.oldestReclaimableLocked(tummy.Now())
 		if oldest == nil {
-			return fmt.Errorf("ratelimit: memory capacity %d is occupied by active reservations", s.capacity)
+			return s.capacityError(1)
 		}
 		s.deleteLocked(oldest.Value.(*memoryEntry).key)
 	}
@@ -131,12 +178,12 @@ func (s *memoryStore) Transaction(ctx context.Context, keys []string, fn func(ma
 			continue
 		}
 		unrequested++
-		if bucketHasActiveReservation(element.Value.(*memoryEntry).bucket, now) {
+		if !s.reclaimableLocked(element.Value.(*memoryEntry).bucket, now) {
 			pinned++
 		}
 	}
 	if len(desired)+pinned > s.capacity {
-		return fmt.Errorf("ratelimit: atomic transaction needs %d buckets plus %d active reservations, memory capacity is %d", len(desired), pinned, s.capacity)
+		return s.capacityError(len(desired) + pinned - s.capacity)
 	}
 	neededEvictions := len(desired) + unrequested - s.capacity
 	if neededEvictions < 0 {
@@ -145,7 +192,7 @@ func (s *memoryStore) Transaction(ctx context.Context, keys []string, fn func(ma
 	evictions := make([]string, 0, neededEvictions)
 	for element := s.lru.Back(); element != nil && len(evictions) < neededEvictions; element = element.Prev() {
 		entry := element.Value.(*memoryEntry)
-		if _, ok := requested[entry.key]; ok || bucketHasActiveReservation(entry.bucket, now) {
+		if _, ok := requested[entry.key]; ok || !s.reclaimableLocked(entry.bucket, now) {
 			continue
 		}
 		evictions = append(evictions, entry.key)
@@ -189,15 +236,45 @@ func (s *memoryStore) deleteLocked(key string) {
 	s.lru.Remove(element)
 }
 
-func (s *memoryStore) oldestEvictableLocked(now time.Time) *list.Element {
+func (s *memoryStore) oldestReclaimableLocked(now time.Time) *list.Element {
 	for element := s.lru.Back(); element != nil; element = element.Prev() {
-		entry := element.Value.(*memoryEntry)
-		if bucketHasActiveReservation(entry.bucket, now) {
-			continue
+		if s.reclaimableLocked(element.Value.(*memoryEntry).bucket, now) {
+			return element
 		}
-		return element
 	}
 	return nil
+}
+
+// reclaimableLocked reports whether dropping bucket is guaranteed not to change
+// any future limiter decision. Anything else is live state, and discarding it
+// would hand the key owner a free reset of their own limit.
+func (s *memoryStore) reclaimableLocked(bucket *Bucket, now time.Time) bool {
+	if bucket == nil {
+		return true
+	}
+	if bucketHasActiveReservation(bucket, now) {
+		return false
+	}
+	if len(bucket.Attempts) == 0 {
+		return true
+	}
+	if s.window <= 0 {
+		// No limiter has told us its Window, so we cannot prove that these
+		// attempts have aged out. Assume they still count.
+		return false
+	}
+	cutoff := now.Add(-s.window)
+	for _, attempt := range bucket.Attempts {
+		if attempt.After(cutoff) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *memoryStore) capacityError(short int) error {
+	return fmt.Errorf("ratelimit: memory store at capacity %d, %d more bucket(s) needed and none are reclaimable "+
+		"(evicting a bucket that is still enforcing a limit would reset it); raise NewMemoryStore capacity", s.capacity, short)
 }
 
 func bucketHasActiveReservation(bucket *Bucket, now time.Time) bool {

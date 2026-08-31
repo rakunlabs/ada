@@ -19,6 +19,7 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/issuer/backend"
 	"github.com/rakunlabs/ada/middleware/auth/sessionstore"
 	"github.com/rakunlabs/ada/middleware/auth/strategy/local"
+	"github.com/rakunlabs/ada/middleware/auth/strategy/totp"
 )
 
 // secondFactor is a stand-in for a TOTP verifier: the code is always "123456".
@@ -242,6 +243,24 @@ func TestSecondFactorRejectsWrongCode(t *testing.T) {
 
 	if cookieNamed(rec, "auth_session") != nil {
 		t.Fatal("a wrong code must not produce a session")
+	}
+}
+
+func TestTOTPBodyOver16KiBReturns413(t *testing.T) {
+	sf := totp.NewSecondFactor(totp.Default(), func(context.Context, *identity.Identity) (*totp.Secret, error) {
+		return totp.SecretFromBytes([]byte("01234567890123456789")), nil
+	})
+	t.Cleanup(func() { _ = sf.Close() })
+	_, mux := newMFAAuth(t, sf)
+	pending := cookieNamed(login(t, mux), "auth_mfa")
+
+	rec := postMFA(t, mux, pending, strings.Repeat("x", (1<<14)+1))
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge || body["error"] != "body_too_large" || !strings.Contains(body["message"], "16384") {
+		t.Fatalf("response = %d %s", rec.Code, rec.Body)
 	}
 }
 

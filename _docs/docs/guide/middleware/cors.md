@@ -304,6 +304,14 @@ The middleware supports wildcard patterns in `AllowOrigins`:
 - `https://api-?.example.com` - matches `https://api-1.example.com`, `https://api-2.example.com`, etc.
 
 Patterns are converted to regular expressions internally for efficient matching.
+Pattern matching is limited to 326-byte origins: a 64-byte scheme budget,
+`://`, the 253-byte DNS host maximum, and `:65535`. This includes legal HTTP(S)
+origins with a maximum-length DNS host and port while bounding attacker-controlled
+regular-expression input. Exact allowlist entries are not subject to this cap.
+
+Set `OnOriginTooLong` to observe requests denied because wildcard matching was
+skipped. Ordinary origins denied by policy do not invoke the callback. If the
+callback logs the origin, bound or sanitize the value first.
 
 ## Best Practices
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/rakunlabs/ada/middleware/auth/cookie"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 	"github.com/rakunlabs/ada/middleware/auth/issuer"
 	"github.com/rakunlabs/ada/middleware/auth/session"
 )
@@ -46,6 +47,10 @@ type SecondFactor interface {
 	// Return nil to complete the login. Return an error to reject it; the
 	// caller writes the response, so Verify must not.
 	Verify(ctx context.Context, r *http.Request, id *identity.Identity) error
+}
+
+type secondFactorWithWriter interface {
+	VerifyWithWriter(context.Context, http.ResponseWriter, *http.Request, *identity.Identity) error
 }
 
 // SecondFactorFunc adapts two functions to SecondFactor.
@@ -304,7 +309,18 @@ func (a *Auth) handleMFA(w http.ResponseWriter, r *http.Request) {
 		final.Claims = nil
 	}
 
-	if err := a.secondFactor.Verify(r.Context(), r, &final); err != nil {
+	var verifyErr error
+	if sf, ok := a.secondFactor.(secondFactorWithWriter); ok {
+		verifyErr = sf.VerifyWithWriter(r.Context(), w, r, &final)
+	} else {
+		verifyErr = a.secondFactor.Verify(r.Context(), r, &final)
+	}
+	if verifyErr != nil {
+		if status, message, tooLarge := bodylimit.Reject(verifyErr); tooLarge {
+			writeError(w, status, bodylimit.Code, message)
+
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "mfa_invalid", "invalid code")
 
 		return

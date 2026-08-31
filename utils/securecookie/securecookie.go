@@ -33,7 +33,28 @@ import (
 const (
 	// DefaultMaxAge is the default validity window for an encoded value.
 	DefaultMaxAge = 30 * 24 * 60 * 60 // 30 days in seconds
-	// DefaultMaxLength is the default maximum length of an encoded value.
+
+	// DefaultMaxLength is the default maximum length, in bytes, of an encoded
+	// value. It budgets the base64 token returned by Encode, not the input
+	// payload, cookie name, or attributes. RFC 6265 section 6.1 recommends that
+	// general-use user agents support at least 4096 bytes per cookie including
+	// its name, value, and attributes, but limits vary. An encoded value within
+	// this limit is therefore not guaranteed to produce a Set-Cookie header that
+	// fits every user agent's cookie budget.
+	//
+	// There is no fixed input-payload limit because serialization overhead
+	// depends on the value's shape and types, serializer, and codec configuration.
+	// As a reference, tests using GobSerializer, the name "session", and a
+	// map[string]any containing one string measured about 2224 bytes sign-only
+	// and 2208 bytes with AES before reaching this limit. Treat those figures as
+	// approximate for that tested configuration, not as a general capacity
+	// guarantee. A cookie store using key rotation encodes with its first codec,
+	// whose configuration determines the encoded size.
+	//
+	// Both Encode and Decode fail with ErrValueTooLong once the encoded value
+	// exceeds the limit. Use WithMaxLength or Codec.SetMaxLength to change it;
+	// zero disables the check. A higher limit is useful only when the client and
+	// intermediaries permit the resulting complete cookie size.
 	DefaultMaxLength = 4096
 )
 
@@ -65,8 +86,9 @@ func WithMinAge(seconds int) Option {
 	return func(c *Codec) { c.minAge = int64(seconds) }
 }
 
-// WithMaxLength sets the maximum length of the encoded value. A value of 0
-// disables the check. Defaults to DefaultMaxLength.
+// WithMaxLength sets the maximum length in bytes of the encoded value. Zero
+// disables the check; a negative value rejects all encoded values. The default
+// is DefaultMaxLength.
 func WithMaxLength(n int) Option {
 	return func(c *Codec) { c.maxLength = n }
 }
@@ -240,6 +262,15 @@ func (c *Codec) Decode(name, encoded string, dst any) error {
 // store) before the codec is shared across goroutines.
 func (c *Codec) SetMaxAge(seconds int) {
 	c.maxAge = int64(seconds)
+}
+
+// SetMaxLength sets the maximum length in bytes of the encoded value for both
+// encoding and decoding. Zero disables the check; a negative value rejects all
+// encoded values. See DefaultMaxLength for what the limit counts. It is not
+// safe to call concurrently with Encode or Decode; configure the codec before
+// sharing it across goroutines.
+func (c *Codec) SetMaxLength(n int) {
+	c.maxLength = n
 }
 
 func (c *Codec) computeMAC(name, ts, b64 string) []byte {

@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/rakunlabs/ada/middleware/auth/identity"
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
+
+// maxLoginBody caps passkey begin and finish request bodies at 128 KiB. It must
+// be enforced before detectPhase so a truncated finish cannot become a begin.
+const maxLoginBody = 1 << 17
 
 // Strategy implements strategy.Authenticator for WebAuthn login.
 //
@@ -311,8 +315,12 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<17)) // 128 KiB caps attestation+assertion bodies
+	body, err := bodylimit.Read(w, r, maxLoginBody)
 	if err != nil {
+		if status, message, tooLarge := bodylimit.Reject(err); tooLarge {
+			writeJSONError(w, status, bodylimit.Code, message)
+			return nil, strategy.OutcomeFailed, nil
+		}
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "read body")
 		return nil, strategy.OutcomeFailed, nil
 	}

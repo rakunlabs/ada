@@ -50,6 +50,28 @@ func TestLimitAllAllowsExactlyN(t *testing.T) {
 	}
 }
 
+func TestSimpleLimiterPanicsOnNonPositiveConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		limit  int
+		window time.Duration
+	}{
+		{name: "zero limit", limit: 0, window: time.Minute},
+		{name: "negative limit", limit: -1, window: time.Minute},
+		{name: "zero window", limit: 1, window: 0},
+		{name: "negative window", limit: 1, window: -time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("LimitAll accepted non-positive configuration")
+				}
+			}()
+			_ = ratelimit.LimitAll(tc.limit, tc.window)
+		})
+	}
+}
+
 // TestLimitByIPIsPerClient verifies that distinct client IPs have independent
 // budgets.
 func TestLimitByIPIsPerClient(t *testing.T) {

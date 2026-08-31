@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 )
 
 // DiscoveryDocument is the subset of the OpenID Connect Discovery 1.0 response
@@ -80,7 +81,7 @@ func Discover(ctx context.Context, client *http.Client, issuerURL string) (*Disc
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := bodylimit.ReadUpstream(resp.Body, maxUpstreamResponseBytes)
 	if err != nil {
 		return nil, fmt.Errorf("discovery: read body: %w", err)
 	}

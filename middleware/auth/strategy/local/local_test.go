@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -115,6 +116,41 @@ func TestLogin_GET_Is405(t *testing.T) {
 	}
 	if rec.Code != 405 {
 		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestRequestBodiesOver64KiBReturn413(t *testing.T) {
+	registrar := func(context.Context, RegisterRequest) (*identity.Identity, error) {
+		t.Fatal("registrar called for oversized body")
+		return nil, nil
+	}
+	s := New("local", aliceVerifier, WithRegistrar(registrar))
+
+	for _, test := range []struct {
+		name string
+		call func(*httptest.ResponseRecorder, *http.Request)
+	}{
+		{name: "login", call: func(w *httptest.ResponseRecorder, r *http.Request) { _, _, _ = s.Login(w, r) }},
+		{name: "register", call: func(w *httptest.ResponseRecorder, r *http.Request) { _, _, _ = s.Register(w, r) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", maxBodyBytes+1)))
+			req.Header.Set("Content-Type", "application/json")
+			test.call(rec, req)
+			assertBodyTooLarge(t, rec, maxBodyBytes)
+		})
+	}
+}
+
+func assertBodyTooLarge(t *testing.T, rec *httptest.ResponseRecorder, limit int) {
+	t.Helper()
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge || body["error"] != "body_too_large" || !strings.Contains(body["message"], fmt.Sprint(limit)) {
+		t.Fatalf("response = %d %s", rec.Code, rec.Body)
 	}
 }
 

@@ -1,8 +1,10 @@
 package sessions_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rakunlabs/ada/utils/securecookie"
@@ -154,6 +156,60 @@ func TestCookieStore_Options(t *testing.T) {
 	}
 	if c.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("samesite = %v", c.SameSite)
+	}
+}
+
+func TestCookieStore_MaxLength(t *testing.T) {
+	store := newStore()
+
+	value := strings.Repeat("a", 6000)
+
+	r1 := httptest.NewRequest(http.MethodGet, "/", nil)
+	w1 := httptest.NewRecorder()
+	sess, _ := store.Get(r1, "auth")
+	sess.Values["v"] = value
+
+	if err := sess.Save(r1, w1); !errors.Is(err, securecookie.ErrValueTooLong) {
+		t.Fatalf("default limit: want ErrValueTooLong, got %v", err)
+	}
+
+	store.MaxLength(32 * 1024)
+
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	w2 := httptest.NewRecorder()
+	sess2, _ := store.Get(r2, "auth")
+	sess2.Values["v"] = value
+
+	if err := sess2.Save(r2, w2); err != nil {
+		t.Fatalf("save after MaxLength: %v", err)
+	}
+
+	encoded := w2.Result().Cookies()[0].Value
+	if len(encoded) <= securecookie.DefaultMaxLength {
+		t.Fatalf("cookie is %d bytes, expected to exceed the default limit", len(encoded))
+	}
+
+	// Decoding honours the raised limit too, otherwise the cookie would be
+	// writable but unreadable.
+	loaded, err := store.Get(readBack(t, w2), "auth")
+	if err != nil {
+		t.Fatalf("load after MaxLength: %v", err)
+	}
+	if loaded.IsNew || loaded.Values["v"] != value {
+		t.Fatalf("round-trip failed: isNew=%v", loaded.IsNew)
+	}
+
+	// Every codec is updated, so key rotation keeps working.
+	rotated := sessions.NewCookieStore(
+		securecookie.GenerateRandomKey(64), securecookie.GenerateRandomKey(32),
+		securecookie.GenerateRandomKey(64), securecookie.GenerateRandomKey(32),
+	)
+	rotated.MaxLength(32 * 1024)
+
+	for i, c := range rotated.Codecs {
+		if _, err := c.Encode("auth", map[string]any{"v": value}); err != nil {
+			t.Fatalf("codec %d: %v", i, err)
+		}
 	}
 }
 

@@ -252,6 +252,10 @@ Discovery happens once at construction. `New` logs a failure and returns a
 strategy that still works with explicitly configured endpoints; use
 `NewWithContext` to get the error and control the timeout.
 
+Discovery documents and OAuth2 token, UserInfo, and JWKS responses are each
+limited to 1 MiB. A response that exceeds the limit is rejected as an upstream
+provider failure, not reported as a client `413`.
+
 #### PKCE (Proof Key for Code Exchange)
 
 PKCE is **enabled by default** for the authorization code flow (RFC 7636). The strategy generates a `code_verifier` + `code_challenge` pair per authorization request and includes them in the flow automatically.
@@ -744,8 +748,8 @@ The UI groups them: form-based strategies (local, LDAP, magic link, password-flo
 | `Cookie.Secure` | `cookie.SecureMode` | `auto` | `auto` (set when the request is HTTPS), `always`, or `never` |
 | `Cookie.DisableHTTPOnly` | `bool` | `false` | Expose the cookie to JavaScript. **HttpOnly is on by default** |
 | `Cookie.SameSite` | `http.SameSite` | `Lax` | Cookie SameSite policy |
-| `IssuerConfig.AccessTTL` | `time.Duration` | `15m` | Access token lifetime |
-| `IssuerConfig.RefreshTTL` | `time.Duration` | `7d` | Refresh token lifetime |
+| `IssuerConfig.AccessTTL` | `time.Duration` | `15m` | Access token lifetime, clamped to `RefreshTTL` |
+| `IssuerConfig.RefreshTTL` | `time.Duration` | `7d` | Refresh token and maximum session lifetime |
 | `IssuerConfig.DisableRefreshRotation` | `bool` | `false` | Turn off refresh rotation. **Rotation is on by default** |
 | `MFA.CookieName` | `string` | `"auth_mfa"` | Pending-login cookie (only used with `WithSecondFactor`) |
 | `MFA.TTL` | `time.Duration` | `5m` | How long the user has to complete the second factor |
@@ -790,6 +794,16 @@ set — the login **fails** rather than falling back to an unverified payload.
 set on a trusted channel; it turns the `id_token` into an unauthenticated
 assertion of whatever the caller wants.
 
+JWKS keys are cached. A successful fetch starts the normal one-minute refresh
+cooldown used to prevent unknown-key requests from amplifying traffic to the
+IdP. A failed fetch instead uses a bounded two-second retry backoff, so a brief
+provider outage does not suppress retries for a full minute. Concurrent misses
+share one refresh, while lookups of cached keys continue without waiting for
+the IdP. JWKS requests use the caller or configured client timeout, with a
+30-second fallback only when neither supplies a deadline. An ID token with no
+`kid` is accepted only when the JWKS has exactly one usable key; with multiple
+keys it fails immediately as ambiguous without another fetch.
+
 State, nonce and the PKCE verifier live together in one `HttpOnly` cookie
 (`auth_flow_<name>`), cleared after a single use. Override its attributes with
 `Options.FlowCookie` if the callback lands on a different subdomain.
@@ -810,6 +824,24 @@ With default `Base: "/"`:
 | POST | `/login/mfa` | Complete a second factor (only with `WithSecondFactor`) |
 | POST | `/logout` | Revoke session and clear cookie |
 | GET | `/login/status` | Status iframe (for popup flow) |
+
+### Request body limits
+
+Auth endpoints enforce the following request-body caps:
+
+| Request | Limit |
+|---|---:|
+| Local login and registration | 64 KiB |
+| LDAP login | 64 KiB |
+| Magic-link request | 64 KiB |
+| OAuth2 password form | 64 KiB |
+| TOTP second factor | 16 KiB |
+| Passkey login begin or finish | 128 KiB |
+
+An oversized body receives JSON `413 Content Too Large` with error code
+`body_too_large`; its message includes the applicable byte limit. The body is
+rejected before JSON or form parsing, so it is not misreported as malformed
+input.
 
 `POST /login/refresh` rotates the server-side token pair and returns
 `{"identity": ...}`. It no longer returns `session_id`; the opaque session ID
@@ -988,6 +1020,11 @@ The session is backed by an internal **issuer** that mints opaque access/refresh
 - Access tokens live for 15 minutes (configurable)
 - Refresh tokens live for 7 days (configurable), rotated on each use
 - Session state is stored in a pluggable backend (in-memory by default)
+
+`AccessTTL` never extends past `RefreshTTL`; if configured longer, access-token
+expiry is clamped to refresh expiry. A strategy-supplied `Identity.ExpiresAt`
+is also clamped to the resulting access-token expiry, while an earlier identity
+expiry is preserved.
 
 ### Persisting sessions
 

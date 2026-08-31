@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -27,8 +26,14 @@ import (
 
 	"github.com/rakunlabs/ada/middleware/auth/cookie"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 	"github.com/rakunlabs/ada/utils/proxy"
+)
+
+const (
+	maxRequestBodyBytes      = 1 << 16
+	maxUpstreamResponseBytes = 1 << 20
 )
 
 // Config holds an OAuth2 provider's endpoints and credentials.
@@ -518,8 +523,13 @@ func (s *Strategy) handlePassword(w http.ResponseWriter, r *http.Request) (*iden
 		Password string `json:"password"`
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	body, err := bodylimit.Read(w, r, maxRequestBodyBytes)
 	if err != nil {
+		if status, message, tooLarge := bodylimit.Reject(err); tooLarge {
+			writeError(w, status, bodylimit.Code, message)
+
+			return nil, strategy.OutcomeFailed, nil
+		}
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 
 		return nil, strategy.OutcomeFailed, nil
@@ -617,7 +627,7 @@ func (s *Strategy) tokenRequest(ctx context.Context, values url.Values) ([]byte,
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := bodylimit.ReadUpstream(resp.Body, maxUpstreamResponseBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -764,7 +774,7 @@ func (s *Strategy) fetchUserInfo(ctx context.Context, accessToken string) (map[s
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := bodylimit.ReadUpstream(resp.Body, maxUpstreamResponseBytes)
 	if err != nil {
 		return nil, err
 	}

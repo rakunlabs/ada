@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -19,8 +18,12 @@ import (
 
 	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
+
+// maxBodyBytes caps login request bodies at 64 KiB.
+const maxBodyBytes = 1 << 16
 
 // ---------------------------------------------------------------------------
 // LDAP abstraction — users supply an implementation backed by any LDAP library.
@@ -222,9 +225,9 @@ func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	username, password, err := s.readCredentials(r)
+	username, password, err := s.readCredentials(w, r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		writeBadRequest(w, err)
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -381,10 +384,10 @@ func firstValue(entry Entry, attr string) string {
 
 // readCredentials extracts the username and password from a JSON or
 // form-encoded request body.
-func (s *Strategy) readCredentials(r *http.Request) (string, string, error) {
+func (s *Strategy) readCredentials(w http.ResponseWriter, r *http.Request) (string, string, error) {
 	contentType := r.Header.Get("Content-Type")
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	body, err := bodylimit.Read(w, r, maxBodyBytes)
 	if err != nil {
 		return "", "", fmt.Errorf("read body: %w", err)
 	}
@@ -444,6 +447,16 @@ func escapeLDAPFilter(s string) string {
 	}
 
 	return b.String()
+}
+
+func writeBadRequest(w http.ResponseWriter, err error) {
+	if status, message, tooLarge := bodylimit.Reject(err); tooLarge {
+		writeError(w, status, bodylimit.Code, message)
+
+		return
+	}
+
+	writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 }
 
 // writeError writes a JSON error response to w.

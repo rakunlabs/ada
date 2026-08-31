@@ -613,17 +613,18 @@ func TestSendZipUsesNormalizedSafeNames(t *testing.T) {
 	}
 }
 
-// TestBindForwardsOptions is the escape hatch for the 1 MiB default body
-// limit. The migration notes tell users to pass bind.WithBodyLimit(0), but
-// Context.Bind took no options, so a Context handler had no way to do it and
-// had to bypass Bind entirely.
+// TestBindForwardsOptions covers Context.Bind passing options through to
+// bind.Bind. Without it a Context handler could not set a per-endpoint body
+// limit at all, and had to bypass Bind entirely.
 func TestBindForwardsOptions(t *testing.T) {
 	type payload struct {
 		Data string `json:"data"`
 	}
 
+	const size = (1 << 20) + 1
+
 	body := func() *strings.Reader {
-		big := strings.Repeat("x", int(bind.DefaultBodyLimit)+1)
+		big := strings.Repeat("x", size)
 
 		return strings.NewReader(`{"data":"` + big + `"}`)
 	}
@@ -635,24 +636,28 @@ func TestBindForwardsOptions(t *testing.T) {
 		return r
 	}
 
-	t.Run("default limit still applies", func(t *testing.T) {
+	// The 1 MiB cap that used to live in bind is gone: it only ever protected
+	// requests that reached Bind, and rejected bodies the rest of the service
+	// accepted. middleware/bodylimit owns the limit now.
+	t.Run("no limit by default", func(t *testing.T) {
 		c := NewContext(httptest.NewRecorder(), request())
 
 		var obj payload
-		if err := c.Bind(&obj); err == nil {
-			t.Fatal("Bind accepted a body over the default limit")
+		if err := c.Bind(&obj); err != nil {
+			t.Fatalf("Bind rejected a %d byte body with no limit configured: %v", size, err)
+		}
+		if len(obj.Data) != size {
+			t.Fatalf("bound %d bytes, want %d", len(obj.Data), size)
 		}
 	})
 
-	t.Run("option disables the limit", func(t *testing.T) {
+	t.Run("option applies a limit", func(t *testing.T) {
 		c := NewContext(httptest.NewRecorder(), request())
 
 		var obj payload
-		if err := c.Bind(&obj, bind.WithBodyLimit(0)); err != nil {
-			t.Fatalf("Bind with WithBodyLimit(0): %v", err)
-		}
-		if len(obj.Data) != int(bind.DefaultBodyLimit)+1 {
-			t.Fatalf("bound %d bytes, want %d", len(obj.Data), int(bind.DefaultBodyLimit)+1)
+		err := c.Bind(&obj, bind.WithBodyLimit(1024))
+		if !errors.Is(err, bind.ErrBodyTooLarge) {
+			t.Fatalf("Bind with WithBodyLimit(1024) returned %v, want an ErrBodyTooLarge", err)
 		}
 	})
 

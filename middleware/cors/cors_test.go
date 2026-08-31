@@ -1,10 +1,12 @@
 package cors
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -382,6 +384,165 @@ func TestMiddlewarePanicsForInvalidConfig(t *testing.T) {
 			}()
 			tt.cors.Middleware()
 		})
+	}
+}
+
+// hostOfLength builds a dotted host name of exactly n bytes ending in
+// ".example.com".
+func hostOfLength(t *testing.T, n int) string {
+	t.Helper()
+	const suffix = ".example.com"
+	if n <= len(suffix) {
+		t.Fatalf("host length %d is too short for %q", n, suffix)
+	}
+
+	remaining := n - len(suffix)
+	var host strings.Builder
+	for remaining > 63 {
+		host.WriteString(strings.Repeat("a", 63))
+		host.WriteByte('.')
+		remaining -= 64
+	}
+	if remaining == 0 {
+		t.Fatalf("cannot construct a legal DNS host of length %d with suffix %q", n, suffix)
+	}
+	host.WriteString(strings.Repeat("a", remaining))
+	host.WriteString(suffix)
+
+	return host.String()
+}
+
+func TestLongOriginIsMatchedAgainstPatterns(t *testing.T) {
+	longPortedOrigin := "https://" + hostOfLength(t, maxOriginHostLen) + ":65535"
+	if len(longPortedOrigin) <= 261 {
+		t.Fatalf("origin length = %d, must exercise the old 261-byte cap", len(longPortedOrigin))
+	}
+
+	tests := []struct {
+		name    string
+		pattern string
+		origin  string
+	}{
+		{name: "maximum DNS host and port", pattern: "https://*.example.com:65535", origin: longPortedOrigin},
+		{
+			name:    "long scheme",
+			pattern: "com.example.application.deep-link-scheme://*.example.com",
+			origin:  "com.example.application.deep-link-scheme://" + hostOfLength(t, 253),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := (&Cors{AllowOrigins: []string{tt.pattern}}).Middleware()(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusAccepted)
+				}))
+
+			req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+			req.Header.Set(headerOrigin, tt.origin)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if got := rec.Header().Get(headerAccessControlAllowOrigin); got != tt.origin {
+				t.Fatalf("Access-Control-Allow-Origin = %q, want %q (len %d)", got, tt.origin, len(tt.origin))
+			}
+		})
+	}
+}
+
+func TestOverLengthOriginDenialIsObservable(t *testing.T) {
+	origin := "https://" + hostOfLength(t, maxOriginLen) // one byte over the limit at least
+	if len(origin) <= maxOriginLen {
+		t.Fatalf("origin length = %d, want more than %d", len(origin), maxOriginLen)
+	}
+
+	var observed string
+	callbackCalls := 0
+	handler := (&Cors{
+		AllowOrigins: []string{"https://*.example.com"},
+		OnOriginTooLong: func(_ context.Context, got string) {
+			callbackCalls++
+			observed = got
+		},
+	}).Middleware()(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+		}))
+
+	req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+	req.Header.Set(headerOrigin, origin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get(headerAccessControlAllowOrigin); got != "" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want empty", got)
+	}
+
+	if callbackCalls != 1 || observed != origin {
+		t.Fatalf("callback calls = %d, origin = %q", callbackCalls, observed)
+	}
+}
+
+func TestOrdinaryOriginDenialIsNotObservedAsOversized(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin string
+	}{
+		{name: "not on the allowlist", origin: "https://client.other"},
+		{name: "not an origin", origin: strings.Repeat("a", maxOriginLen+1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			callbackCalls := 0
+			handler := (&Cors{
+				AllowOrigins:    []string{"https://*.example.com"},
+				OnOriginTooLong: func(context.Context, string) { callbackCalls++ },
+			}).Middleware()(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+
+			req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+			req.Header.Set(headerOrigin, tt.origin)
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			if callbackCalls != 0 {
+				t.Fatalf("ordinary policy denial invoked callback %d times", callbackCalls)
+			}
+		})
+	}
+}
+
+func TestExactOriginIsNotLengthLimited(t *testing.T) {
+	// The bound only guards pattern matching; an exact entry has no regex cost
+	// and must keep matching whatever the operator configured.
+	origin := "https://" + hostOfLength(t, maxOriginLen)
+
+	handler := (&Cors{AllowOrigins: []string{origin}}).Middleware()(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+		}))
+
+	req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+	req.Header.Set(headerOrigin, origin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get(headerAccessControlAllowOrigin); got != origin {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want the exact configured origin", got)
+	}
+}
+
+func TestMaxOriginLenAccountsForEveryComponent(t *testing.T) {
+	if maxOriginPortLen != len(":65535") {
+		t.Fatalf("maxOriginPortLen = %d, want %d", maxOriginPortLen, len(":65535"))
+	}
+	if want := maxOriginHostLen + maxOriginPortLen; maxOriginAuthorityLen != want {
+		t.Fatalf("maxOriginAuthorityLen = %d, want %d", maxOriginAuthorityLen, want)
+	}
+	if want := maxOriginSchemeLen + len("://") + maxOriginAuthorityLen; maxOriginLen != want {
+		t.Fatalf("maxOriginLen = %d, want %d", maxOriginLen, want)
+	}
+	// The pre-fix bound omitted the port entirely.
+	if maxOriginLen <= 253+3+5 {
+		t.Fatalf("maxOriginLen = %d, still at or below the port-less bound", maxOriginLen)
 	}
 }
 

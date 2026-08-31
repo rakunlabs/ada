@@ -28,6 +28,10 @@ type waitStore struct {
 	got  chan struct{}
 }
 
+type legacyStore struct {
+	ratelimit.Store
+}
+
 func (s *waitStore) Get(context.Context, string) (*ratelimit.Bucket, bool, error) {
 	s.once.Do(func() { close(s.got) })
 	return &ratelimit.Bucket{Attempts: []time.Time{time.Now()}}, true, nil
@@ -628,29 +632,190 @@ func TestMiddlewarePanicDoesNotPoisonKeyLock(t *testing.T) {
 	}
 }
 
-func TestFailClosedResponseBufferIsBounded(t *testing.T) {
+func TestFailClosedResponseBufferOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store func(t *testing.T) (ratelimit.Store, ratelimit.Store)
+	}{
+		{
+			name: "atomic",
+			store: func(t *testing.T) (ratelimit.Store, ratelimit.Store) {
+				store := newStore(t)
+				return store, store
+			},
+		},
+		{
+			name: "legacy",
+			store: func(t *testing.T) (ratelimit.Store, ratelimit.Store) {
+				store := newStore(t)
+				return legacyStore{Store: store}, store
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configuredStore, underlyingStore := tc.store(t)
+			var observed []error
+			var attempts []ratelimit.Decision
+			var attemptStatuses []int
+			handler := ratelimit.Middleware(ratelimit.Config{
+				Window:              time.Minute,
+				HardThreshold:       10,
+				ResponseBufferLimit: 8,
+				KeyFunc:             func(*http.Request) []string { return []string{"key"} },
+				ShouldCount:         func(_ *http.Request, status int) bool { return status == http.StatusUnauthorized },
+				Store:               configuredStore,
+				OnError: func(_ *http.Request, err error) {
+					observed = append(observed, err)
+				},
+				OnAttempt: func(_ *http.Request, decision ratelimit.Decision, status int) {
+					attempts = append(attempts, decision)
+					attemptStatuses = append(attemptStatuses, status)
+				},
+			})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("X-Downstream", "must-not-leak")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte("safe"))
+				_, _ = w.Write([]byte("overflow!"))
+			}))
+
+			rec := send(handler)
+			if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"error":"response_too_large"`) {
+				t.Fatalf("response = %d %q, want 500 response_too_large", rec.Code, rec.Body.String())
+			}
+			if rec.Header().Get("X-Downstream") != "" || strings.Contains(rec.Body.String(), "safe") || strings.Contains(rec.Body.String(), "overflow") {
+				t.Fatalf("overflow leaked downstream response: headers=%v body=%q", rec.Header(), rec.Body.String())
+			}
+			if len(observed) != 1 || !errors.Is(observed[0], ratelimit.ErrResponseTooLarge) {
+				t.Fatalf("OnError = %v, want one ErrResponseTooLarge", observed)
+			}
+			var overflow *ratelimit.ResponseTooLargeError
+			if !errors.As(observed[0], &overflow) || overflow.Limit != 8 || overflow.Buffered != 4 || overflow.Discarded != 9 {
+				t.Fatalf("OnError = %#v, want typed overflow limit=8 buffered=4 discarded=9", observed[0])
+			}
+			if len(attempts) != 1 || attempts[0].Count != 1 || len(attemptStatuses) != 1 || attemptStatuses[0] != http.StatusUnauthorized {
+				t.Fatalf("OnAttempt decisions=%+v statuses=%v, want one persisted 401 attempt at count 1", attempts, attemptStatuses)
+			}
+			bucket, ok, err := underlyingStore.Get(t.Context(), "key")
+			if err != nil || !ok || len(bucket.Attempts) != 1 {
+				t.Fatalf("overflowing response was not counted: bucket=%+v ok=%v err=%v", bucket, ok, err)
+			}
+		})
+	}
+}
+
+func TestFailClosedResponseControllerFlushIsActionableAndObservedOnce(t *testing.T) {
 	store := newStore(t)
+	var observed []error
+	var attempts atomic.Int32
+	var flushErrors []error
 	handler := ratelimit.Middleware(ratelimit.Config{
-		Window:              time.Minute,
-		HardThreshold:       10,
-		ResponseBufferLimit: 8,
-		KeyFunc:             func(*http.Request) []string { return []string{"key"} },
-		ShouldCount:         func(_ *http.Request, status int) bool { return status == http.StatusUnauthorized },
-		Store:               store,
+		Window:        time.Minute,
+		HardThreshold: 10,
+		KeyFunc:       func(*http.Request) []string { return []string{"key"} },
+		ShouldCount:   func(_ *http.Request, status int) bool { return status == http.StatusUnauthorized },
+		Store:         store,
+		OnError: func(_ *http.Request, err error) {
+			observed = append(observed, err)
+		},
+		OnAttempt: func(*http.Request, ratelimit.Decision, int) {
+			attempts.Add(1)
+		},
 	})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		controller := http.NewResponseController(w)
+		flushErrors = append(flushErrors, controller.Flush(), controller.Flush())
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte("response larger than eight bytes"))
+		_, _ = w.Write([]byte("downstream"))
 	}))
 
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	rec := send(handler)
+	if rec.Code != http.StatusUnauthorized || rec.Body.String() != "downstream" {
+		t.Fatalf("response = %d %q, want buffered downstream response", rec.Code, rec.Body.String())
 	}
-	bucket, ok, err := store.Get(t.Context(), "key")
-	if err != nil || !ok || len(bucket.Attempts) != 1 {
-		t.Fatalf("oversized failed response was not counted: bucket=%+v ok=%v err=%v", bucket, ok, err)
+	if len(flushErrors) != 2 {
+		t.Fatalf("Flush calls = %d, want 2", len(flushErrors))
+	}
+	for i, err := range flushErrors {
+		if !errors.Is(err, ratelimit.ErrStreamingUnsupported) || !strings.Contains(err.Error(), "ErrorPolicyFailOpen") {
+			t.Fatalf("Flush error %d = %v, want actionable ErrStreamingUnsupported", i+1, err)
+		}
+	}
+	if len(observed) != 1 || !errors.Is(observed[0], ratelimit.ErrStreamingUnsupported) {
+		t.Fatalf("OnError = %v, want one ErrStreamingUnsupported", observed)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("OnAttempt calls = %d, want 1", attempts.Load())
+	}
+}
+
+func TestLegacyCaptureOnErrorCanReenterSameKey(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		outerWrite func(http.ResponseWriter)
+		wantStatus int
+	}{
+		{
+			name: "overflow",
+			outerWrite: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte("response exceeds limit"))
+			},
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name: "flush",
+			outerWrite: func(w http.ResponseWriter) {
+				_ = http.NewResponseController(w).Flush()
+				w.WriteHeader(http.StatusUnauthorized)
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			underlying := newStore(t)
+			var handler http.Handler
+			var errorsObserved atomic.Int32
+			var attemptsObserved atomic.Int32
+			handler = ratelimit.Middleware(ratelimit.Config{
+				Window:              time.Minute,
+				HardThreshold:       10,
+				ResponseBufferLimit: 8,
+				KeyFunc:             func(*http.Request) []string { return []string{"same-key"} },
+				ShouldCount:         func(*http.Request, int) bool { return true },
+				Store:               legacyStore{Store: underlying},
+				OnError: func(*http.Request, error) {
+					errorsObserved.Add(1)
+					reentrant := httptest.NewRequest(http.MethodPost, "/login", nil)
+					reentrant.Header.Set("X-Reentrant", "true")
+					handler.ServeHTTP(httptest.NewRecorder(), reentrant)
+				},
+				OnAttempt: func(*http.Request, ratelimit.Decision, int) {
+					attemptsObserved.Add(1)
+				},
+			})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Reentrant") == "true" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				tc.outerWrite(w)
+			}))
+
+			done := make(chan int, 1)
+			go func() { done <- send(handler).Code }()
+			select {
+			case status := <-done:
+				if status != tc.wantStatus {
+					t.Fatalf("status = %d, want %d", status, tc.wantStatus)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("OnError re-entry deadlocked on the legacy key lock")
+			}
+			if got := errorsObserved.Load(); got != 1 {
+				t.Fatalf("OnError calls = %d, want 1", got)
+			}
+			if got := attemptsObserved.Load(); got != 2 {
+				t.Fatalf("OnAttempt calls = %d, want 2", got)
+			}
+		})
 	}
 }
 

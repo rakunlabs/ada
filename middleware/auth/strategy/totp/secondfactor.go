@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,7 +12,10 @@ import (
 	"time"
 
 	"github.com/rakunlabs/ada/middleware/auth/identity"
+	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 )
+
+const maxRequestBodyBytes = 1 << 14
 
 // SecretLookup returns the enrolled TOTP secret for an identity.
 //
@@ -117,7 +119,17 @@ func (sf *SecondFactor) Required(ctx context.Context, id *identity.Identity) (bo
 
 // Verify checks the submitted code.
 func (sf *SecondFactor) Verify(ctx context.Context, r *http.Request, id *identity.Identity) error {
-	code, recovery, err := sf.readCode(r)
+	return sf.verify(ctx, nil, r, id)
+}
+
+// VerifyWithWriter lets auth enforce the body limit with the active writer
+// without changing the public SecondFactor interface.
+func (sf *SecondFactor) VerifyWithWriter(ctx context.Context, w http.ResponseWriter, r *http.Request, id *identity.Identity) error {
+	return sf.verify(ctx, w, r, id)
+}
+
+func (sf *SecondFactor) verify(ctx context.Context, w http.ResponseWriter, r *http.Request, id *identity.Identity) error {
+	code, recovery, err := sf.readCode(w, r)
 	if err != nil {
 		return err
 	}
@@ -175,8 +187,8 @@ func (sf *SecondFactor) window(now time.Time) time.Time {
 // ErrInvalidCode is returned when the submitted code does not verify.
 var ErrInvalidCode = errors.New("totp: invalid code")
 
-func (sf *SecondFactor) readCode(r *http.Request) (code, recovery string, err error) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<14))
+func (sf *SecondFactor) readCode(w http.ResponseWriter, r *http.Request) (code, recovery string, err error) {
+	body, err := bodylimit.Read(w, r, maxRequestBodyBytes)
 	if err != nil {
 		return "", "", fmt.Errorf("totp: read body: %w", err)
 	}

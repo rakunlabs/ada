@@ -192,12 +192,22 @@ func (c *Context) Committed() bool {
 //     not a way to report a failure — NewHTTPError(http.StatusOK, ...) used to
 //     answer 200 with an error body — so those fall through to the promotion
 //     below.
+//   - A request body that exceeded a size limit — bind's WithBodyLimit, or the
+//     http.MaxBytesReader the bodylimit middleware installs — supplies 413
+//     Content Too Large. It is a client error the client can act on, and it
+//     used to be reported as an opaque 500. See bodyTooLargeError.
 //   - Otherwise a status below 400 is promoted to 500; an explicit 4xx/5xx
 //     already set with SetStatus is preserved.
 func (c *Context) prepareError(err error) {
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) && httpErr.Code >= 400 {
 		c.code = httpErr.Code
+
+		return
+	}
+
+	if bodyErr, ok := bodyTooLargeError(err); ok {
+		c.code = bodyErr.Code
 
 		return
 	}
@@ -209,8 +219,10 @@ func (c *Context) prepareError(err error) {
 
 // Bind binds the request data to the provided struct based on content type and struct tags.
 //   - The obj parameter must be a pointer.
-//   - Options are forwarded to bind.Bind, so a handler can opt out of the
-//     package defaults per request, e.g. c.Bind(&obj, bind.WithBodyLimit(0)).
+//   - Options are forwarded to bind.Bind, so a handler can override the package
+//     defaults per request, e.g. c.Bind(&obj, bind.WithBodyLimit(1<<20)) to cap
+//     this endpoint's body. Binding is unlimited by default; use the
+//     middleware/bodylimit middleware for a service-wide cap.
 func (c *Context) Bind(obj any, opts ...bind.Option) error {
 	return bind.Bind(c.Request, obj, opts...)
 }

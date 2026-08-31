@@ -182,3 +182,70 @@ func TestNewSnapshotsConfigAndRegexRules(t *testing.T) {
 	close(start)
 	wg.Wait()
 }
+
+func TestRegexRuleOrdering(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"middle.txt": "MIDDLE",
+		"final.txt":  "FINAL",
+		"app.js":     "APP",
+		"admin.html": "ADMIN",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	serve := func(t *testing.T, cfg *Config, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		cfg.Path = dir
+		handler, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		return rec
+	}
+
+	t.Run("FilePathRegex uses first effective replacement without chaining", func(t *testing.T) {
+		rec := serve(t, &Config{FilePathRegex: []*RegexPathStore{
+			{Regex: `^/start\.txt$`, Replacement: "/start.txt"},
+			{Regex: `^/start\.txt$`, Replacement: "/middle.txt"},
+			{Regex: `^/middle\.txt$`, Replacement: "/final.txt"},
+		}}, "/start.txt")
+
+		if got := rec.Body.String(); got != "MIDDLE" {
+			t.Fatalf("body = %q, want %q: rewrites must not chain", got, "MIDDLE")
+		}
+	})
+
+	t.Run("CacheRegex uses first base-name match", func(t *testing.T) {
+		rec := serve(t, &Config{CacheRegex: []*RegexCacheStore{
+			{Regex: `^/app\.js$`, CacheControl: "private"},
+			{Regex: `^app\.js$`, CacheControl: "no-cache"},
+			{Regex: `\.js$`, CacheControl: "public, max-age=604800"},
+		}}, "/app.js")
+
+		if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Fatalf("Cache-Control = %q, want %q", got, "no-cache")
+		}
+	})
+
+	t.Run("SPAIndexRegex uses first effective replacement", func(t *testing.T) {
+		cfg := &Config{
+			SPA: true,
+			SPAIndexRegex: []*RegexPathStore{
+				{Regex: `^/admin/.*$`, Replacement: "$0"},
+				{Regex: `^/admin/.*$`, Replacement: "/admin.html"},
+				{Regex: `^/admin/deep/.*$`, Replacement: "/final.txt"},
+			},
+		}
+		rec := serve(t, cfg, "/admin/deep/page")
+
+		if got := rec.Body.String(); got != "ADMIN" {
+			t.Fatalf("body = %q, want %q", got, "ADMIN")
+		}
+	})
+}

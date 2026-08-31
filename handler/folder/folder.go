@@ -42,7 +42,8 @@ type Config struct {
 	SPAEnableFile bool `cfg:"spa_enable_file"`
 	// SPAIndex is set the index.html location, default is IndexName
 	SPAIndex string `cfg:"spa_index"`
-	// SPAIndexRegex set spa_index from URL path regex
+	// SPAIndexRegex sets SPAIndex from the first replacement that changes the URL path.
+	// When no replacement changes it, SPAIndex is used.
 	SPAIndexRegex []*RegexPathStore `cfg:"spa_index_regex"`
 	// Browse is enable directory browsing
 	Browse bool `cfg:"browse"`
@@ -52,8 +53,12 @@ type Config struct {
 	PrefixPath string `cfg:"prefix_path"`
 	// FilePathRegex is regex replacement for real file path, comes after PrefixPath apply
 	// File path doesn't include / suffix
+	//
+	// The first replacement that changes the path wins; rewrites do not chain.
 	FilePathRegex []*RegexPathStore `cfg:"file_path_regex"`
 
+	// CacheRegex sets Cache-Control from the first rule matching the served
+	// file's base name, not the request path.
 	CacheRegex []*RegexCacheStore `cfg:"cache_regex"`
 	// BrowseCache is cache control for browse page, default is no-cache
 	BrowseCache string `cfg:"browse_cache"`

@@ -1658,15 +1658,7 @@ func TestRejectsMultipleGreedy(t *testing.T) {
 	mux.GET("/a/{x...}/{y...}", func(w http.ResponseWriter, r *http.Request) {})
 }
 
-// TestHandleWithMethodRejectsNonCanonicalMethod pins the regression where a
-// lowercase method registered a permanently dead route: entries are looked up
-// against r.Method, which net/http delivers verbatim and RFC 9110 defines as
-// case-sensitive, so `HandleWithMethod("get", "/lc", h)` silently produced a
-// route that answered 405 forever.
-//
-// It fails at registration like the ambiguous patterns trie_insert rejects,
-// rather than being upcased into a route the caller did not write.
-func TestHandleWithMethodRejectsNonCanonicalMethod(t *testing.T) {
+func TestHandleWithMethodRejectsInvalidMethod(t *testing.T) {
 	panicMessage := func(t *testing.T, fn func()) string {
 		t.Helper()
 
@@ -1694,8 +1686,6 @@ func TestHandleWithMethodRejectsNonCanonicalMethod(t *testing.T) {
 	}
 
 	for _, method := range []string{
-		"get",              // the reported case
-		"Get",              // mixed case
 		"GET ",             // trailing space is not a token character
 		"GET\n",            // header-injection shaped
 		"G/ET",             // separator
@@ -1715,12 +1705,12 @@ func TestHandleWithMethodRejectsNonCanonicalMethod(t *testing.T) {
 		})
 	}
 
-	// RouteBuilder is the same entry point through ApplyRoutes and must
-	// reject identically.
+	// RouteBuilder is the same entry point through ApplyRoutes and must reject
+	// invalid tokens identically.
 	t.Run("RouteBuilder", func(t *testing.T) {
 		msg := panicMessage(t, func() {
 			NewMux().ApplyRoutes(func(b *RouteBuilder) {
-				b.HandleWithMethod("get", "/lc", func(http.ResponseWriter, *http.Request) {})
+				b.HandleWithMethod("GET ", "/lc", func(http.ResponseWriter, *http.Request) {})
 			})
 		})
 		if !strings.Contains(msg, "invalid HTTP method") {
@@ -1737,12 +1727,36 @@ func TestHandleWithMethodRejectsNonCanonicalMethod(t *testing.T) {
 			defer func() { _ = recover() }()
 
 			mux.ApplyRoutes(func(b *RouteBuilder) {
-				b.HandleWithMethod("get", "/lc", func(http.ResponseWriter, *http.Request) {})
+				b.HandleWithMethod("GET ", "/lc", func(http.ResponseWriter, *http.Request) {})
 			})
 		}()
 
 		if got := len(mux.Routes()); got != 1 {
 			t.Errorf("routes = %d, want 1", got)
+		}
+	})
+}
+
+func TestHandleWithMethodNormalizesMethod(t *testing.T) {
+	mux := NewMux()
+	mux.HandleWithMethod("gEt", "/mixed", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	if got := serve(mux, http.MethodGet, "/mixed").Body.String(); got != "ok" {
+		t.Fatalf("body = %q, want ok", got)
+	}
+	if routes := mux.Routes(); len(routes) != 1 || routes[0].Method != http.MethodGet {
+		t.Fatalf("routes = %+v, want canonical GET", routes)
+	}
+	if !mux.Remove("get", "/mixed") {
+		t.Fatal("Remove did not normalize method")
+	}
+
+	mux.ApplyRoutes(func(b *RouteBuilder) {
+		b.HandleWithMethod("pOsT", "/batch", func(http.ResponseWriter, *http.Request) {})
+		if !b.Remove("post", "/batch") {
+			t.Fatal("RouteBuilder.Remove did not normalize method")
 		}
 	})
 }

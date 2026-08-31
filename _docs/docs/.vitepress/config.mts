@@ -77,6 +77,10 @@ export default withMermaid(defineConfig({
                 link: "/guide/middleware/ratelimit.md",
               },
               {
+                text: "Body Limit",
+                link: "/guide/middleware/bodylimit.md",
+              },
+              {
                 text: "Cors",
                 link: "/guide/middleware/cors.md",
               },

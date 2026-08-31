@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -707,17 +708,26 @@ func TestBindBodyLimit(t *testing.T) {
 		}
 	})
 
-	largeValue := strings.Repeat("x", int(DefaultBodyLimit))
+	largeValue := strings.Repeat("x", 4<<20)
 	largeBody := `{"value":"` + largeValue + `"}`
 
-	t.Run("default limit", func(t *testing.T) {
+	// DefaultBodyLimit is 0: a limit that only covered Bind was a trap, so the
+	// limit now comes from the bodylimit middleware and Bind has none of its
+	// own unless a caller asks for one.
+	t.Run("no limit by default", func(t *testing.T) {
+		if DefaultBodyLimit != 0 {
+			t.Fatalf("DefaultBodyLimit = %d, want 0 (disabled)", DefaultBodyLimit)
+		}
+
 		req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(largeBody))
 		req.Header.Set("Content-Type", "application/json")
 
 		var target payload
-		err := Bind(req, &target)
-		if !errors.Is(err, ErrBinding) {
-			t.Fatalf("expected default body limit error to wrap ErrBinding, got %v", err)
+		if err := Bind(req, &target); err != nil {
+			t.Fatalf("expected the default to accept a %d byte body, got %v", len(largeBody), err)
+		}
+		if target.Value != largeValue {
+			t.Fatalf("default-limit body did not bind completely: got %d bytes, want %d", len(target.Value), len(largeValue))
 		}
 	})
 
@@ -811,8 +821,15 @@ func TestBindBodyLimitMultipartAfterParseForm(t *testing.T) {
 	}
 }
 
+// TestBindBodyLimitRejectsPreParsedUnknownLengthForms pins that an explicit
+// WithBodyLimit fails closed when the body was already consumed by ParseForm
+// and its encoded size can no longer be established. The limit is generous
+// enough for the body, so a rejection can only come from the unmeasurable
+// framing.
 func TestBindBodyLimitRejectsPreParsedUnknownLengthForms(t *testing.T) {
-	largeValue := strings.Repeat("x", int(DefaultBodyLimit))
+	const bodyLimit = 1 << 20
+
+	largeValue := strings.Repeat("x", 1024)
 
 	t.Run("ParseForm", func(t *testing.T) {
 		body := url.Values{"value": {largeValue}}.Encode()
@@ -827,7 +844,7 @@ func TestBindBodyLimitRejectsPreParsedUnknownLengthForms(t *testing.T) {
 		var target struct {
 			Value string `form:"value"`
 		}
-		err := Bind(req, &target)
+		err := Bind(req, &target, WithBodyLimit(bodyLimit))
 		if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
 			t.Fatalf("expected pre-parsed form with unknown length to fail closed, got %v", err)
 		}
@@ -846,7 +863,7 @@ func TestBindBodyLimitRejectsPreParsedUnknownLengthForms(t *testing.T) {
 		var target struct {
 			Value string `form:"value"`
 		}
-		err := Bind(req, &target)
+		err := Bind(req, &target, WithBodyLimit(bodyLimit))
 		if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
 			t.Fatalf("expected FormValue-parsed form with unknown length to fail closed, got %v", err)
 		}
@@ -878,7 +895,7 @@ func TestBindBodyLimitRejectsPreParsedUnknownLengthForms(t *testing.T) {
 		var target struct {
 			Value string `form:"value"`
 		}
-		err := Bind(req, &target)
+		err := Bind(req, &target, WithBodyLimit(bodyLimit))
 		if !errors.Is(err, ErrBinding) || !strings.Contains(err.Error(), "request body exceeds limit") {
 			t.Fatalf("expected pre-parsed multipart form with unknown length to fail closed, got %v", err)
 		}
@@ -1027,7 +1044,9 @@ func TestBindBodyLimitPreservesClose(t *testing.T) {
 	var target struct {
 		Value string `form:"value"`
 	}
-	if err := Bind(req, &target); err != nil {
+	// The limit is explicit: without one Bind does not wrap the body at all
+	// and there is no wrapper whose Close could be checked.
+	if err := Bind(req, &target, WithBodyLimit(1<<20)); err != nil {
 		t.Fatalf("Bind returned an error: %v", err)
 	}
 	if body.closed {
@@ -1038,6 +1057,181 @@ func TestBindBodyLimitPreservesClose(t *testing.T) {
 	}
 	if !body.closed {
 		t.Fatal("wrapped request body did not close the original body")
+	}
+}
+
+// TestBindMultipartDefaultAllowsLargeUpload is the contradiction the retired
+// default encoded: DefaultMultipartFormMaxMemory is 32 MiB, but every byte past
+// the first mebibyte was rejected by DefaultBodyLimit before the multipart
+// parser ever saw it, so the documented 32 MiB was unreachable.
+func TestBindMultipartDefaultAllowsLargeUpload(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+
+	const uploadSize = (2 << 20) + 1 // comfortably past the retired 1 MiB cap
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	file, err := writer.CreateFormFile("upload", "large.bin")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := file.Write(bytes.Repeat([]byte("x"), uploadSize)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(body.Bytes()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	var target struct {
+		Upload *multipart.FileHeader `file:"upload"`
+	}
+	if err := Bind(req, &target); err != nil {
+		t.Fatalf("default Bind rejected a %d byte multipart upload: %v", body.Len(), err)
+	}
+	t.Cleanup(func() {
+		if req.MultipartForm != nil {
+			if err := req.MultipartForm.RemoveAll(); err != nil {
+				t.Errorf("remove multipart form: %v", err)
+			}
+		}
+	})
+
+	if target.Upload == nil {
+		t.Fatal("multipart upload did not bind")
+	}
+	if target.Upload.Size != uploadSize {
+		t.Fatalf("upload size = %d, want %d", target.Upload.Size, uploadSize)
+	}
+}
+
+// TestBindBodyLimitErrorIsRecognisable pins the contract the ada error handler
+// depends on to answer 413: every body-limit failure, whichever code path
+// produced it, is reachable with errors.Is and carries the limit. Matching on
+// the message instead was what left these failures indistinguishable from any
+// other binding error, and therefore reported as 500.
+func TestBindBodyLimitErrorIsRecognisable(t *testing.T) {
+	const limit = 8
+
+	jsonBody := `{"value":"` + strings.Repeat("x", 64) + `"}`
+
+	multipartBody := func(t *testing.T) (*bytes.Buffer, string) {
+		t.Helper()
+
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if err := writer.WriteField("value", strings.Repeat("x", 64)); err != nil {
+			t.Fatalf("write multipart field: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close multipart writer: %v", err)
+		}
+
+		return &body, writer.FormDataContentType()
+	}
+
+	for _, tt := range []struct {
+		name    string
+		request func(t *testing.T) *http.Request
+	}{
+		{
+			// Rejected up front on Content-Length.
+			name: "declared length",
+			request: func(*testing.T) *http.Request {
+				req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(jsonBody))
+				req.Header.Set("Content-Type", "application/json")
+
+				return req
+			},
+		},
+		{
+			// Rejected while streaming, by the wrapped body.
+			name: "streamed",
+			request: func(*testing.T) *http.Request {
+				req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(jsonBody))
+				req.Header.Set("Content-Type", "application/json")
+				req.ContentLength = -1
+
+				return req
+			},
+		},
+		{
+			// Rejected because a pre-parsed body of unknown length cannot be
+			// measured, so the limit fails closed.
+			name: "pre-parsed unmeasurable",
+			request: func(t *testing.T) *http.Request {
+				body, contentType := multipartBody(t)
+
+				req, _ := http.NewRequest(http.MethodPost, "/", bytes.NewReader(body.Bytes()))
+				req.Header.Set("Content-Type", contentType)
+				req.ContentLength = -1
+				req.TransferEncoding = []string{"chunked"}
+				if err := req.ParseMultipartForm(DefaultMultipartFormMaxMemory); err != nil {
+					t.Fatalf("pre-parse multipart form: %v", err)
+				}
+				t.Cleanup(func() {
+					if err := req.MultipartForm.RemoveAll(); err != nil {
+						t.Errorf("remove multipart form: %v", err)
+					}
+				})
+
+				return req
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var target struct {
+				Value string `json:"value" form:"value"`
+			}
+
+			err := Bind(tt.request(t), &target, WithBodyLimit(limit))
+			if err == nil {
+				t.Fatal("Bind accepted a body over the limit")
+			}
+			if !errors.Is(err, ErrBinding) {
+				t.Errorf("error %v does not wrap ErrBinding", err)
+			}
+			if !errors.Is(err, ErrBodyTooLarge) {
+				t.Errorf("error %v does not wrap ErrBodyTooLarge", err)
+			}
+
+			var tooLarge *BodyTooLargeError
+			if !errors.As(err, &tooLarge) {
+				t.Fatalf("error %v is not a *BodyTooLargeError", err)
+			}
+			if tooLarge.Limit != limit {
+				t.Errorf("Limit = %d, want %d", tooLarge.Limit, limit)
+			}
+
+			// The byte count is not sensitive and is the only thing that tells
+			// a client what to send instead.
+			if want := "request body exceeds limit of 8 bytes"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not contain %q", err, want)
+			}
+		})
+	}
+}
+
+// TestBindPreservesCauseInChain guards the wrapping that
+// TestBindBodyLimitErrorIsRecognisable relies on. Bind reported every failure
+// as "binding: <text>" with the cause flattened to a string, so no caller could
+// inspect any error Bind produced.
+func TestBindPreservesCauseInChain(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":`))
+	req.Header.Set("Content-Type", "application/json")
+
+	var target struct {
+		Value string `json:"value"`
+	}
+
+	err := Bind(req, &target)
+	if !errors.Is(err, ErrBinding) {
+		t.Fatalf("error %v does not wrap ErrBinding", err)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("error %v does not keep the decode cause reachable", err)
 	}
 }
 
@@ -1620,4 +1814,208 @@ func TestDefaultBinder_IndependentBindingSources(t *testing.T) {
 	if result.FromHeader != "header-value" {
 		t.Errorf("Expected FromHeader 'header-value', got '%s'", result.FromHeader)
 	}
+}
+
+func TestBindQuerySeparatorOnlyAppliesToSlices(t *testing.T) {
+	type request struct {
+		Name string   `query:"name"`
+		Tags []string `query:"tags"`
+	}
+
+	tests := []struct {
+		name     string
+		rawQuery string
+		opts     []Option
+		wantName string
+		wantTags []string
+	}{
+		{
+			name:     "comma in a scalar string is kept",
+			rawQuery: "name=Doe,%20John",
+			wantName: "Doe, John",
+		},
+		{
+			name:     "comma in a slice still splits",
+			rawQuery: "tags=a,b,c",
+			wantTags: []string{"a", "b", "c"},
+		},
+		{
+			name:     "separator disabled leaves both raw",
+			rawQuery: "name=Doe,%20John&tags=a,b,c",
+			opts:     []Option{WithQuerySeparator("")},
+			wantName: "Doe, John",
+			wantTags: []string{"a,b,c"},
+		},
+		{
+			name:     "custom separator splits slices and spares scalars",
+			rawQuery: "name=Doe|John&tags=a|b|c",
+			opts:     []Option{WithQuerySeparator("|")},
+			wantName: "Doe|John",
+			wantTags: []string{"a", "b", "c"},
+		},
+		{
+			name:     "repeated and separated values combine",
+			rawQuery: "tags=a,b&tags=c",
+			wantTags: []string{"a", "b", "c"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, "/?"+tt.rawQuery, nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+
+			var got request
+			if err := Bind(req, &got, tt.opts...); err != nil {
+				t.Fatalf("Bind(?%s): %v", tt.rawQuery, err)
+			}
+
+			if got.Name != tt.wantName {
+				t.Errorf("Name = %q, want %q", got.Name, tt.wantName)
+			}
+			if !reflect.DeepEqual(got.Tags, tt.wantTags) {
+				t.Errorf("Tags = %#v, want %#v", got.Tags, tt.wantTags)
+			}
+		})
+	}
+}
+
+func TestBindQuerySeparatorSparesJSONScalars(t *testing.T) {
+	type nested struct {
+		Street string `json:"street"`
+		City   string `json:"city"`
+	}
+	type request struct {
+		Address nested            `query:"address"`
+		Meta    map[string]string `query:"meta"`
+		Raw     json.RawMessage   `query:"raw"`
+	}
+
+	values := url.Values{}
+	values.Set("address", `{"street":"123 Main St","city":"NYC"}`)
+	values.Set("meta", `{"a":"1","b":"2"}`)
+	values.Set("raw", `{"x":1,"y":2}`)
+
+	req, err := http.NewRequest(http.MethodGet, "/?"+values.Encode(), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	var got request
+	if err := Bind(req, &got); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	if got.Address.Street != "123 Main St" || got.Address.City != "NYC" {
+		t.Errorf("Address = %+v, want {123 Main St NYC}", got.Address)
+	}
+	if !reflect.DeepEqual(got.Meta, map[string]string{"a": "1", "b": "2"}) {
+		t.Errorf("Meta = %#v, want map[a:1 b:2]", got.Meta)
+	}
+	if string(got.Raw) != `{"x":1,"y":2}` {
+		t.Errorf("Raw = %s, want {\"x\":1,\"y\":2}", got.Raw)
+	}
+}
+
+func TestBindQuerySeparatorSparesJSONSlices(t *testing.T) {
+	type item struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	type request struct {
+		Raw        []json.RawMessage    `query:"raw"`
+		RawPtrs    []*json.RawMessage   `query:"raw_ptrs"`
+		Structs    []item               `query:"structs"`
+		StructPtrs []*item              `query:"struct_ptrs"`
+		Maps       []map[string]string  `query:"maps"`
+		MapPtrs    []*map[string]string `query:"map_ptrs"`
+	}
+
+	values := url.Values{
+		"raw":         {`{"a":1,"b":2}`},
+		"raw_ptrs":    {`[1,2]`},
+		"structs":     {`{"id":1,"name":"one"}`},
+		"struct_ptrs": {`{"id":2,"name":"two"}`},
+		"maps":        {`{"a":"1","b":"2"}`},
+		"map_ptrs":    {`{"c":"3","d":"4"}`},
+	}
+	req, err := http.NewRequest(http.MethodGet, "/?"+values.Encode(), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	var got request
+	if err := Bind(req, &got); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	if len(got.Raw) != 1 || string(got.Raw[0]) != `{"a":1,"b":2}` {
+		t.Errorf("Raw = %q", got.Raw)
+	}
+	if len(got.RawPtrs) != 1 || got.RawPtrs[0] == nil || string(*got.RawPtrs[0]) != `[1,2]` {
+		t.Errorf("RawPtrs = %v", got.RawPtrs)
+	}
+	if want := []item{{ID: 1, Name: "one"}}; !reflect.DeepEqual(got.Structs, want) {
+		t.Errorf("Structs = %#v, want %#v", got.Structs, want)
+	}
+	if len(got.StructPtrs) != 1 || got.StructPtrs[0] == nil || *got.StructPtrs[0] != (item{ID: 2, Name: "two"}) {
+		t.Errorf("StructPtrs = %#v", got.StructPtrs)
+	}
+	if want := []map[string]string{{"a": "1", "b": "2"}}; !reflect.DeepEqual(got.Maps, want) {
+		t.Errorf("Maps = %#v, want %#v", got.Maps, want)
+	}
+	if len(got.MapPtrs) != 1 || got.MapPtrs[0] == nil || !reflect.DeepEqual(*got.MapPtrs[0], map[string]string{"c": "3", "d": "4"}) {
+		t.Errorf("MapPtrs = %#v", got.MapPtrs)
+	}
+}
+
+func TestBindRepeatedParameterFirstValueWinsForScalars(t *testing.T) {
+	type request struct {
+		Scalar string   `query:"v"`
+		Slice  []string `query:"v2"`
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "/?v=bir&v=iki&v2=bir&v2=iki", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	var got request
+	if err := Bind(req, &got); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	if got.Scalar != "bir" {
+		t.Errorf("Scalar = %q, want %q (first value wins)", got.Scalar, "bir")
+	}
+	if want := []string{"bir", "iki"}; !reflect.DeepEqual(got.Slice, want) {
+		t.Errorf("Slice = %#v, want %#v", got.Slice, want)
+	}
+}
+
+func TestBindReportsMalformedQuery(t *testing.T) {
+	type request struct {
+		Name string `query:"name"`
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.URL.RawQuery = "bad=%zz&name=ok"
+
+	var got request
+	err = Bind(req, &got)
+	if err == nil {
+		t.Fatalf("Bind accepted a malformed query and bound %+v", got)
+	}
+	if !errors.Is(err, ErrBinding) {
+		t.Errorf("error %v does not wrap ErrBinding", err)
+	}
+	if !strings.Contains(err.Error(), "failed to parse query") {
+		t.Errorf("error %v does not name the query as the cause", err)
+	}
+
 }

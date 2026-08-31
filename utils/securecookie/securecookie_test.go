@@ -2,6 +2,7 @@ package securecookie_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,6 +249,145 @@ func TestCodecs_Empty(t *testing.T) {
 	var out string
 	if err := cs.Decode("s", "x", &out); !errors.Is(err, securecookie.ErrNoCodecs) {
 		t.Fatalf("want ErrNoCodecs, got %v", err)
+	}
+}
+
+// largestPayload returns the largest n for which a session-shaped value holding
+// an n-byte string still encodes under the codec's max length.
+func largestPayload(t *testing.T, c *securecookie.Codec) int {
+	t.Helper()
+
+	encodes := func(n int) bool {
+		_, err := c.Encode("session", map[string]any{"v": strings.Repeat("a", n)})
+		if err != nil && !errors.Is(err, securecookie.ErrValueTooLong) {
+			t.Fatalf("encode %d bytes: %v", n, err)
+		}
+
+		return err == nil
+	}
+
+	lo, hi := 0, 1
+	for encodes(hi) {
+		lo = hi
+		hi *= 2
+		if hi > 1<<20 {
+			t.Fatal("payload did not hit the max length")
+		}
+	}
+
+	// Invariant: encodes(lo) is true, encodes(hi) is false.
+	for hi-lo > 1 {
+		mid := (lo + hi) / 2
+		if encodes(mid) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+
+	return lo
+}
+
+// TestDefaultMaxLength_UsablePayload checks the approximate reference figures
+// documented for this specific session-shaped value and codec configuration.
+func TestDefaultMaxLength_UsablePayload(t *testing.T) {
+	hashKey := securecookie.GenerateRandomKey(32)
+	blockKey := securecookie.GenerateRandomKey(32)
+
+	tests := []struct {
+		name     string
+		codec    *securecookie.Codec
+		measured int
+	}{
+		{name: "sign-only", codec: securecookie.New(hashKey, nil), measured: 2224},
+		{name: "encrypted", codec: securecookie.New(hashKey, blockKey), measured: 2208},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := largestPayload(t, tt.codec)
+			t.Logf("largest tested string = %d bytes with a %d-byte encoded-value limit", got, securecookie.DefaultMaxLength)
+
+			// Allow serializer-level changes while keeping the reference useful.
+			if got < tt.measured-32 || got > tt.measured+32 {
+				t.Fatalf("usable payload = %d, want ~%d (documented figure is stale)", got, tt.measured)
+			}
+
+			// The budget really is on the encoded value, not the payload.
+			encoded, err := tt.codec.Encode("session", map[string]any{"v": strings.Repeat("a", got)})
+			if err != nil {
+				t.Fatalf("encode at limit: %v", err)
+			}
+			if len(encoded) > securecookie.DefaultMaxLength {
+				t.Fatalf("encoded %d bytes, above the %d limit", len(encoded), securecookie.DefaultMaxLength)
+			}
+			// One byte more is rejected on the way out.
+			if _, err := tt.codec.Encode("session", map[string]any{"v": strings.Repeat("a", got+1)}); !errors.Is(err, securecookie.ErrValueTooLong) {
+				t.Fatalf("encode above limit: want ErrValueTooLong, got %v", err)
+			}
+
+			// An oversized value is rejected on the way back in too.
+			big := securecookie.New(hashKey, nil, securecookie.WithMaxLength(0))
+			oversized, err := big.Encode("session", map[string]any{"v": strings.Repeat("a", got+256)})
+			if err != nil {
+				t.Fatalf("encode oversized: %v", err)
+			}
+			out := map[string]any{}
+			if err := securecookie.New(hashKey, nil).Decode("session", oversized, &out); !errors.Is(err, securecookie.ErrValueTooLong) {
+				t.Fatalf("decode oversized: want ErrValueTooLong, got %v", err)
+			}
+		})
+	}
+}
+
+func TestSetMaxLength(t *testing.T) {
+	hashKey := securecookie.GenerateRandomKey(32)
+	c := securecookie.New(hashKey, nil)
+
+	payload := map[string]any{"v": strings.Repeat("a", 4000)}
+
+	if _, err := c.Encode("session", payload); !errors.Is(err, securecookie.ErrValueTooLong) {
+		t.Fatalf("default limit: want ErrValueTooLong, got %v", err)
+	}
+
+	c.SetMaxLength(16 * 1024)
+
+	encoded, err := c.Encode("session", payload)
+	if err != nil {
+		t.Fatalf("encode after SetMaxLength: %v", err)
+	}
+	if len(encoded) <= securecookie.DefaultMaxLength {
+		t.Fatalf("encoded %d bytes, expected to exceed the default limit", len(encoded))
+	}
+
+	out := map[string]any{}
+	if err := c.Decode("session", encoded, &out); err != nil {
+		t.Fatalf("decode after SetMaxLength: %v", err)
+	}
+	if out["v"] != payload["v"] {
+		t.Fatal("round-trip mismatch")
+	}
+
+	// 0 disables the check entirely.
+	c.SetMaxLength(0)
+	if _, err := c.Encode("session", map[string]any{"v": strings.Repeat("a", 1<<16)}); err != nil {
+		t.Fatalf("encode with the check disabled: %v", err)
+	}
+
+	// Lowering it below the default works as well.
+	c.SetMaxLength(64)
+	if _, err := c.Encode("session", map[string]any{"v": "short but not that short"}); !errors.Is(err, securecookie.ErrValueTooLong) {
+		t.Fatalf("lowered limit: want ErrValueTooLong, got %v", err)
+	}
+
+	// Preserve WithMaxLength's established behavior for negative limits.
+	negative := securecookie.New(hashKey, nil, securecookie.WithMaxLength(-1))
+	if _, err := negative.Encode("session", "value"); !errors.Is(err, securecookie.ErrValueTooLong) {
+		t.Fatalf("negative option: want ErrValueTooLong, got %v", err)
+	}
+	c.SetMaxLength(-1)
+	if _, err := c.Encode("session", "value"); !errors.Is(err, securecookie.ErrValueTooLong) {
+		t.Fatalf("negative setter: want ErrValueTooLong, got %v", err)
 	}
 }
 

@@ -163,9 +163,27 @@ type counterWindow struct {
 	prev  int       // count in the previous window
 }
 
+// newSimpleLimiter panics on a non-positive limit or window.
+//
+// Both are always configuration mistakes and both used to fail silently in the
+// most dangerous possible direction: requestLimit <= 0 disabled limiting
+// entirely, and windowLength <= 0 was quietly rewritten to one minute, so a
+// caller who meant "1 request per second" and passed a bad duration got a limit
+// 60x looser than intended. Neither is detectable at runtime — the middleware
+// simply lets traffic through — so the mistake surfaces as a missing control in
+// production rather than an error.
+//
+// Panicking at construction matches the rest of the repository:
+// bodylimit.Middleware, ratelimit.Middleware, cors, forwardauth and the router
+// all refuse to build a misconfigured value. Construction happens once at
+// startup, so this fails immediately and loudly instead of per request. Callers
+// who genuinely want no limit must omit the middleware rather than neuter it.
 func newSimpleLimiter(limit int, window time.Duration, keyFn func(*http.Request) string) *simpleLimiter {
+	if limit <= 0 {
+		panic("ratelimit: requestLimit must be greater than zero")
+	}
 	if window <= 0 {
-		window = time.Minute
+		panic("ratelimit: windowLength must be greater than zero")
 	}
 	return &simpleLimiter{
 		limit:   limit,
@@ -178,12 +196,6 @@ func newSimpleLimiter(limit int, window time.Duration, keyFn func(*http.Request)
 
 func (l *simpleLimiter) handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A non-positive limit disables limiting (pass everything through).
-		if l.limit <= 0 {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		key := l.keyFn(r)
 		if key == "" {
 			next.ServeHTTP(w, r)

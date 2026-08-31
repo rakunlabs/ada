@@ -4,7 +4,7 @@ go 1.24
 
 require (
 	github.com/felixge/httpsnoop v1.0.4
-	github.com/rakunlabs/ada/utils/proxy v0.4.10
+	github.com/rakunlabs/ada/utils/proxy v0.5.0
 	github.com/rakunlabs/logi v0.4.5
 )
 

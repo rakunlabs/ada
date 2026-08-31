@@ -1,6 +1,9 @@
 package ratelimit
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Store is the legacy backing storage contract for the rate-limit middleware.
 // It is intentionally minimal: the limiter only needs to fetch the current
@@ -12,10 +15,14 @@ import "context"
 //   - Set replaces any existing value for key. There is no delete — stale
 //     buckets are either pruned in-place by the limiter on next read or
 //     evicted by the store under memory pressure.
-//   - Implementations may evict keys under a documented capacity policy. A
-//     missing key looks like "no attempts yet", so eviction weakens enforcement
-//     rather than falsely blocking a legitimate user. Security-sensitive
-//     deployments must size or configure their store to retain active state.
+//   - Implementations may evict keys under a documented capacity policy, but
+//     evicting a bucket that is still enforcing a limit is a rate-limit
+//     bypass, not a cache miss: a missing key is indistinguishable from "no
+//     attempts yet", so anyone who can influence the key (IP, username,
+//     header) can clear their own counter by flooding unrelated keys. An
+//     implementation must either evict only buckets that can no longer affect
+//     a decision, or fail the operation with an error so Config.ErrorPolicy
+//     decides. It must not silently drop live state.
 //
 // Typical implementations:
 //   - NewMemoryStore — in-process, LRU-bounded, for single-node pika
@@ -62,4 +69,21 @@ type AtomicStore interface {
 	Store
 
 	Transaction(ctx context.Context, keys []string, fn func(buckets map[string]*Bucket) error) error
+}
+
+// windowObserver is an internal optional Store capability. Middleware calls
+// ObserveWindow once at construction with Config.Window for stores that
+// implement it.
+//
+// A Bucket carries raw attempt timestamps and no expiry, so a store cannot
+// otherwise tell a bucket that is still enforcing a limit from one whose
+// attempts have all aged out. Without that fact a capacity-bounded store must
+// treat every non-empty bucket as live. With it, aged-out buckets become
+// reclaimable and the capacity bound stays workable.
+//
+// It is intentionally private: this is capacity metadata needed by the built-in
+// memory store, not an additional contract external Store implementations need
+// to adopt.
+type windowObserver interface {
+	ObserveWindow(window time.Duration)
 }

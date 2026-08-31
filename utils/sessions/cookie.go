@@ -10,8 +10,20 @@ import (
 // itself. The payload is signed and (when a block key is supplied) encrypted by
 // securecookie, so it cannot be read or tampered with by the client.
 //
-// Because everything lives in the cookie, total size is limited (~4KB per
-// cookie). For large payloads use a server-side store instead.
+// Because everything lives in the cookie, total size is limited. By default,
+// the codecs cap the encoded cookie value at securecookie.DefaultMaxLength.
+// That limit excludes the cookie name and attributes, so it does not guarantee
+// that the complete cookie fits every user agent's limit.
+//
+// Serialization, signing, encryption, and base64 encoding add variable
+// overhead. In the reference configuration documented by DefaultMaxLength, a
+// session-shaped value containing one string reached the limit at about 2.2 KB,
+// but applications must measure their own value shapes and codec configuration.
+// Save and load return securecookie.ErrValueTooLong when the encoded value is
+// over the configured limit.
+//
+// Use MaxLength to change that budget, or a server-side store for large
+// payloads.
 type CookieStore struct {
 	// Codecs sign and encrypt the cookie payload. The first codec is used for
 	// encoding; all are tried when decoding, which enables key rotation.
@@ -55,6 +67,20 @@ func (s *CookieStore) MaxAge(age int) {
 
 	for _, c := range s.Codecs {
 		c.SetMaxAge(age)
+	}
+}
+
+// MaxLength sets the maximum length in bytes of the encoded cookie value on
+// every codec, for both saving and loading. Zero disables the check; a negative
+// value rejects all encoded values. Call it during setup, before the store's
+// codecs are used concurrently.
+//
+// The default is securecookie.DefaultMaxLength. Raising it can produce cookies
+// that user agents refuse to store; it is useful only when the client and
+// intermediaries are known to permit the resulting complete cookie size.
+func (s *CookieStore) MaxLength(n int) {
+	for _, c := range s.Codecs {
+		c.SetMaxLength(n)
 	}
 }
 

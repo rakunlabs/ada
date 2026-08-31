@@ -2,34 +2,56 @@ package encoding
 
 import (
 	"compress/gzip"
+	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 )
 
 type Config struct {
+	// Disabled bypasses negotiation and compression. Other configuration is
+	// still validated during middleware construction.
 	Disabled bool `cfg:"disabled"`
-	// Encoding support [gzip], default is gzip.
+	// Encoding lists enabled response encodings. Only gzip is supported. Values
+	// are trimmed and case-insensitive; empty, duplicate or unsupported values
+	// panic during middleware construction. The default is []string{"gzip"}.
 	Encoding []string `cfg:"encoding"`
 }
 
+// Middleware constructs response encoding middleware. It panics when Config
+// contains an invalid or unsupported encoding.
 func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 	var opt option
 	for _, o := range opts {
 		o(&opt)
 	}
 
-	if len(opt.Config.Encoding) == 0 {
-		opt.Config.Encoding = []string{"gzip"}
+	cfg := opt.Config
+	cfg.Encoding = slices.Clone(cfg.Encoding)
+	if len(cfg.Encoding) == 0 {
+		cfg.Encoding = []string{"gzip"}
 	}
 
-	for i := range opt.Config.Encoding {
-		opt.Config.Encoding[i] = strings.ToLower(opt.Config.Encoding[i])
+	seen := make(map[string]struct{}, len(cfg.Encoding))
+	for i, configured := range cfg.Encoding {
+		encoding := strings.ToLower(strings.TrimSpace(configured))
+		if encoding == "" {
+			panic("encoding: configured encoding must not be empty")
+		}
+		if _, ok := seen[encoding]; ok {
+			panic(fmt.Sprintf("encoding: duplicate configured encoding %q", encoding))
+		}
+		if encoding != "gzip" {
+			panic(fmt.Sprintf("encoding: unsupported configured encoding %q (supported: gzip)", encoding))
+		}
+		seen[encoding] = struct{}{}
+		cfg.Encoding[i] = encoding
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if opt.Config.Disabled {
+			if cfg.Disabled {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -37,7 +59,7 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 			addVary(w.Header(), "Accept-Encoding")
 
 			selectedEncoding, selectedQuality := "", float64(0)
-			for _, enc := range opt.Config.Encoding {
+			for _, enc := range cfg.Encoding {
 				if quality := encodingQuality(r.Header.Values("Accept-Encoding"), enc); quality > selectedQuality {
 					selectedEncoding, selectedQuality = enc, quality
 				}
@@ -65,8 +87,6 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 					gzipWriterPool.Put(gz)
 				}()
 				next.ServeHTTP(gzw, r)
-			default:
-				next.ServeHTTP(w, r)
 			}
 		})
 	}
@@ -110,18 +130,42 @@ func parseEncodingQualities(headerValues []string) map[string]float64 {
 				if !ok || !strings.EqualFold(strings.TrimSpace(key), "q") {
 					continue
 				}
-				parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-				if err != nil || parsed < 0 || parsed > 1 {
+				if quality == 0 {
+					continue
+				}
+				parsed, ok := parseQuality(strings.TrimSpace(value))
+				if !ok {
 					quality = 0
 				} else {
 					quality = parsed
 				}
 			}
-			qualities[name] = quality
+			if previous, exists := qualities[name]; !exists || quality < previous {
+				qualities[name] = quality
+			}
 		}
 	}
 
 	return qualities
+}
+
+// parseQuality implements the qvalue grammar from RFC 9110 section 12.4.2.
+func parseQuality(value string) (float64, bool) {
+	if value == "0" || value == "1" {
+		quality, _ := strconv.ParseFloat(value, 64)
+		return quality, true
+	}
+	whole, fraction, ok := strings.Cut(value, ".")
+	if !ok || len(fraction) > 3 || (whole != "0" && whole != "1") {
+		return 0, false
+	}
+	for _, digit := range fraction {
+		if digit < '0' || digit > '9' || whole == "1" && digit != '0' {
+			return 0, false
+		}
+	}
+	quality, err := strconv.ParseFloat(value, 64)
+	return quality, err == nil
 }
 
 func addVary(header http.Header, value string) {

@@ -1,12 +1,14 @@
 package cors
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -28,6 +30,33 @@ const (
 	headerAccessControlMaxAge           = "Access-Control-Max-Age"
 )
 
+// Bounds on the size of an Origin header that is worth matching against the
+// configured patterns. An origin is `scheme "://" host [ ":" port ]`
+// (RFC 6454 section 6.2), so the limit is derived from the longest legal value
+// of the bounded URL components plus an explicit scheme budget.
+//
+// The cap exists so that an absurdly long, attacker-supplied `Origin` cannot
+// force wildcard/regex evaluation against every configured pattern. It is only
+// consulted for the pattern-matching path: an exact `AllowOrigins` entry still
+// matches an origin of any length.
+const (
+	// RFC 3986 puts no protocol limit on a scheme. This implementation budget
+	// keeps matching bounded while comfortably covering registered schemes and
+	// common private reverse-DNS schemes.
+	maxOriginSchemeLen = 64
+	// maxOriginHostLen is the maximum length of a host name in DNS
+	// presentation format (RFC 1035 sections 2.3.4 and 3.1). A bracketed IPv6
+	// literal is at most 47 bytes, so it is covered by the same bound.
+	maxOriginHostLen = 253
+	// maxOriginPortLen is ":" plus the widest port number, 65535.
+	maxOriginPortLen = len(":65535")
+	// maxOriginAuthorityLen bounds the `host[:port]` part of an origin.
+	maxOriginAuthorityLen = maxOriginHostLen + maxOriginPortLen
+	// maxOriginLen is the longest origin that is matched against the
+	// `AllowOrigins` patterns.
+	maxOriginLen = maxOriginSchemeLen + len("://") + maxOriginAuthorityLen
+)
+
 // Cors defines the config for CORS middleware.
 //
 //   - Converted from echo's Cors.
@@ -41,10 +70,27 @@ type Cors struct {
 	// validate any logic. Remember that attackers may register hostile domain names.
 	// See https://blog.portswigger.net/2016/10/exploiting-cors-misconfigurations-for.html
 	//
+	// Limit: a request Origin longer than 326 bytes is denied without being
+	// matched against these patterns, so that an over-long header cannot force
+	// wildcard evaluation. The cap comprises a 64-byte scheme budget, "://", a
+	// 253-byte DNS host and the widest port, ":65535". It applies only to
+	// wildcard patterns; exact entries still match origins of any length.
+	//
+	// A pattern is matched against the whole origin, including the port. Use
+	// "https://*.example.com:8443" to accept a non-default port;
+	// "https://*.example.com" matches only origins with no port.
+	//
 	// Optional. Default value []string{"*"}.
 	//
 	// See also: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Origin
 	AllowOrigins []string `cfg:"allow_origins"`
+
+	// OnOriginTooLong is called when an Origin is denied because it exceeds the
+	// wildcard matching cap. Ordinary policy denials do not call it. The
+	// callback should avoid logging the full attacker-controlled value.
+	//
+	// Optional. Default is nil.
+	OnOriginTooLong func(context.Context, string) `cfg:"-"`
 
 	// AllowMethods determines the value of the Access-Control-Allow-Methods
 	// response header.  This header specified the list of methods allowed when
@@ -156,11 +202,11 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 
 	allowOriginPatterns := make([]*regexp.Regexp, 0, len(cfg.AllowOrigins))
 	for _, origin := range cfg.AllowOrigins {
-		if origin == "" || strings.TrimSpace(origin) != origin {
+		if origin == "" || strings.TrimSpace(origin) != origin || !utf8.ValidString(origin) {
 			panic(fmt.Errorf("cors: invalid allow origin pattern %q", origin))
 		}
-		if origin == "*" {
-			continue // "*" is handled differently and does not need regexp
+		if origin == "*" || !strings.ContainsAny(origin, "*?") {
+			continue // Global wildcards and exact origins do not need a regexp.
 		}
 		pattern := regexp.QuoteMeta(origin)
 		pattern = strings.ReplaceAll(pattern, "\\*", ".*")
@@ -218,31 +264,31 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 
 					break
 				}
-				if matchSubdomain(origin, o) {
-					allowOrigin = origin
-
-					break
-				}
 			}
 
-			checkPatterns := false
-			if allowOrigin == "" {
-				// to avoid regex cost by invalid (long) domains (253 is domain name max limit)
-				if len(origin) <= (253+3+5) && strings.Contains(origin, "://") {
-					checkPatterns = true
-				}
-			}
-			if checkPatterns {
-				for _, re := range allowOriginPatterns {
-					if match := re.MatchString(origin); match {
-						allowOrigin = origin
-						break
+			// An origin beyond the supported cap is not matched against patterns,
+			// so an attacker cannot force wildcard evaluation with an arbitrarily
+			// long header.
+			overLength := false
+			if allowOrigin == "" && len(allowOriginPatterns) > 0 && strings.Contains(origin, "://") {
+				if len(origin) <= maxOriginLen {
+					for _, re := range allowOriginPatterns {
+						if re.MatchString(origin) {
+							allowOrigin = origin
+
+							break
+						}
 					}
+				} else {
+					overLength = true
 				}
 			}
 
 			// Origin not allowed
 			if allowOrigin == "" {
+				if overLength && cfg.OnOriginTooLong != nil {
+					cfg.OnOriginTooLong(r.Context(), origin)
+				}
 				if !preflight {
 					next.ServeHTTP(w, r)
 

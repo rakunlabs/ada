@@ -40,7 +40,7 @@ func resolveRoutePath(prefix, routePath string) string {
 // Safe to call while the server is serving. Requests already in flight
 // complete against the routing table they started with.
 func (m *Mux) Remove(method, path string) bool {
-	return m.routes.remove(method, m.routePath(path))
+	return m.routes.remove(normalizeMethod(method), m.routePath(path))
 }
 
 // RemoveWildcard deletes a catch-all registered with HandleWildcard or
@@ -251,10 +251,11 @@ type RouteBuilder struct {
 }
 
 // HandleWithMethod adds or replaces a route in the batch.
-//   - Panics if method is neither "" nor a valid uppercase HTTP method token,
-//     exactly as Mux.HandleWithMethod does; see checkMethod.
+//   - Valid method tokens are normalized to uppercase. Panics if method is
+//     neither "" nor a valid RFC 9110 token, exactly as Mux.HandleWithMethod
+//     does; see normalizeMethod.
 func (b *RouteBuilder) HandleWithMethod(method, routePath string, handler http.HandlerFunc, middlewares ...MiddlewareFunc) {
-	checkMethod(method)
+	method = normalizeMethod(method)
 
 	combined := make([]MiddlewareFunc, 0, len(b.middlewares)+len(middlewares))
 	combined = append(combined, b.middlewares...)
@@ -265,7 +266,7 @@ func (b *RouteBuilder) HandleWithMethod(method, routePath string, handler http.H
 
 // Remove deletes a route from the batch.
 func (b *RouteBuilder) Remove(method, routePath string) bool {
-	return b.root.removeRoute(method, resolveRoutePath(b.prefix, routePath))
+	return b.root.removeRoute(normalizeMethod(method), resolveRoutePath(b.prefix, routePath))
 }
 
 // RemoveWildcard deletes a wildcard catch-all from the batch.

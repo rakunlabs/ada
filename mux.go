@@ -233,42 +233,33 @@ func (m *Mux) resolveHandler(handler any) http.HandlerFunc {
 	}
 }
 
-// checkMethod rejects a method that could never match a request.
-//
-// Route selection compares against r.Method, which net/http delivers verbatim
-// and which RFC 9110 defines as case-sensitive — so "get" registers a route
-// that is unreachable for the rest of the process's life, and reports nothing.
-// It is a typo with no legitimate reading, so it fails at boot like the
-// ambiguous patterns trie_insert rejects, rather than being silently upcased
-// into a route the caller did not write.
-//
-// The empty method is the documented catch-all used by Handle and HandleFunc
-// and is always accepted.
-func checkMethod(method string) {
+// normalizeMethod validates an RFC 9110 method token and returns its canonical
+// uppercase form. The empty method is the catch-all used by Handle and
+// HandleFunc and is returned unchanged.
+func normalizeMethod(method string) string {
 	if method == "" {
-		return
+		return ""
 	}
 
 	for i := range len(method) {
-		if isUpperMethodChar(method[i]) {
+		if isMethodTokenChar(method[i]) {
 			continue
 		}
 
 		panic(fmt.Sprintf(
-			"ada: invalid HTTP method %q: methods are case-sensitive and must be uppercase RFC 9110 tokens (use \"\" for a catch-all)",
+			"ada: invalid HTTP method %q: method must be an RFC 9110 token (use \"\" for a catch-all)",
 			method,
 		))
 	}
+
+	return strings.ToUpper(method)
 }
 
-// isUpperMethodChar reports whether c may appear in a canonical method: an RFC
-// 9110 token character that is not a lowercase letter.
-func isUpperMethodChar(c byte) bool {
+// isMethodTokenChar reports whether c is an RFC 9110 tchar byte.
+func isMethodTokenChar(c byte) bool {
 	switch {
-	case c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+	case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
 		return true
-	case c >= 'a' && c <= 'z':
-		return false
 	}
 
 	return strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
@@ -278,10 +269,10 @@ func isUpperMethodChar(c byte) bool {
 //   - This is the non-generic primitive: it is the method to embed in an
 //     interface when abstracting over *Mux, because Go interfaces cannot
 //     declare (nor be satisfied by) generic methods.
-//   - Panics if method is neither "" nor a valid uppercase HTTP method token;
-//     see checkMethod.
+//   - Valid method tokens are normalized to uppercase. Panics if method is
+//     neither "" nor a valid RFC 9110 token; see normalizeMethod.
 func (m *Mux) HandleWithMethod(method, path string, handler http.HandlerFunc, middlewares ...func(next http.Handler) http.Handler) {
-	checkMethod(method)
+	method = normalizeMethod(method)
 
 	combined := make([]MiddlewareFunc, 0, len(m.middlewares)+len(middlewares))
 	combined = append(combined, m.middlewares...)

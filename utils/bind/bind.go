@@ -21,6 +21,11 @@ import (
 var (
 	ErrBinding = fmt.Errorf("binding")
 
+	// ErrBodyTooLarge is wrapped by every failure caused by a WithBodyLimit
+	// limit, so a caller can recognise one with errors.Is instead of matching
+	// on the message. The ada error handler maps it to 413 Content Too Large.
+	ErrBodyTooLarge = errors.New("request body exceeds limit")
+
 	typeTime        = reflect.TypeFor[time.Time]()
 	typeDuration    = reflect.TypeFor[time.Duration]()
 	typeRawMessage  = reflect.TypeFor[json.RawMessage]()
@@ -112,9 +117,13 @@ func getFieldCache(rt reflect.Type) *fieldCache {
 
 // Bind binds HTTP request data to a struct based on content type and struct tags.
 func Bind(req *http.Request, obj any, opts ...Option) (err error) {
+	// Every failure is reported as ErrBinding, but the cause stays in the
+	// chain: %s flattened it to text, which cost callers errors.Is/errors.As
+	// on anything Bind wrapped — including the ErrBodyTooLarge that decides
+	// whether the response is a 413 or a 500.
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("%w: %s", ErrBinding, err)
+			err = fmt.Errorf("%w: %w", ErrBinding, err)
 		}
 	}()
 
@@ -370,8 +379,26 @@ func requestBodyWasParsed(req *http.Request, mediaType string) bool {
 	}
 }
 
+// BodyTooLargeError reports a request body that exceeded the WithBodyLimit
+// limit in effect for a Bind call.
+//
+// It unwraps to ErrBodyTooLarge and carries Limit, so a caller — the ada error
+// handler among them — can restate the limit without parsing the message.
+type BodyTooLargeError struct {
+	// Limit is the byte limit that was exceeded.
+	Limit int64
+}
+
+func (e *BodyTooLargeError) Error() string {
+	return fmt.Sprintf("request body exceeds limit of %d bytes", e.Limit)
+}
+
+func (e *BodyTooLargeError) Unwrap() error {
+	return ErrBodyTooLarge
+}
+
 func bodyLimitError(bodyLimit int64) error {
-	return fmt.Errorf("request body exceeds limit of %d bytes", bodyLimit)
+	return &BodyTooLargeError{Limit: bodyLimit}
 }
 
 // bindForm binds form data to struct fields with "form" tags.
@@ -396,7 +423,17 @@ func bindMultipartForm(req *http.Request, rv reflect.Value, cache *fieldCache) e
 
 // bindQuery binds query parameters to struct fields with "query" tags.
 func bindQuery(req *http.Request, rv reflect.Value, sep string, cache *fieldCache) error {
-	return bindFormData(req.URL.Query(), rv, cache.queryFields, sep)
+	if req.URL == nil {
+		return nil
+	}
+
+	// URL.Query drops parse errors, which can silently omit malformed values.
+	values, err := url.ParseQuery(req.URL.RawQuery)
+	if err != nil {
+		return fmt.Errorf("failed to parse query: %w", err)
+	}
+
+	return bindFormData(values, rv, cache.queryFields, sep)
 }
 
 // bindHeaders binds HTTP headers to struct fields with "header" tags.
@@ -447,7 +484,8 @@ func bindURI(req *http.Request, rv reflect.Value, cache *fieldCache) error {
 	return nil
 }
 
-// bindFormData binds form data to struct fields.
+// bindFormData binds form or query values to struct fields. Only query binding
+// passes a separator.
 func bindFormData(values url.Values, rv reflect.Value, fields []fieldInfo, sep string) error {
 	for _, fieldInfo := range fields {
 		field := rv.Field(fieldInfo.index)
@@ -460,15 +498,6 @@ func bindFormData(values url.Values, rv reflect.Value, fields []fieldInfo, sep s
 		formValues := values[fieldInfo.tagValue]
 		if len(formValues) == 0 {
 			continue
-		}
-
-		// comma separated values
-		if sep != "" {
-			expandedValues := make([]string, 0, len(formValues))
-			for _, value := range formValues {
-				expandedValues = append(expandedValues, strings.Split(value, sep)...)
-			}
-			formValues = expandedValues
 		}
 
 		// Handle json.RawMessage specially (it's a []byte but should be treated as a single value)
@@ -517,6 +546,20 @@ func bindFormData(values url.Values, rv reflect.Value, fields []fieldInfo, sep s
 
 		// Handle slice fields
 		if field.Kind() == reflect.Slice {
+			// JSON-valued slices are handled above; separators only describe
+			// ordinary scalar slice elements. RawMessage pointer elements also
+			// preserve each repeated value as a whole.
+			elemType := field.Type().Elem()
+			for elemType.Kind() == reflect.Pointer {
+				elemType = elemType.Elem()
+			}
+			if sep != "" && elemType != typeRawMessage {
+				expandedValues := make([]string, 0, len(formValues))
+				for _, value := range formValues {
+					expandedValues = append(expandedValues, strings.Split(value, sep)...)
+				}
+				formValues = expandedValues
+			}
 			if err := setSliceField(field, fieldType, formValues); err != nil {
 				return fmt.Errorf("failed to bind field %s: %w", fieldInfo.tagValue, err)
 			}

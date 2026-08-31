@@ -45,26 +45,61 @@ func handleUser(c *ada.Context) error {
 
 ## Request Body Limit
 
-Binding limits the total request body to **1 MiB** by default. The limit also
-applies when `Content-Length` is absent, and all bytes in the body count toward
-it, including trailing whitespace. Oversized requests return an error wrapping
-`bind.ErrBinding`.
+Binding applies **no body limit by default** (`bind.DefaultBodyLimit` is `0`).
+An unbounded body is therefore an unbounded resource cost: JSON, XML and
+URL-encoded bodies are read entirely into memory, while multipart bodies spool
+to disk once they exceed the in-memory threshold described below.
 
-Choose an application-specific limit when larger payloads are expected:
+Set a limit for every route with the
+[body-limit middleware](./middleware/bodylimit), which protects the entire
+handler rather than only the bind call:
+
+```go
+mux.Use(bodylimit.Middleware(2 << 20)) // 2 MiB
+```
+
+`bind.WithBodyLimit` sets a limit for a single bind, useful when one endpoint
+needs a tighter cap than the route's:
 
 ```go
 err := bind.Bind(r, &payload, bind.WithBodyLimit(4<<20)) // 4 MiB
 ```
 
-To preserve the previous unlimited behavior during migration, explicitly set
-the limit to zero:
+`ada.Context.Bind` accepts the same options:
 
 ```go
-err := bind.Bind(r, &payload, bind.WithBodyLimit(0))
+err := c.Bind(&payload, bind.WithBodyLimit(4<<20))
 ```
 
-`ada.Context.Bind` uses the secure default. Call `bind.Bind(c.Request, ...)`
-directly when an endpoint needs a custom limit.
+The limit also applies when `Content-Length` is absent, and all bytes in the
+body count toward it, including trailing whitespace. Exceeding it — whether the
+limit came from the middleware or from `WithBodyLimit` — is reported as
+`413 Content Too Large` with a message naming the limit, not as a generic `500`.
+
+Passing `0` disables the limit explicitly, which is the default.
+
+## Multipart Memory Threshold
+
+`bind.DefaultMultipartFormMaxMemory` (32 MiB) is passed to
+`http.Request.ParseMultipartForm`. Despite the name it is **not a limit and it
+never rejects anything** — it only decides where the data goes:
+
+- File parts are buffered in memory up to that many bytes. Go reserves a further
+  10 MiB for the non-file parts, so the real memory ceiling is roughly
+  `MaxMemory + 10 MiB`.
+- Everything beyond that is written to **temporary files on disk**. An upload of
+  any size will be accepted; it just stops consuming memory and starts consuming
+  disk.
+
+So a multipart endpoint with no body limit is a disk-exhaustion risk, not a
+memory one. Use the [body-limit middleware](./middleware/bodylimit) to bound it.
+
+The temporary files are removed for you: `net/http` clears them after the
+handler returns, and `bind` clears them itself when it was the code that parsed
+the form.
+
+This threshold is now fully reachable. It was previously unreachable: the old
+1 MiB total body cap rejected any request large enough to approach it.
 
 ## Supported Struct Tags
 
@@ -99,7 +134,9 @@ type Request struct {
 ## Supported Data Types
 
 - **Primitives**: `string`, `int`, `int8`, `int16`, `int32`, `int64`, `uint`, `uint8`, `uint16`, `uint32`, `uint64`, `float32`, `float64`, `bool`
-- **Slices**: `[]string`, `[]int`, `[]bool`, etc.
+- **Slices**: `[]string`, `[]int`, `[]bool`, etc. (see
+  [Query Value Separator](#query-value-separator) for how a query parameter
+  fills one)
 - **Pointers**: `*string`, `*int`, etc. (for optional fields)
 - **Time**: `time.Time` with customizable parsing format
 - **Duration**: `time.Duration`
@@ -107,6 +144,57 @@ type Request struct {
 - **Nested Structs**: Full support for nested struct binding
 - **JSON RawMessage**: `json.RawMessage`, `[]json.RawMessage` for raw JSON preservation
 - **Maps**: `map[string]any` and other map types (auto JSON unmarshal from form/query)
+
+## Query Value Separator
+
+A query parameter can fill a scalar-valued slice by repeating the parameter or
+using `,` (`bind.DefaultQuerySeparator`):
+
+```go
+type Request struct {
+    Tags []string `query:"tags"`
+}
+```
+
+```
+?tags=go&tags=web   → ["go" "web"]
+?tags=go,web        → ["go" "web"]
+?tags=go,web&tags=x → ["go" "web" "x"]
+```
+
+The separator does not apply to scalar fields:
+
+```go
+type Request struct {
+    Name string `query:"name"`
+}
+```
+
+```
+?name=Doe,%20John   → "Doe, John"
+```
+
+Use `bind.WithQuerySeparator` to change the separator, or pass `""` to disable
+splitting so that repeating the parameter is the only way to fill a slice:
+
+```go
+err := bind.Bind(r, &req, bind.WithQuerySeparator("|")) // ?tags=go|web
+err := bind.Bind(r, &req, bind.WithQuerySeparator(""))  // ?tags=go&tags=web only
+```
+
+The option affects query binding only, not forms, headers, or URI parameters.
+It does not split JSON-valued slices (`[]json.RawMessage`, slices of structs or
+maps, and pointer variants); repeat the parameter to provide multiple JSON
+values.
+
+For repeated scalar parameters, the first value wins:
+
+```
+?v=bir&v=iki   →  Scalar string `query:"v"`   binds "bir"
+?v=bir&v=iki   →  Slice []string `query:"v"`  binds ["bir" "iki"]
+```
+
+Malformed query strings, such as `?bad=%zz`, return a binding error.
 
 ## Binding Priority Order
 
