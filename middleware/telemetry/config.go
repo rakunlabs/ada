@@ -1,10 +1,8 @@
 package telemetry
 
 import (
-	"fmt"
 	"net/http"
 
-	"github.com/rakunlabs/ada/utils/proxy"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -23,8 +21,7 @@ type config struct {
 	SpanNameFormatter  func(routeName string, r *http.Request) string
 	MetricAttributesFn func(*http.Request) []attribute.KeyValue
 
-	proxyPolicy       proxy.Policy
-	unsafeProxyHeader bool
+	clientIPFn func(*http.Request) string
 }
 
 // Filter is a predicate used to determine whether a given http.request should be traced.
@@ -103,24 +100,18 @@ func WithMetricAttributesFn(fn func(*http.Request) []attribute.KeyValue) Option 
 	}
 }
 
-// WithTrustedProxies permits matching immediate peers to supply client IP
-// forwarding headers. CIDRs are validated when this option is created; bare
-// IPs are accepted as single-address prefixes.
-func WithTrustedProxies(cidrs ...string) Option {
-	policy, err := proxy.New(cidrs...)
-	if err != nil {
-		panic(fmt.Errorf("telemetry: trusted proxies: %w", err))
-	}
-
+// WithClientIP sets how the client.address span attribute is derived. The
+// default is the immediate peer, which ignores forwarding headers.
+//
+// This package carries no proxy policy of its own: resolving X-Forwarded-For
+// safely requires knowing where the trust boundary sits, which is a deployment
+// fact rather than an instrumentation one. Behind a proxy, pass a resolver that
+// knows it, for example proxy.TrustedRealIP("10.0.0.0/8") from
+// github.com/rakunlabs/ada/middleware/auth/proxy.
+//
+// A nil resolver restores the default.
+func WithClientIP(f func(*http.Request) string) Option {
 	return func(o *config) {
-		o.proxyPolicy = policy
-		o.unsafeProxyHeader = false
+		o.clientIPFn = f
 	}
-}
-
-// WithUnsafeProxyHeaders trusts client IP forwarding headers from every peer.
-// It preserves the old behavior for deployments with an external boundary.
-// Prefer WithTrustedProxies.
-func WithUnsafeProxyHeaders() Option {
-	return func(o *config) { o.unsafeProxyHeader = true }
 }

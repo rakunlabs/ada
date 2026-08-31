@@ -4,7 +4,6 @@ go 1.25.0
 
 require (
 	github.com/felixge/httpsnoop v1.0.4
-	github.com/rakunlabs/ada/utils/proxy v0.5.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.68.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
@@ -12,8 +11,6 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 )
-
-replace github.com/rakunlabs/ada/utils/proxy => ../../utils/proxy
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

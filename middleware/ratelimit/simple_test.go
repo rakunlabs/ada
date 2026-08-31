@@ -167,10 +167,10 @@ func TestSimpleLimiterFormatsLargeRetryAfterWithoutIntOverflow(t *testing.T) {
 	}
 }
 
-func TestLimitByRealIPIgnoresSpoofedHeadersByDefault(t *testing.T) {
+func TestLimitByKeyDefaultsToImmediatePeer(t *testing.T) {
 	useTummy(t)
 
-	h := ratelimit.LimitByRealIP(1, time.Minute)(okHandler())
+	h := ratelimit.LimitByKey(1, time.Minute, nil)(okHandler())
 
 	if rec := sendFrom(h, "192.168.0.1:80", map[string]string{"X-Real-IP": "1.1.1.1"}); rec.Code != http.StatusOK {
 		t.Fatalf("first request: got %d, want 200", rec.Code)
@@ -180,43 +180,44 @@ func TestLimitByRealIPIgnoresSpoofedHeadersByDefault(t *testing.T) {
 	}
 }
 
-func TestLimitByRealIPUsesTrustedProxyChain(t *testing.T) {
+// The proxy boundary is the caller's to define. LimitByKey must limit by
+// whatever the injected resolver returns, without inspecting headers itself.
+func TestLimitByKeyUsesInjectedResolver(t *testing.T) {
 	useTummy(t)
 
-	h := ratelimit.LimitByRealIP(1, time.Minute,
-		ratelimit.WithTrustedProxies("10.0.0.0/8"),
-	)(okHandler())
+	h := ratelimit.LimitByKey(1, time.Minute, func(r *http.Request) string {
+		return r.Header.Get("X-Client")
+	})(okHandler())
 
-	if rec := sendFrom(h, "10.0.0.3:80", map[string]string{"X-Forwarded-For": "192.0.2.99, 198.51.100.1, 10.0.0.2"}); rec.Code != http.StatusOK {
-		t.Fatalf("client 1: got %d, want 200", rec.Code)
+	if rec := sendFrom(h, "10.0.0.3:80", map[string]string{"X-Client": "a"}); rec.Code != http.StatusOK {
+		t.Fatalf("client a: got %d, want 200", rec.Code)
 	}
-	if rec := sendFrom(h, "10.0.0.3:80", map[string]string{"X-Forwarded-For": "203.0.113.99, 198.51.100.1, 10.0.0.2"}); rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("same client with spoofed prefix: got %d, want 429", rec.Code)
+	if rec := sendFrom(h, "10.0.0.9:80", map[string]string{"X-Client": "a"}); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("client a from another peer: got %d, want 429", rec.Code)
 	}
-	if rec := sendFrom(h, "10.0.0.3:80", map[string]string{"X-Forwarded-For": "198.51.100.2, 10.0.0.2"}); rec.Code != http.StatusOK {
-		t.Fatalf("client 2: got %d, want 200", rec.Code)
+	if rec := sendFrom(h, "10.0.0.3:80", map[string]string{"X-Client": "b"}); rec.Code != http.StatusOK {
+		t.Fatalf("client b: got %d, want 200", rec.Code)
 	}
 }
 
-func TestRealIPKeyHelpers(t *testing.T) {
+func TestKeyByIPIgnoresForwardingHeaders(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "[2001:db8::10]:1234"
 	r.Header.Set("X-Real-IP", "192.0.2.1")
+	r.Header.Set("True-Client-IP", "192.0.2.2")
+	r.Header.Set("X-Forwarded-For", "192.0.2.3")
 
-	if got := ratelimit.KeyByRealIP(r); got != "2001:db8::10" {
-		t.Fatalf("safe key = %q", got)
+	if got := ratelimit.KeyByIP(r); got != "2001:db8::10" {
+		t.Fatalf("key = %q, want the immediate peer", got)
 	}
-	trusted := ratelimit.KeyByRealIPWithTrustedProxies("2001:db8::/32")
-	if got := trusted(r); got != "192.0.2.1" {
-		t.Fatalf("trusted key = %q", got)
-	}
-	if got := ratelimit.KeyByRealIPUnsafe(r); got != "192.0.2.1" {
-		t.Fatalf("unsafe key = %q", got)
-	}
+}
 
-	r.Header.Set("X-Real-IP", "malformed")
-	if got := trusted(r); got != "2001:db8::10" {
-		t.Fatalf("malformed header key = %q, want immediate peer", got)
+func TestKeyByIPUnmaps4in6(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "[::ffff:192.0.2.7]:443"
+
+	if got := ratelimit.KeyByIP(r); got != "192.0.2.7" {
+		t.Fatalf("key = %q, want one identity per client", got)
 	}
 }
 

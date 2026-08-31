@@ -1,12 +1,10 @@
 package ratelimit
 
 import (
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/rakunlabs/ada/utils/proxy"
 	"github.com/rakunlabs/tummy"
 )
 
@@ -44,105 +42,28 @@ func LimitByIP(requestLimit int, windowLength time.Duration) func(http.Handler) 
 	return newSimpleLimiter(requestLimit, windowLength, KeyByIP).handler
 }
 
-// RealIPOption configures trusted-proxy handling for LimitByRealIP.
-type RealIPOption func(*realIPConfig)
-
-type realIPConfig struct {
-	policy proxy.Policy
-	unsafe bool
-}
-
-// WithTrustedProxies permits matching immediate peers to supply client IP
-// forwarding headers. CIDRs are validated when this option is created; bare
-// IPs are accepted as single-address prefixes.
-func WithTrustedProxies(cidrs ...string) RealIPOption {
-	policy, err := proxy.New(cidrs...)
-	if err != nil {
-		panic(fmt.Errorf("ratelimit: trusted proxies: %w", err))
+// LimitByKey limits requests per key returned by keyFn.
+//
+// This is the seam for trusted-proxy handling: this package holds no proxy
+// policy of its own, because deriving a client IP across a proxy boundary is a
+// deployment decision, not a rate-limiting one. Behind a proxy, pass a resolver
+// that knows the boundary, for example proxy.TrustedRealIP("10.0.0.0/8") from
+// github.com/rakunlabs/ada/middleware/auth/proxy.
+//
+// A nil keyFn limits by the immediate peer, the same as LimitByIP.
+func LimitByKey(requestLimit int, windowLength time.Duration, keyFn func(*http.Request) string) func(http.Handler) http.Handler {
+	if keyFn == nil {
+		keyFn = KeyByIP
 	}
 
-	return func(cfg *realIPConfig) {
-		cfg.policy = policy
-		cfg.unsafe = false
-	}
-}
-
-// WithUnsafeProxyHeaders trusts client IP forwarding headers from every peer.
-// It preserves legacy behavior for deployments with an external trust
-// boundary. Prefer WithTrustedProxies.
-func WithUnsafeProxyHeaders() RealIPOption {
-	return func(cfg *realIPConfig) { cfg.unsafe = true }
-}
-
-// LimitByRealIP limits requests by the canonical immediate peer address. It
-// ignores forwarding headers unless WithTrustedProxies or the explicitly
-// unsafe compatibility option is supplied.
-func LimitByRealIP(requestLimit int, windowLength time.Duration, opts ...RealIPOption) func(http.Handler) http.Handler {
-	cfg := realIPConfig{}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
-	return newSimpleLimiter(requestLimit, windowLength, realIPKey(cfg)).handler
+	return newSimpleLimiter(requestLimit, windowLength, keyFn).handler
 }
 
 // KeyByIP returns the canonical client IP from r.RemoteAddr (port stripped),
 // or a stable bounded identity when the immediate peer is not an IP transport.
+// Forwarding headers are ignored; see LimitByKey to honour them.
 func KeyByIP(r *http.Request) string {
-	ip, _ := proxy.ClientIP(r)
-	return ip
-}
-
-// KeyByRealIP returns the canonical immediate peer address and safely ignores
-// forwarding headers. Use KeyByRealIPWithTrustedProxies to configure a proxy
-// boundary.
-func KeyByRealIP(r *http.Request) string {
-	return KeyByIP(r)
-}
-
-// KeyByRealIPWithTrustedProxies returns a key function backed by a validated
-// trusted-proxy policy.
-func KeyByRealIPWithTrustedProxies(cidrs ...string) func(*http.Request) string {
-	policy, err := proxy.New(cidrs...)
-	if err != nil {
-		panic(fmt.Errorf("ratelimit: trusted proxies: %w", err))
-	}
-
-	return realIPKey(realIPConfig{policy: policy})
-}
-
-// KeyByRealIPUnsafe trusts common client IP forwarding headers from every
-// peer. Prefer KeyByRealIPWithTrustedProxies.
-func KeyByRealIPUnsafe(r *http.Request) string {
-	return realIPKey(realIPConfig{unsafe: true})(r)
-}
-
-// LimitByRealIPUnsafe preserves the legacy trust-all forwarding-header
-// behavior under an explicit name.
-func LimitByRealIPUnsafe(requestLimit int, windowLength time.Duration) func(http.Handler) http.Handler {
-	return LimitByRealIP(requestLimit, windowLength, WithUnsafeProxyHeaders())
-}
-
-func realIPKey(cfg realIPConfig) func(*http.Request) string {
-	return func(r *http.Request) string {
-		var (
-			ip  string
-			err error
-		)
-		if cfg.unsafe {
-			ip, err = proxy.UnsafeClientIP(r)
-		} else {
-			ip, err = cfg.policy.ClientIP(r)
-		}
-		if err == nil {
-			return ip
-		}
-
-		// A malformed forwarded value must not become a new limiter key or
-		// disable limiting. Group it under the canonical immediate peer.
-		ip, _ = proxy.ClientIP(r)
-		return ip
-	}
+	return clientIP(r)
 }
 
 // simpleLimiter is a sliding-window-counter rate limiter. It is safe for

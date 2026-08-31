@@ -123,34 +123,25 @@ func TestWithFilterSkipsTelemetryAndCallsNext(t *testing.T) {
 	}
 }
 
-func TestRequestTraceAttrsUseSafeAndTrustedClientIPs(t *testing.T) {
+func TestRequestTraceAttrsUseImmediatePeer(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://server.example/resource", nil)
 	req.RemoteAddr = "[2001:db8:ffff::3]:443"
 	req.Header.Set("X-Forwarded-For", "2001:db8:dead::99, 2001:db8:1234::8, 2001:db8:ffff::2")
 
 	safe := attribute.NewSet(RequestTraceAttrs(req)...)
 	assertStringAttribute(t, safe, "client.address", "2001:db8:ffff::3")
-
-	trustedAttrs := TrustedRequestTraceAttrs("2001:db8:ffff::/48")
-	trusted := attribute.NewSet(trustedAttrs(req)...)
-	assertStringAttribute(t, trusted, "client.address", "2001:db8:1234::8")
-
-	unsafe := attribute.NewSet(UnsafeRequestTraceAttrs(req)...)
-	assertStringAttribute(t, unsafe, "client.address", "2001:db8:dead::99")
-
-	req.Header.Set("X-Forwarded-For", "malformed, 2001:db8:ffff::2")
-	malformed := attribute.NewSet(trustedAttrs(req)...)
-	assertStringAttribute(t, malformed, "client.address", "2001:db8:ffff::3")
 }
 
-func TestMiddlewareWithTrustedProxiesSetsClientAddress(t *testing.T) {
+// client.address follows the injected resolver, while network.peer.address
+// stays the immediate peer: the two are different facts and must not merge.
+func TestMiddlewareWithClientIPSetsClientAddress(t *testing.T) {
 	spanRecorder := tracetest.NewSpanRecorder()
 	tracerProvider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
 	t.Cleanup(func() { _ = tracerProvider.Shutdown(context.Background()) })
 
 	handler := Middleware(
 		WithTracerProvider(tracerProvider),
-		WithTrustedProxies("10.0.0.0/8"),
+		WithClientIP(func(r *http.Request) string { return r.Header.Get("X-Real-IP") }),
 	)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -164,17 +155,20 @@ func TestMiddlewareWithTrustedProxiesSetsClientAddress(t *testing.T) {
 	if len(spans) != 1 {
 		t.Fatalf("ended spans = %d, want 1", len(spans))
 	}
-	assertStringAttribute(t, attribute.NewSet(spans[0].Attributes()...), "client.address", "198.51.100.8")
+
+	attrs := attribute.NewSet(spans[0].Attributes()...)
+	assertStringAttribute(t, attrs, "client.address", "198.51.100.8")
+	assertStringAttribute(t, attrs, "network.peer.address", "10.0.0.2")
 }
 
-func TestTrustedProxyCIDRsValidateAtSetup(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("invalid trusted CIDR did not panic")
-		}
-	}()
+// An empty result must not erase the attribute; falling back to the peer keeps
+// client.address always populated.
+func TestClientIPResolverFallsBackToPeer(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://server.example/resource", nil)
+	req.RemoteAddr = "10.0.0.2:443"
 
-	_ = WithTrustedProxies("invalid")
+	attrs := attribute.NewSet(requestTraceAttrs(req, func(*http.Request) string { return "" })...)
+	assertStringAttribute(t, attrs, "client.address", "10.0.0.2")
 }
 
 func sumPointAttributes(metrics metricdata.ResourceMetrics, name string) (attribute.Set, bool) {

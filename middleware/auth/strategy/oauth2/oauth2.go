@@ -28,7 +28,7 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
-	"github.com/rakunlabs/ada/utils/proxy"
+	"github.com/rakunlabs/ada/middleware/auth/proxy"
 )
 
 const (

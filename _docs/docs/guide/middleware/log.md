@@ -19,23 +19,27 @@ By default, `remote_ip` is the immediate peer from `r.RemoteAddr`. Forwarding
 headers such as `X-Forwarded-For`, `X-Real-IP`, and `True-Client-IP` are ignored
 so a direct client cannot spoof the logged address.
 
-When Ada is behind a reverse proxy, list the proxy networks explicitly:
+This package holds no proxy policy of its own, and depends on nothing beyond
+the standard library and its logger. Resolving `X-Forwarded-For` correctly
+requires knowing where the trust boundary sits, which is a deployment fact
+rather than a logging one, so it is injected instead:
 
 ```go
+import "github.com/rakunlabs/ada/middleware/auth/proxy"
+
 mlog.Middleware(
-    mlog.WithTrustedProxies("10.0.0.0/8", "fd00::/8"),
+    mlog.WithRealIP(proxy.TrustedRealIP("10.0.0.0/8", "fd00::/8")),
 )
 ```
 
 Only a matching immediate peer may supply forwarding headers. Ensure that the
 proxy overwrites incoming forwarding headers rather than appending untrusted
-values. `mlog.WithUnsafeProxyHeaders()` restores the old trust-all behavior for
-compatibility, but should only be used when an external network boundary is
-already enforced.
+values. `proxy.UnsafeRealIP` restores the trust-all behavior, but should only be
+used when an external network boundary is already enforced.
 
-The same rules apply to the helpers: `mlog.RealIP` ignores forwarding headers,
-while `mlog.TrustedRealIP(cidrs...)` returns a helper with an explicit proxy
-policy.
+`WithRealIP` takes any `func(*http.Request) string`, so a deployment that
+derives the client address some other way can supply its own. `mlog.RealIP` is
+the default and ignores forwarding headers.
 
 Example output:
 

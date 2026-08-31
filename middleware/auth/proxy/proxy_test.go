@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rakunlabs/ada/utils/proxy"
+	"github.com/rakunlabs/ada/middleware/auth/proxy"
 )
 
 func request(remote string, headers map[string]string) *http.Request {

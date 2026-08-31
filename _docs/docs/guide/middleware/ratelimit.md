@@ -23,22 +23,31 @@ mux.Use(ratelimit.LimitAll(1_000, time.Minute))
 mux.Use(ratelimit.LimitByIP(100, time.Minute))
 ```
 
-`LimitByRealIP` also uses the immediate peer by default. It deliberately
-ignores `X-Forwarded-For`, `X-Real-IP`, and `True-Client-IP` unless the direct
-proxy is trusted:
+`LimitByIP` deliberately ignores `X-Forwarded-For`, `X-Real-IP`, and
+`True-Client-IP`: a client that can set those headers can mint a fresh limiter
+key per request and defeat the limiter entirely.
+
+This package carries no proxy policy of its own, and depends on nothing beyond
+its store. Behind a reverse proxy, pass a resolver that knows the trust
+boundary to `LimitByKey`:
 
 ```go
-mux.Use(ratelimit.LimitByRealIP(
+import "github.com/rakunlabs/ada/middleware/auth/proxy"
+
+mux.Use(ratelimit.LimitByKey(
     100,
     time.Minute,
-    ratelimit.WithTrustedProxies("10.0.0.0/8", "fd00::/8"),
+    proxy.TrustedRealIP("10.0.0.0/8", "fd00::/8"),
 ))
 ```
 
 Configure the CIDRs of the proxies that connect directly to Ada, and make those
-proxies overwrite client-supplied forwarding headers. The compatibility option
-`ratelimit.WithUnsafeProxyHeaders()` trusts forwarding headers from every peer;
-use it only behind a separately enforced network boundary.
+proxies overwrite client-supplied forwarding headers. `proxy.UnsafeRealIP`
+trusts forwarding headers from every peer; use it only behind a separately
+enforced network boundary.
+
+`LimitByKey` accepts any `func(*http.Request) string`, so the same limiter can
+be keyed by API key, tenant, or account instead of address.
 
 ## Sensitive Endpoints
 
@@ -52,7 +61,7 @@ if err != nil {
     return err
 }
 
-clientIP := ratelimit.KeyByRealIPWithTrustedProxies("10.0.0.0/8")
+clientIP := proxy.TrustedRealIP("10.0.0.0/8")
 loginLimit := ratelimit.Middleware(ratelimit.Config{
     Window:        15 * time.Minute,
     SoftThreshold: 3,

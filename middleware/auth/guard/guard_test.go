@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rakunlabs/ada/middleware/auth/guard"
+	"github.com/rakunlabs/ada/middleware/auth/proxy"
 )
 
 type clock struct {
@@ -181,23 +182,30 @@ func TestClientIPIgnoresUntrustedForwardedFor(t *testing.T) {
 
 	// No trusted proxies: the header is attacker-controlled and must be
 	// ignored, or the guard hands out unlimited fresh identities.
-	if got := guard.ClientIP(r, nil); got != "203.0.113.9" {
+	if got := guard.ClientIP(r, proxy.Policy{}); got != "203.0.113.9" {
 		t.Errorf("got %q, want the peer address", got)
 	}
 }
 
 func TestClientIPUsesForwardedForBehindTrustedProxy(t *testing.T) {
-	nets, err := guard.ParseCIDRs([]string{"10.0.0.0/8"})
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "10.1.2.3:1234"
 	r.Header.Set("X-Forwarded-For", "1.2.3.4, 10.9.9.9")
 
-	if got := guard.ClientIP(r, nets); got != "1.2.3.4" {
+	if got := guard.ClientIP(r, proxy.MustNew("10.0.0.0/8")); got != "1.2.3.4" {
 		t.Errorf("got %q, want the first untrusted hop", got)
+	}
+}
+
+// A trusted chain that vouches for nobody, or a malformed hop, must collapse to
+// the immediate peer rather than mint an unattributable key.
+func TestClientIPFallsBackToPeerOnMalformedChain(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "10.1.2.3:1234"
+	r.Header.Set("X-Forwarded-For", "malformed, 10.9.9.9")
+
+	if got := guard.ClientIP(r, proxy.MustNew("10.0.0.0/8")); got != "10.1.2.3" {
+		t.Errorf("got %q, want the immediate peer", got)
 	}
 }
 

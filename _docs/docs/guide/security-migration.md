@@ -12,9 +12,9 @@ by the client.
 
 | Component | Secure configuration | Compatibility option |
 |---|---|---|
-| [Request log](./middleware/log) | `log.WithTrustedProxies(cidrs...)` | `log.WithUnsafeProxyHeaders()` |
-| [Rate limit](./middleware/ratelimit) | `ratelimit.WithTrustedProxies(cidrs...)` or `KeyByRealIPWithTrustedProxies(cidrs...)` | `ratelimit.WithUnsafeProxyHeaders()` |
-| [Telemetry](./middleware/telemetry) | `telemetry.WithTrustedProxies(cidrs...)` | `telemetry.WithUnsafeProxyHeaders()` |
+| [Request log](./middleware/log) | `log.WithRealIP(proxy.TrustedRealIP(cidrs...))` | `log.WithRealIP(proxy.UnsafeRealIP)` |
+| [Rate limit](./middleware/ratelimit) | `ratelimit.LimitByKey(n, w, proxy.TrustedRealIP(cidrs...))` | `ratelimit.LimitByKey(n, w, proxy.UnsafeRealIP)` |
+| [Telemetry](./middleware/telemetry) | `telemetry.WithClientIP(proxy.TrustedRealIP(cidrs...))` | `telemetry.WithClientIP(proxy.UnsafeRealIP)` |
 | [Header auth](./middleware/auth#header-proxy-strategy) | `header.WithTrustedProxies(cidrs...)`, `WithSharedSecret(...)`, or both | `header.WithUnsafeTrustAll()` |
 | [Magic link](./middleware/auth#magic-link-strategy) | `magiclink.WithVerifyBaseURL(origin)` or `WithTrustedProxies(cidrs...)` | `magiclink.WithUnsafeRequestOrigin()` |
 | [OAuth2](./middleware/auth#oauth2--oidc-strategy) | `CallbackBaseURL` or `TrustedProxies` | `UnsafeTrustAllForwardedHeaders` |
@@ -22,6 +22,40 @@ by the client.
 The compatibility options restore legacy trust-all behavior. They are unsafe
 when untrusted clients can connect directly and should be temporary migration
 tools, not the default deployment configuration.
+
+## Client Address Resolution Moved
+
+`log`, `ratelimit`, and `telemetry` no longer carry a trusted-proxy policy and
+no longer depend on the proxy package. Deriving a client address across a proxy
+boundary is a deployment decision, and three copies of that decision drift
+apart in exactly the direction an attacker wants. There is now one
+implementation, in `github.com/rakunlabs/ada/middleware/auth/proxy`, injected
+where it is needed.
+
+| Removed | Replacement |
+|---|---|
+| `log.WithTrustedProxies(cidrs...)` | `log.WithRealIP(proxy.TrustedRealIP(cidrs...))` |
+| `log.WithUnsafeProxyHeaders()` | `log.WithRealIP(proxy.UnsafeRealIP)` |
+| `log.TrustedRealIP(cidrs...)` | `proxy.TrustedRealIP(cidrs...)` |
+| `log.UnsafeRealIP` | `proxy.UnsafeRealIP` |
+| `ratelimit.LimitByRealIP(n, w, WithTrustedProxies(cidrs...))` | `ratelimit.LimitByKey(n, w, proxy.TrustedRealIP(cidrs...))` |
+| `ratelimit.LimitByRealIP(n, w)` | `ratelimit.LimitByIP(n, w)` |
+| `ratelimit.LimitByRealIPUnsafe(n, w)` | `ratelimit.LimitByKey(n, w, proxy.UnsafeRealIP)` |
+| `ratelimit.KeyByRealIP` | `ratelimit.KeyByIP` |
+| `ratelimit.KeyByRealIPWithTrustedProxies(cidrs...)` | `proxy.TrustedRealIP(cidrs...)` |
+| `ratelimit.KeyByRealIPUnsafe` | `proxy.UnsafeRealIP` |
+| `telemetry.WithTrustedProxies(cidrs...)` | `telemetry.WithClientIP(proxy.TrustedRealIP(cidrs...))` |
+| `telemetry.WithUnsafeProxyHeaders()` | `telemetry.WithClientIP(proxy.UnsafeRealIP)` |
+| `telemetry.TrustedRequestTraceAttrs(cidrs...)` | `telemetry.WithClientIP(proxy.TrustedRealIP(cidrs...))` |
+| `telemetry.UnsafeRequestTraceAttrs` | `telemetry.WithClientIP(proxy.UnsafeRealIP)` |
+| `guard.ClientIP(r, []*net.IPNet)` | `guard.ClientIP(r, proxy.Policy)`, built with `proxy.MustNew(cidrs...)` |
+
+The package also moved: `github.com/rakunlabs/ada/utils/proxy` is now
+`github.com/rakunlabs/ada/middleware/auth/proxy`, and is no longer a separate
+module.
+
+Defaults are unchanged. Code that never configured trusted proxies keeps
+logging, limiting, and tracing by the immediate peer.
 
 ## Auth Responses And MFA
 

@@ -1,14 +1,12 @@
 package log
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/felixge/httpsnoop"
-	"github.com/rakunlabs/ada/utils/proxy"
 	"github.com/rakunlabs/logi"
 )
 
@@ -20,9 +18,8 @@ type Logger struct {
 	PreFunc  func(r *http.Request) *http.Request
 	PostFunc func(r *http.Request, v *Response)
 
-	proxyPolicy       proxy.Policy
-	unsafeProxyHeader bool
-	defaultSlogPost   bool
+	realIP          func(*http.Request) string
+	defaultSlogPost bool
 }
 
 // Response contains extracted values from logger.
@@ -89,7 +86,11 @@ func New(opts ...Option) *Logger {
 		opt(&o)
 	}
 	if o.Logger.defaultSlogPost && !o.postConfigured {
-		realIP := trustedRealIP(o.Logger.proxyPolicy, o.Logger.unsafeProxyHeader)
+		realIP := o.Logger.realIP
+		if realIP == nil {
+			realIP = RealIP
+		}
+
 		o.Logger.PostFunc = slogPostFunc(realIP)
 	}
 
@@ -156,47 +157,9 @@ func slogPostFunc(realIP func(*http.Request) string) func(*http.Request, *Respon
 }
 
 // RealIP returns the canonical immediate peer address. Forwarding headers are
-// deliberately ignored.
+// deliberately ignored; see WithRealIP to resolve them behind a proxy.
 func RealIP(r *http.Request) string {
-	ip, _ := proxy.ClientIP(r)
-	return ip
-}
-
-// TrustedRealIP returns a request helper backed by validated trusted proxy
-// CIDRs. Malformed forwarding headers fall back to the immediate peer.
-func TrustedRealIP(cidrs ...string) func(*http.Request) string {
-	policy, err := proxy.New(cidrs...)
-	if err != nil {
-		panic(fmt.Errorf("log: trusted proxies: %w", err))
-	}
-
-	return trustedRealIP(policy, false)
-}
-
-// UnsafeRealIP trusts common client IP forwarding headers from every peer. It
-// exists for compatibility with deployments that enforce trust externally.
-func UnsafeRealIP(r *http.Request) string {
-	return trustedRealIP(proxy.Policy{}, true)(r)
-}
-
-func trustedRealIP(policy proxy.Policy, unsafe bool) func(*http.Request) string {
-	return func(r *http.Request) string {
-		var (
-			ip  string
-			err error
-		)
-		if unsafe {
-			ip, err = proxy.UnsafeClientIP(r)
-		} else {
-			ip, err = policy.ClientIP(r)
-		}
-		if err == nil {
-			return ip
-		}
-
-		ip, _ = proxy.ClientIP(r)
-		return ip
-	}
+	return clientIP(r)
 }
 
 // UserAgent returns the first user-agent token.
@@ -229,25 +192,20 @@ func WithLogger(l Logger) Option {
 	}
 }
 
-// WithTrustedProxies allows the built-in slog logger to derive remote_ip from
-// forwarding headers supplied by matching immediate peers. CIDRs are validated
-// when this option is created.
-func WithTrustedProxies(cidrs ...string) Option {
-	policy, err := proxy.New(cidrs...)
-	if err != nil {
-		panic(fmt.Errorf("log: trusted proxies: %w", err))
-	}
-
+// WithRealIP sets how the built-in slog logger derives remote_ip. The default
+// is RealIP, the immediate peer, which ignores forwarding headers.
+//
+// This package deliberately does not interpret X-Forwarded-For itself: doing so
+// correctly needs a trusted-proxy boundary, and a logger has no business
+// carrying that policy. Pass a resolver instead, for example
+// proxy.TrustedRealIP("10.0.0.0/8") from
+// github.com/rakunlabs/ada/middleware/auth/proxy.
+//
+// A nil resolver restores the default.
+func WithRealIP(f func(*http.Request) string) Option {
 	return func(o *option) {
-		o.Logger.proxyPolicy = policy
-		o.Logger.unsafeProxyHeader = false
+		o.Logger.realIP = f
 	}
-}
-
-// WithUnsafeProxyHeaders makes the built-in slog logger trust forwarding
-// headers from every peer. Prefer WithTrustedProxies.
-func WithUnsafeProxyHeaders() Option {
-	return func(o *option) { o.Logger.unsafeProxyHeader = true }
 }
 
 // WithSkipper sets a function to skip middleware.

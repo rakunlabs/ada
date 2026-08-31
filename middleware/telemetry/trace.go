@@ -1,40 +1,22 @@
 package telemetry
 
 import (
-	"fmt"
 	"net/http"
 
-	"github.com/rakunlabs/ada/utils/proxy"
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 )
 
 // RequestTraceAttrs returns HTTP server span attributes using the immediate
-// peer as client.address. Forwarding headers are ignored.
+// peer as client.address. Forwarding headers are ignored; see WithClientIP to
+// resolve them behind a proxy.
 func RequestTraceAttrs(req *http.Request) []attribute.KeyValue {
-	return requestTraceAttrs(req, proxy.Policy{}, false)
+	return requestTraceAttrs(req, nil)
 }
 
-// TrustedRequestTraceAttrs returns an attribute helper backed by validated
-// trusted proxy CIDRs.
-func TrustedRequestTraceAttrs(cidrs ...string) func(*http.Request) []attribute.KeyValue {
-	policy, err := proxy.New(cidrs...)
-	if err != nil {
-		panic(fmt.Errorf("telemetry: trusted proxies: %w", err))
-	}
-
-	return func(req *http.Request) []attribute.KeyValue {
-		return requestTraceAttrs(req, policy, false)
-	}
-}
-
-// UnsafeRequestTraceAttrs trusts client IP forwarding headers from every
-// peer. Prefer TrustedRequestTraceAttrs.
-func UnsafeRequestTraceAttrs(req *http.Request) []attribute.KeyValue {
-	return requestTraceAttrs(req, proxy.Policy{}, true)
-}
-
-func requestTraceAttrs(req *http.Request, policy proxy.Policy, unsafe bool) []attribute.KeyValue {
+// requestTraceAttrs builds the span attributes. resolveClientIP may be nil, in
+// which case client.address is the immediate peer.
+func requestTraceAttrs(req *http.Request, resolveClientIP func(*http.Request) string) []attribute.KeyValue {
 	count := 3 // ServerAddress, Method, Scheme
 
 	var host string
@@ -59,8 +41,8 @@ func requestTraceAttrs(req *http.Request, policy proxy.Policy, unsafe bool) []at
 	scheme := schemeReq(req)
 
 	_, peerPort := splitHostPort(req.RemoteAddr)
-	peer, peerErr := proxy.ClientIP(req)
-	if peerErr == nil {
+	peer := clientIP(req)
+	if peer != "" {
 		// The Go HTTP server sets RemoteAddr to "IP:port", this will not be a
 		// file-path that would be interpreted with a sock family.
 		count++
@@ -74,17 +56,13 @@ func requestTraceAttrs(req *http.Request, policy proxy.Policy, unsafe bool) []at
 		count++
 	}
 
-	var clientIP string
-	var clientErr error
-	if unsafe {
-		clientIP, clientErr = proxy.UnsafeClientIP(req)
-	} else {
-		clientIP, clientErr = policy.ClientIP(req)
+	clientAddr := peer
+	if resolveClientIP != nil {
+		if resolved := resolveClientIP(req); resolved != "" {
+			clientAddr = resolved
+		}
 	}
-	if clientErr != nil {
-		clientIP = peer
-	}
-	if clientIP != "" {
+	if clientAddr != "" {
 		count++
 	}
 
@@ -132,8 +110,8 @@ func requestTraceAttrs(req *http.Request, policy proxy.Policy, unsafe bool) []at
 		attrs = append(attrs, semconv.UserAgentOriginal(useragent))
 	}
 
-	if clientIP != "" {
-		attrs = append(attrs, semconv.ClientAddress(clientIP))
+	if clientAddr != "" {
+		attrs = append(attrs, semconv.ClientAddress(clientAddr))
 	}
 
 	if clientName != "" {

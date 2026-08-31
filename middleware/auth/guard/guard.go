@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rakunlabs/ada/middleware/auth/proxy"
 )
 
 // Decision is the result of asking the guard whether an attempt may proceed.
@@ -265,52 +267,22 @@ func (g *Guard) sweep() {
 
 // ClientIP extracts the caller's address for use as a guard key.
 //
-// trustedProxies is the set of CIDRs allowed to speak for someone else. When
-// it is empty the peer address is used verbatim: an attacker who can set
-// X-Forwarded-For would otherwise get an unlimited supply of fresh identities
-// and defeat the guard entirely.
-func ClientIP(r *http.Request, trustedProxies []*net.IPNet) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+// trusted is the set of peers allowed to speak for someone else. Its zero value
+// uses the peer address verbatim: an attacker who can set X-Forwarded-For would
+// otherwise get an unlimited supply of fresh identities and defeat the guard
+// entirely.
+//
+// The derivation itself lives in the proxy package. A guard key and a logged
+// address must agree on who the client is, and two implementations of that
+// question drift apart in exactly the direction an attacker wants.
+func ClientIP(r *http.Request, trusted proxy.Policy) string {
+	if ip, err := trusted.ClientIP(r); err == nil {
+		return ip
 	}
 
-	if len(trustedProxies) == 0 {
-		return host
-	}
-
-	peer := net.ParseIP(host)
-	if peer == nil || !ipInAny(peer, trustedProxies) {
-		return host
-	}
-
-	// Walk right to left and return the first address the trusted chain did
-	// not vouch for.
-	xff := r.Header.Get("X-Forwarded-For")
-	parts := strings.Split(xff, ",")
-
-	for i := len(parts) - 1; i >= 0; i-- {
-		candidate := net.ParseIP(strings.TrimSpace(parts[i]))
-		if candidate == nil {
-			continue
-		}
-
-		if !ipInAny(candidate, trustedProxies) {
-			return candidate.String()
-		}
-	}
-
-	return host
-}
-
-func ipInAny(ip net.IP, nets []*net.IPNet) bool {
-	for _, n := range nets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-
-	return false
+	// A malformed forwarding header must not mint a new key. Fall back to the
+	// immediate peer, which is always attributable.
+	return proxy.RealIP(r)
 }
 
 // ParseCIDRs parses a list of CIDR strings, tolerating bare IPs.

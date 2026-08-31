@@ -32,46 +32,71 @@ func TestRealIPIgnoresSpoofedHeaders(t *testing.T) {
 	}
 }
 
-func TestTrustedAndUnsafeRealIPHelpers(t *testing.T) {
-	r := request("10.0.0.3:443", map[string]string{
-		"X-Forwarded-For": "192.0.2.99, 198.51.100.8, 10.0.0.2",
-	})
-	trusted := mlog.TrustedRealIP("10.0.0.0/8")
-	if got := trusted(r); got != "198.51.100.8" {
-		t.Fatalf("trusted RealIP = %q", got)
-	}
-	if got := mlog.UnsafeRealIP(r); got != "192.0.2.99" {
-		t.Fatalf("unsafe RealIP = %q", got)
-	}
-
-	r.Header.Set("X-Forwarded-For", "malformed, 10.0.0.2")
-	if got := trusted(r); got != "10.0.0.3" {
-		t.Fatalf("malformed RealIP = %q, want immediate peer", got)
+func TestRealIPUnmaps4in6(t *testing.T) {
+	if got := mlog.RealIP(request("[::ffff:192.0.2.7]:443", nil)); got != "192.0.2.7" {
+		t.Fatalf("RealIP = %q, want the unmapped form", got)
 	}
 }
 
-func TestWithTrustedProxiesConfiguresDefaultLogger(t *testing.T) {
+// A non-IP peer must still produce a usable, bounded value rather than an
+// unbounded socket path echoed into every log line.
+func TestRealIPBoundsNonIPPeers(t *testing.T) {
+	first := mlog.RealIP(request("/run/ada.sock", nil))
+	second := mlog.RealIP(request("/run/ada.sock", nil))
+	if first == "" || first != second {
+		t.Fatalf("unix peer keys = %q and %q, want equal and non-empty", first, second)
+	}
+
+	if got := mlog.RealIP(request(strings.Repeat("x", 4096), nil)); len(got) > 80 {
+		t.Fatalf("fallback length = %d, want at most 80", len(got))
+	}
+}
+
+// The logger carries no proxy policy of its own; resolving forwarding headers
+// is delegated to whatever resolver the caller injects.
+func TestWithRealIPOverridesDefaultLogger(t *testing.T) {
 	previous := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	var output bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	logger := mlog.New(mlog.WithTrustedProxies("10.0.0.0/8"))
-	r := request("10.0.0.2:443", map[string]string{"X-Real-IP": "198.51.100.8"})
-	logger.PostFunc(r, &mlog.Response{})
+	logger := mlog.New(mlog.WithRealIP(func(r *http.Request) string {
+		return r.Header.Get("X-Real-IP")
+	}))
+	logger.PostFunc(request("10.0.0.2:443", map[string]string{"X-Real-IP": "198.51.100.8"}), &mlog.Response{})
 
 	if !strings.Contains(output.String(), "remote_ip=198.51.100.8") {
-		t.Fatalf("log output did not use trusted IP: %s", output.String())
+		t.Fatalf("log output did not use the injected resolver: %s", output.String())
 	}
 }
 
-func TestTrustedProxyCIDRsValidateAtSetup(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("invalid trusted CIDR did not panic")
-		}
-	}()
+func TestDefaultLoggerUsesImmediatePeer(t *testing.T) {
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	_ = mlog.WithTrustedProxies("invalid")
+	var output bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	logger := mlog.New()
+	logger.PostFunc(request("10.0.0.2:443", map[string]string{"X-Real-IP": "198.51.100.8"}), &mlog.Response{})
+
+	if !strings.Contains(output.String(), "remote_ip=10.0.0.2") {
+		t.Fatalf("default logger honoured a forwarding header: %s", output.String())
+	}
+}
+
+func TestWithRealIPNilRestoresDefault(t *testing.T) {
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	var output bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	logger := mlog.New(mlog.WithRealIP(nil))
+	logger.PostFunc(request("10.0.0.2:443", map[string]string{"X-Real-IP": "198.51.100.8"}), &mlog.Response{})
+
+	if !strings.Contains(output.String(), "remote_ip=10.0.0.2") {
+		t.Fatalf("nil resolver did not fall back to the immediate peer: %s", output.String())
+	}
 }

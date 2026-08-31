@@ -70,7 +70,7 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 
 			ctx = cfg.Propagators.Extract(ctx, propagation.HeaderCarrier(r.Header))
 			opts := []trace.SpanStartOption{
-				trace.WithAttributes(requestTraceAttrs(r, cfg.proxyPolicy, cfg.unsafeProxyHeader)...),
+				trace.WithAttributes(requestTraceAttrs(r, cfg.clientIPFn)...),
 				trace.WithSpanKind(trace.SpanKindServer),
 			}
 

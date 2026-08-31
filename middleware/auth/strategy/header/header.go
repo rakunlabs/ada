@@ -30,7 +30,7 @@ import (
 
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
-	"github.com/rakunlabs/ada/utils/proxy"
+	"github.com/rakunlabs/ada/middleware/auth/proxy"
 )
 
 // ErrNoUserHeader is returned when the configured user header is missing or
