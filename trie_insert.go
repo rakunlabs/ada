@@ -41,8 +41,9 @@ type methodEntry struct {
 }
 
 type node struct {
-	// Possible marks a trailing (greedy) wildcard child: after consuming a
-	// non-empty first segment, the node can consume the entire remaining path.
+	// Possible marks a trailing (greedy) wildcard child: after reaching its
+	// separator, the node can consume the entire remaining path, including an
+	// empty final segment.
 	Possible bool
 
 	// Inlined static trie fields. StaticKey is the compressed radix
@@ -206,10 +207,10 @@ func (n *node) insertPath(path string) (*node, []paramInfo, typeNode) {
 	//      captures, use `{name}` for the middle ones; if you need
 	//      multiple greedy captures, you've structurally misunderstood
 	//      greedy semantics (it consumes the rest of the path).
-	//   2. At most ONE `{name...}` segment, and it must be the trailing
-	//      segment. A greedy in the middle would have nothing to
-	//      backtrack against — there'd be no way for the matcher to
-	//      know where to stop.
+	//   2. At most ONE `{name...}` segment, and it must be the LAST raw
+	//      segment — a trailing slash after it is rejected too. A greedy
+	//      in the middle would have nothing to backtrack against —
+	//      there'd be no way for the matcher to know where to stop.
 	//
 	// We panic rather than return an error because Insert's signature
 	// is `void` and routes are registered at startup: a bad pattern
@@ -218,11 +219,10 @@ func (n *node) insertPath(path string) (*node, []paramInfo, typeNode) {
 	// the failure mode that prompted this whole refactor in the first
 	// place — see history of middle-`*` returning empty strings).
 	var (
-		starCount       int
-		greedyCount     int
-		greedyIndex     = -1
-		lastNonEmptyIdx = -1
-		seenNames       = make(map[string]struct{})
+		starCount   int
+		greedyCount int
+		greedyIndex = -1
+		seenNames   = make(map[string]struct{})
 	)
 	for i, seg := range pathSegments {
 		if seg == "" {
@@ -243,7 +243,6 @@ func (n *node) insertPath(path string) (*node, []paramInfo, typeNode) {
 			seenNames[name] = struct{}{}
 		}
 
-		lastNonEmptyIdx = i
 		switch segmentType {
 		case typeNodeWildcard:
 			starCount++
@@ -258,8 +257,12 @@ func (n *node) insertPath(path string) (*node, []paramInfo, typeNode) {
 	if greedyCount > 1 {
 		panic("ada: pattern has more than one greedy '{name...}' segment: " + path)
 	}
-	if greedyIndex >= 0 && greedyIndex != lastNonEmptyIdx {
-		panic("ada: greedy '{name...}' must be the trailing segment: " + path)
+	// The greedy must be the LAST raw segment, not merely the last non-empty
+	// one: a trailing slash after it ("/a/{p...}/") would demote the greedy
+	// to a single-segment match followed by '/', silently contradicting the
+	// pattern's stated intent. net/http.ServeMux rejects the same shape.
+	if greedyIndex >= 0 && greedyIndex != len(pathSegments)-1 {
+		panic("ada: greedy '{name...}' must be the trailing segment (no trailing slash): " + path)
 	}
 
 	// ── Insert phase ─────────────────────────────────────────────────

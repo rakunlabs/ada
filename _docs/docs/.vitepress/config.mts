@@ -81,6 +81,10 @@ export default withMermaid(defineConfig({
                 link: "/guide/middleware/bodylimit.md",
               },
               {
+                text: "Timeout",
+                link: "/guide/middleware/timeout.md",
+              },
+              {
                 text: "Cors",
                 link: "/guide/middleware/cors.md",
               },
@@ -91,6 +95,10 @@ export default withMermaid(defineConfig({
               {
                 text: "Encoding",
                 link: "/guide/middleware/encoding.md",
+              },
+              {
+                text: "Server",
+                link: "/guide/middleware/server.md",
               },
               {
                 text: "ForwardAuth",

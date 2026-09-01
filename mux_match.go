@@ -304,7 +304,7 @@ func (m *Mux) matchMethod(root *node, method, urlPath string, res *matchResult) 
 				// alternative is exhausted, so remembering a greedy that
 				// cannot answer would turn the request into a 405 while a
 				// shallower greedy that can answer is still on offer.
-				if wildcard.Possible && pos < len(urlPath) && urlPath[pos] != '/' {
+				if wildcard.Possible && trailingWildcardCanStart(urlPath, pos) {
 					if entry := wildcard.matchEntry(method, probe); entry != nil {
 						wildcardNode = wildcard
 						wildcardEntry = entry
@@ -540,7 +540,14 @@ func pathAllow(root *node, urlPath string) string {
 // would have had to reject.
 func collectAllow(current *node, urlPath string, pos int, allows []string) []string {
 	if pos == len(urlPath) {
-		return appendAllow(allows, current)
+		allows = appendAllow(allows, current)
+		if current.TypeWildcard != nil && trailingWildcardCanStart(urlPath, pos) {
+			if greedy := current.TypeWildcard.Children; greedy.Possible {
+				allows = appendAllow(allows, greedy)
+			}
+		}
+
+		return allows
 	}
 
 	// A trailing wildcard anchored here swallows the whole remainder, so it
@@ -573,6 +580,18 @@ func collectAllow(current *node, urlPath string, pos int, allows []string) []str
 	}
 
 	return allows
+}
+
+// trailingWildcardCanStart reports whether a greedy wildcard may consume the
+// remainder at pos. A trailing slash supplies an empty final segment, matching
+// Ada's pre-v0.5 behavior; a base path without that separator still does not
+// match. Non-empty segments remain valid as before.
+func trailingWildcardCanStart(urlPath string, pos int) bool {
+	if pos < len(urlPath) {
+		return urlPath[pos] != '/'
+	}
+
+	return pos > 0 && urlPath[pos-1] == '/'
 }
 
 // appendAllow records n's cached Allow value unless it is empty or already
@@ -644,11 +663,11 @@ func bindPathValues(r *http.Request, res *matchResult, entry *methodEntry) {
 
 	if greedy {
 		// Reconstruct the joined value from the original path string rather
-		// than allocating via strings.Join.
+		// than allocating via strings.Join. wildcardOffset always sits at a
+		// segment start — never on a '/' — because trailingWildcardCanStart
+		// rejects a remainder beginning with '/', so no separator stripping
+		// is needed here.
 		value := urlPath[res.wildcardOffset:]
-		if len(value) > 0 && value[0] == '/' {
-			value = value[1:]
-		}
 
 		// Insert guarantees exactly one paramInfo at this index: "*" for
 		// bare `*` routes and the user-supplied identifier for `{name...}`

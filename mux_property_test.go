@@ -237,7 +237,7 @@ func (w *refWalk) resolve(n *refNode, i int) *refNode {
 	// describes a matched prefix of the URL rather than the branch taken.
 	// Only a greedy that can serve the method is kept, so a deeper greedy
 	// registered under some other method cannot mask a shallower one.
-	if n.wildcard != nil && n.wildcard.trailing && i < len(w.segments) && w.segments[i] != "" {
+	if n.wildcard != nil && n.wildcard.trailing && i < len(w.segments) && (w.segments[i] != "" || i == len(w.segments)-1) {
 		if n.wildcard.hasHandler() {
 			w.note(n.wildcard)
 		}
@@ -322,12 +322,9 @@ func refServe(root *refNode, method, path string) refResult {
 
 	values := map[string]string{}
 	if current.trailing {
+		// The greedy capture never starts on a separator: an empty segment
+		// qualifies only as the final one, and then the joined value is "".
 		wildcard := strings.Join(segments[possibleIdx:], "/")
-		// Mirror ada: the greedy value never keeps a leading '/'
-		// (only reachable when the first captured segment is empty).
-		if len(wildcard) > 0 && wildcard[0] == '/' {
-			wildcard = wildcard[1:]
-		}
 		wrote := false
 		for _, p := range entry.params {
 			if p.Index == possibleIdx {

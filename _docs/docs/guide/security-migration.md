@@ -118,9 +118,14 @@ logging, limiting, and tracing by the immediate peer.
   when `AllowHeaders` is empty. Explicitly allow the required headers.
 - Credentialed CORS requires explicit origins. The wildcard-origin combination
   is rejected unless `UnsafeWildcardOriginWithAllowCredentials` is enabled.
-- [Wildcard helpers](./routing#wildcard-routes) register descendants only:
-  `HandleFuncWildcard("/assets", ...)` does not register the exact `/assets`
-  path.
+- [Wildcard helpers](./routing#wildcard-routes) do not register the slashless
+  base path: `HandleFuncWildcard("/assets", ...)` matches `/assets/` (with an
+  empty wildcard value) and descendants, but not exact `/assets`.
+- Empty segments never start a capture: `/assets//x` is a 404 where ServeMux
+  would clean-and-redirect it, because Ada applies no path cleaning. Once a
+  greedy capture has started, its tail is kept verbatim, `//` included.
+- A trailing slash after a greedy (`"/files/{p...}/"`) now panics at
+  registration instead of silently matching a single segment plus `/`.
 - The default error handler no longer echoes arbitrary error text. A
   `*ada.HTTPError` with a 4xx/5xx status still sends its own message, and an
   error you deliberately answer 4xx with still sends its text; any other error

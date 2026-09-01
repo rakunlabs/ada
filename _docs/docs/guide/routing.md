@@ -84,8 +84,8 @@ Ada has two wildcard forms:
 
 | Form        | Position       | Matches                                                               | Access via            |
 | ----------- | -------------- | --------------------------------------------------------------------- | --------------------- |
-| `*`         | Middle or trailing (1 per route) | A non-empty descendant: one segment if middle, the rest if trailing   | `r.PathValue("*")`    |
-| `{name...}` | Trailing only  | A non-empty descendant: the rest of the path (including `/`)          | `r.PathValue("name")` |
+| `*`         | Middle or trailing (1 per route) | One segment if middle; the rest if trailing, including an empty segment after `/` | `r.PathValue("*")`    |
+| `{name...}` | Trailing only  | The rest of the path (including `/`), or an empty segment after `/`   | `r.PathValue("name")` |
 
 `{name...}` is just a **named alias** for a trailing `*` — same matching, only the `PathValue` key differs. Use it when a descriptive name reads better than `"*"`, especially in routes that already have another capture.
 
@@ -107,19 +107,30 @@ server.POST("/api/v1/external/*/test", func(w http.ResponseWriter, r *http.Reque
 server.GET("/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
     path := r.PathValue("path")
     // GET /files/a/b/c.txt → path == "a/b/c.txt"
-    // GET /files/          → 404 (empty descendants do not match)
+    // GET /files/          → path == ""
     // GET /files           → 404 (separator required)
+    // GET /files//         → 404 (see below)
+    // GET /files/a//b      → path == "a//b" (raw tail, kept verbatim)
 })
 ```
 
-`HandleFuncWildcard` and `HandleWildcard` add the trailing wildcard for you,
-but they remain descendant-only. Passing `"/assets"` registers
-`"/assets/*"`; neither `"/assets"` nor `"/assets/"` matches it. Add a separate
-exact handler when the base path should also resolve:
+::: info Empty segments never start a capture
+Ada applies no path cleaning, and an **empty segment matches nothing** — not a
+`{name}` param, not a wildcard. The only exception is the empty *final* segment
+a trailing slash supplies (`/files/` → `path == ""`). A remainder that begins
+with another `/` (`/files//`, `/files//a`) is therefore a **404**, where
+`net/http.ServeMux` would have cleaned or matched it. Once the capture has
+started, though, the tail is taken verbatim — `/files/a//b` → `"a//b"`.
+:::
+
+`HandleFuncWildcard` and `HandleWildcard` add the trailing wildcard for you.
+Passing `"/assets"` registers `"/assets/*"`; `"/assets/"` matches with an empty
+wildcard value, while `"/assets"` does not because it has no separator. Add a
+separate exact handler when the slashless base path should also resolve:
 
 ```go
-server.HandleFunc("/assets", assetsHandler)         // exact base path
-server.HandleFuncWildcard("/assets", assetsHandler) // non-empty descendants
+server.HandleFunc("/assets", assetsHandler)         // slashless base path
+server.HandleFuncWildcard("/assets", assetsHandler) // /assets/ and descendants
 ```
 
 #### Combining captures
@@ -142,12 +153,16 @@ server.GET("/orgs/{org}/users/{user}/files/{path...}", h)
 Ada panics at registration time on ambiguous patterns — bad routes fail loud at boot:
 
 1. **At most one `*` per route.** Both would map to `PathValue("*")`. Use `{name}` for the other capture.
-2. **At most one `{name...}`, and it must be trailing.** A greedy match consumes the rest of the path by definition, so it can't sit in the middle (the matcher would have nothing to stop against) and can't appear twice (the first one already ate everything).
+2. **At most one `{name...}`, and it must be the last raw segment.** A greedy match consumes the rest of the path by definition, so it can't sit in the middle (the matcher would have nothing to stop against), can't appear twice (the first one already ate everything), and can't be followed by a trailing slash (which would silently demote it to a single-segment match).
 
 ```go
 server.GET("/a/*/b/*", h)        // panics: more than one '*'
 server.GET("/a/{x...}/b", h)     // panics: greedy must be trailing
+server.GET("/a/{x...}/", h)      // panics: no trailing slash after a greedy
 ```
+
+A trailing slash after a middle `*` stays valid — `"/a/*/"` is "one segment,
+then `/`", exactly like `"/a/*/x"` is "one segment, then `/x`".
 
 ## Path Handling And Captured Values {#path-handling}
 

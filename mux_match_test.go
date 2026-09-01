@@ -199,10 +199,10 @@ func TestPathAllow(t *testing.T) {
 			want:   "",
 		},
 		{
-			name:   "greedy needs a non-empty segment",
+			name:   "greedy accepts an empty final segment",
 			routes: func(m *Mux) { m.POST("/a/{p...}", noop) },
 			path:   "/a/",
-			want:   "",
+			want:   "OPTIONS, POST",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,8 +255,8 @@ func TestEmptyWildcardPathTargetsMuxRoot(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.String() != "a/b" {
 		t.Fatalf("status = %d body = %q, want 200 / a/b", rec.Code, rec.Body.String())
 	}
-	if code, _ := statusOf(t, mux, http.MethodGet, "/"); code != http.StatusNotFound {
-		t.Fatalf("root status = %d, want 404 because wildcard segments are non-empty", code)
+	if code, body := statusOf(t, mux, http.MethodGet, "/"); code != http.StatusOK || body != "" {
+		t.Fatalf("root status = %d body = %q, want 200 with empty wildcard", code, body)
 	}
 
 	if !mux.RemoveWildcard("") {
@@ -280,10 +280,11 @@ func TestHandleFuncWildcardNormalizesBasePath(t *testing.T) {
 			if rec.Code != http.StatusOK || rec.Body.String() != "/assets/*|js/app.js" {
 				t.Fatalf("status = %d body = %q", rec.Code, rec.Body.String())
 			}
-			for _, base := range []string{"/assets", "/assets/"} {
-				if code, _ := statusOf(t, mux, http.MethodGet, base); code != http.StatusNotFound {
-					t.Fatalf("base path %q status = %d, want 404", base, code)
-				}
+			if code, _ := statusOf(t, mux, http.MethodGet, "/assets"); code != http.StatusNotFound {
+				t.Fatalf("slashless base status = %d, want 404", code)
+			}
+			if code, body := statusOf(t, mux, http.MethodGet, "/assets/"); code != http.StatusOK || body != "/assets/*|" {
+				t.Fatalf("slash base status = %d body = %q, want 200 with empty wildcard", code, body)
 			}
 			if !mux.RemoveWildcard(routePath) {
 				t.Fatal("RemoveWildcard did not use the registration normalization")

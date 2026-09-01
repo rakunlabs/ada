@@ -462,11 +462,12 @@ func TestMethodAwareRouting(t *testing.T) {
 			status:  http.StatusNotFound,
 		},
 		{
-			name:    "greedy needs a non-empty first segment",
+			name:    "greedy accepts an empty segment after separator",
 			routes:  []route{{http.MethodPost, "/a/b"}, {http.MethodGet, "/a/{p...}"}},
 			method:  http.MethodGet,
 			request: "/a/",
-			status:  http.StatusNotFound,
+			want:    "/a/{p...} p=",
+			status:  http.StatusOK,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -507,9 +508,9 @@ func TestMethodAwareRouting(t *testing.T) {
 //   - ada advertises OPTIONS in Allow because it answers auto-OPTIONS, which
 //     ServeMux does not; Allow is therefore compared with OPTIONS stripped and
 //     OPTIONS requests are left out.
-//   - ada's trailing wildcard requires a non-empty first segment, while
-//     ServeMux lets `/a/{q...}` match `/a` and redirects `/a/b` to `/a/b/`;
-//     request paths are chosen so every greedy captures something.
+//   - ada's trailing wildcard requires the slash separator, while ServeMux
+//     also lets `/a/{q...}` match `/a` and redirects `/a/b` to `/a/b/`;
+//     request paths are chosen so both routers agree.
 func TestMethodAwareRouting_MatchesServeMux(t *testing.T) {
 	for _, tc := range []struct {
 		routes   []route

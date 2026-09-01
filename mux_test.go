@@ -277,8 +277,8 @@ func TestMux(t *testing.T) {
 						req, _ := http.NewRequest(http.MethodGet, "/", nil)
 						return req
 					},
-					status: http.StatusNotFound,
-					body:   "404 page not found\n",
+					status: http.StatusOK,
+					body:   "Wildcard!",
 				},
 			},
 		},
@@ -319,8 +319,8 @@ func TestMux(t *testing.T) {
 						req, _ := http.NewRequest(http.MethodGet, "/", nil)
 						return req
 					},
-					status: http.StatusNotFound,
-					body:   "404 page not found\n",
+					status: http.StatusOK,
+					body:   "Wildcard!",
 				},
 			},
 		},
@@ -643,7 +643,7 @@ func TestMux(t *testing.T) {
 						return req
 					},
 					status: http.StatusOK,
-					body:   "Wildcard!",
+					body:   "Base!",
 				},
 			},
 		},
@@ -1387,8 +1387,7 @@ func TestMiddleWildcard_DoesNotCrossSlashes(t *testing.T) {
 // Semantics:
 //   - `/files/a/b/c.txt`  → `path = "a/b/c.txt"`  (multi-segment)
 //   - `/files/x`          → `path = "x"`          (single segment)
-//   - `/files/`           → 404                   (wildcards require a
-//     non-empty first segment)
+//   - `/files/`           → `path = ""`            (empty trailing segment)
 //   - `/files`            → 404                   (no slash separator)
 func TestGreedyNamedWildcard(t *testing.T) {
 	type want struct {
@@ -1402,7 +1401,7 @@ func TestGreedyNamedWildcard(t *testing.T) {
 	}{
 		{"multi-segment value", "/files/a/b/c.txt", want{200, "a/b/c.txt"}},
 		{"single-segment value", "/files/x", want{200, "x"}},
-		{"trailing slash empty segment", "/files/", want{404, ""}},
+		{"trailing slash empty segment", "/files/", want{200, ""}},
 		{"no slash separator → 404", "/files", want{404, ""}},
 	}
 
@@ -1429,6 +1428,163 @@ func TestGreedyNamedWildcard(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTrailingWildcardEmptySegmentCompatibility(t *testing.T) {
+	t.Run("bare wildcard", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/view/*", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(r.PathValue("*")))
+		})
+
+		for _, tc := range []struct {
+			path string
+			code int
+		}{
+			{path: "/view", code: http.StatusNotFound},
+			{path: "/view/", code: http.StatusOK},
+			{path: "/view/app", code: http.StatusOK},
+			{path: "/", code: http.StatusNotFound},
+		} {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if rec.Code != tc.code {
+				t.Errorf("%s status = %d, want %d", tc.path, rec.Code, tc.code)
+			}
+		}
+	})
+
+	t.Run("root wildcard", func(t *testing.T) {
+		mux := NewMux()
+		mux.HandleFunc("/*", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+		}
+	})
+
+	t.Run("method not allowed", func(t *testing.T) {
+		mux := NewMux()
+		mux.POST("/view/*", func(http.ResponseWriter, *http.Request) {})
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/view/", nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+		if got := rec.Header().Get("Allow"); got != "OPTIONS, POST" {
+			t.Fatalf("Allow = %q, want %q", got, "OPTIONS, POST")
+		}
+	})
+
+	// Empty segments match nothing — Mux applies no path cleaning, and an
+	// interior empty segment is not a capturable value. The only exception
+	// is the empty FINAL segment a trailing slash supplies, covered above.
+	// A remainder that begins with '/' (i.e. "//" right after the wildcard's
+	// separator) therefore stays a 404 rather than capturing "/...".
+	// net/http.ServeMux would match these; the divergence is deliberate and
+	// documented in the routing guide.
+	t.Run("double slash never starts a capture", func(t *testing.T) {
+		serve := func(mux *Mux, path string) (int, string) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "http://x", nil)
+			req.URL.Path = path // bypass client-side path cleaning
+
+			mux.ServeHTTP(rec, req)
+
+			return rec.Code, rec.Body.String()
+		}
+
+		mux := NewMux()
+		mux.GET("/view/*", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(r.PathValue("*")))
+		})
+
+		for _, tc := range []struct {
+			path string
+			code int
+			body string
+		}{
+			{path: "/view//", code: http.StatusNotFound},
+			{path: "/view//app", code: http.StatusNotFound},
+			// Embedded empty segments past the first captured one are kept
+			// verbatim: the greedy already started, the raw tail is the value.
+			{path: "/view/app//", code: http.StatusOK, body: "app//"},
+			{path: "/view/app//b", code: http.StatusOK, body: "app//b"},
+		} {
+			code, body := serve(mux, tc.path)
+			if code != tc.code {
+				t.Errorf("%s status = %d, want %d", tc.path, code, tc.code)
+			}
+			if tc.code == http.StatusOK && body != tc.body {
+				t.Errorf("%s body = %q, want %q", tc.path, body, tc.body)
+			}
+		}
+
+		// Same rule at the root: "//" leaves the wildcard's remainder
+		// starting on '/', so it cannot begin a capture...
+		root := NewMux()
+		root.GET("/*", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("root:" + r.PathValue("*")))
+		})
+
+		if code, _ := serve(root, "//"); code != http.StatusNotFound {
+			t.Errorf("// status = %d, want 404", code)
+		}
+
+		// ...while a shallower greedy that already started keeps the raw
+		// tail, empty segments included.
+		if code, body := serve(root, "/view//"); code != http.StatusOK || body != "root:view//" {
+			t.Errorf("/view// = %d %q, want 200 %q", code, body, "root:view//")
+		}
+	})
+}
+
+// TestGreedyTrailingSlashPatternPanics locks the registration-time rule that a
+// greedy `{name...}` must be the last RAW segment of the pattern. Before this
+// check, "/files/{p...}/" slipped through validation and silently behaved as a
+// single-segment match followed by '/', contradicting the greedy syntax.
+// net/http.ServeMux rejects the same shape.
+func TestGreedyTrailingSlashPatternPanics(t *testing.T) {
+	for _, pattern := range []string{
+		"/files/{p...}/",
+		"/files/{p...}//",
+		"/{p...}/",
+	} {
+		t.Run(pattern, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("registering %q did not panic", pattern)
+				}
+			}()
+
+			NewMux().GET(pattern, func(http.ResponseWriter, *http.Request) {})
+		})
+	}
+
+	// The middle-star composition stays legal: "/a/*/" is one segment then a
+	// trailing slash, exactly like "/a/*/x" is one segment then "/x".
+	t.Run("middle star with trailing slash stays valid", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/a/*/", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(r.PathValue("*")))
+		})
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/a/x/", nil))
+		if rec.Code != http.StatusOK || rec.Body.String() != "x" {
+			t.Fatalf("/a/x/ = %d %q, want 200 %q", rec.Code, rec.Body.String(), "x")
+		}
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/a/x", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("/a/x = %d, want 404", rec.Code)
+		}
+	})
 }
 
 // TestGreedyNamedWildcard_WithMiddleStar shows the recommended way to
@@ -1473,15 +1629,15 @@ func TestGreedyAlongsideRegularParams(t *testing.T) {
 	}
 }
 
-// TestGreedyMultipleCapturesRequiresNonEmptyTail exercises regular parameters
-// followed by a greedy capture, including the empty-tail rejection.
+// TestGreedyMultipleCaptures exercises regular parameters followed by a greedy
+// capture, including an empty trailing segment.
 //
 // Pattern: /users/{name}/files/{path...}
 //
 //	GET /users/alice/files/docs/note.md → name=alice path=docs/note.md
-//	GET /users/bob/files/               → 404
+//	GET /users/bob/files/               → name=bob path=""
 //	GET /users/bob/files                → 404
-func TestGreedyMultipleCapturesRequiresNonEmptyTail(t *testing.T) {
+func TestGreedyMultipleCaptures(t *testing.T) {
 	mux := NewMux()
 	mux.GET("/users/{name}/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(r.PathValue("name") + "|" + r.PathValue("path")))
@@ -1496,7 +1652,7 @@ func TestGreedyMultipleCapturesRequiresNonEmptyTail(t *testing.T) {
 		want    want
 	}{
 		{"/users/alice/files/docs/note.md", want{200, "alice|docs/note.md"}},
-		{"/users/bob/files/", want{404, ""}},
+		{"/users/bob/files/", want{200, "bob|"}},
 		{"/users/bob/files", want{404, ""}},
 	}
 
