@@ -233,13 +233,13 @@ func TestNormalRequestAndInterfaces(t *testing.T) {
 			_, hijack := w.(http.Hijacker)
 			_, readFrom := w.(io.ReaderFrom)
 			_, push := w.(http.Pusher)
-			_, closeNotify := w.(http.CloseNotifier)
+			_, closeNotify := w.(http.CloseNotifier) //nolint:staticcheck // Verify preservation of the legacy optional interface.
 			if flush != optional || hijack != optional || readFrom != optional || push != optional || closeNotify != optional {
 				t.Fatal("optional interfaces changed")
 			}
 			if optional {
 				_ = w.(http.Pusher).Push("/asset", nil)
-				if w.(http.CloseNotifier).CloseNotify() != full.closed || !full.pushed {
+				if w.(http.CloseNotifier).CloseNotify() != full.closed || !full.pushed { //nolint:staticcheck // Verify forwarding of the legacy optional interface.
 					t.Fatal("optional forwarding failed")
 				}
 			}

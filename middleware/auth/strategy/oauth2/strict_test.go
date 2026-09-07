@@ -199,9 +199,10 @@ func TestDiscoveryIssuerExactMatch(t *testing.T) {
 					t.Errorf("discovery path=%q, want %q", r.URL.Path, wantPath)
 				}
 				issuer := "http://" + r.Host + tc.returnedPath
-				if tc.name == "different issuer" {
+				switch tc.name {
+				case "different issuer":
 					issuer = tc.returnedPath
-				} else if tc.name == "missing issuer" {
+				case "missing issuer":
 					issuer = ""
 				}
 				writeJSON(w, map[string]string{"issuer": issuer, "authorization_endpoint": "https://untrusted.example/auth"})
