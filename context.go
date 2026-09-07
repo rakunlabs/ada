@@ -218,6 +218,7 @@ func (c *Context) prepareError(err error) {
 }
 
 // Bind binds the request data to the provided struct based on content type and struct tags.
+// JSON slice targets are also supported, without query, header, or URI binding.
 //   - The obj parameter must be a pointer.
 //   - Options are forwarded to bind.Bind, so a handler can override the package
 //     defaults per request, e.g. c.Bind(&obj, bind.WithBodyLimit(1<<20)) to cap

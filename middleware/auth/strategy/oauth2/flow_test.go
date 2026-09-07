@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +36,12 @@ type idp struct {
 	expOverride      *time.Time
 	signWithOther    bool
 	other            *rsa.PrivateKey
+	omitIDToken      bool
+	mutateClaims     func(map[string]any)
+	tokenHeaders     map[string]any
+	userInfo         map[string]any
+	userInfoJWT      string
+	userInfoCalls    atomic.Int32
 
 	lastForm url.Values
 	nonce    string
@@ -59,6 +66,18 @@ func newIDP(t *testing.T) *idp {
 	mux.HandleFunc("/.well-known/openid-configuration", p.discovery)
 	mux.HandleFunc("/jwks", p.jwks)
 	mux.HandleFunc("/token", p.token)
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		p.userInfoCalls.Add(1)
+		if r.Header.Get("Authorization") != "Bearer upstream-access-token" {
+			t.Error("missing userinfo bearer token")
+		}
+		if p.userInfoJWT != "" {
+			w.Header().Set("Content-Type", "application/jwt")
+			_, _ = w.Write([]byte(p.userInfoJWT))
+			return
+		}
+		writeJSON(w, p.userInfo)
+	})
 	mux.HandleFunc("/authorize", func(http.ResponseWriter, *http.Request) {})
 
 	p.srv = httptest.NewServer(mux)
@@ -134,10 +153,17 @@ func (p *idp) token(w http.ResponseWriter, r *http.Request) {
 		signer = p.other
 	}
 
+	if p.mutateClaims != nil {
+		p.mutateClaims(claims)
+	}
+	idToken := ""
+	if !p.omitIDToken {
+		idToken = signRS256(p.t, signer, "test-key", claims, p.tokenHeaders)
+	}
 	writeJSON(w, map[string]any{
 		"access_token": "upstream-access-token",
 		"token_type":   "Bearer",
-		"id_token":     signRS256(p.t, signer, "test-key", claims),
+		"id_token":     idToken,
 		"expires_in":   3600,
 	})
 }
@@ -147,10 +173,16 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func signRS256(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any) string {
+func signRS256(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any, extraHeaders ...map[string]any) string {
 	t.Helper()
 
-	header, _ := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT", "kid": kid})
+	headers := map[string]any{"alg": "RS256", "typ": "JWT", "kid": kid}
+	for _, extra := range extraHeaders {
+		for k, v := range extra {
+			headers[k] = v
+		}
+	}
+	header, _ := json.Marshal(headers)
 	payload, _ := json.Marshal(claims)
 
 	signing := base64.RawURLEncoding.EncodeToString(header) + "." +
@@ -166,7 +198,7 @@ func signRS256(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]
 	return signing + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
-func newStrategy(t *testing.T, p *idp, mutate func(*oauth2.Config)) *oauth2.Strategy {
+func newStrategy(t *testing.T, p *idp, mutate func(*oauth2.Config), stores ...oauth2.FlowStore) *oauth2.Strategy {
 	t.Helper()
 
 	cfg := oauth2.Config{
@@ -180,11 +212,15 @@ func newStrategy(t *testing.T, p *idp, mutate func(*oauth2.Config)) *oauth2.Stra
 		mutate(&cfg)
 	}
 
-	s, err := oauth2.NewWithContext(context.Background(), "idp", cfg, oauth2.Options{
+	opts := oauth2.Options{
 		HTTPClient:       p.srv.Client(),
 		CallbackBaseURL:  "https://app.example",
 		CallbackBasePath: "/auth/login/callback",
-	})
+	}
+	if len(stores) > 0 {
+		opts.FlowStore = stores[0]
+	}
+	s, err := oauth2.NewWithContext(context.Background(), "idp", cfg, opts)
 	if err != nil {
 		t.Fatalf("new strategy: %v", err)
 	}

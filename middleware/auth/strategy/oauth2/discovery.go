@@ -70,29 +70,35 @@ func Discover(ctx context.Context, client *http.Client, issuerURL string) (*Disc
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
 	if err != nil {
-		return nil, fmt.Errorf("discovery: build request: %w", err)
+		return nil, &upstreamError{operation: "discovery"}
 	}
 
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("discovery: fetch: %w", err)
+		return nil, &upstreamError{operation: "discovery"}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := bodylimit.ReadUpstream(resp.Body, maxUpstreamResponseBytes)
 	if err != nil {
-		return nil, fmt.Errorf("discovery: read body: %w", err)
+		return nil, readError("discovery", resp.StatusCode, err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("discovery: %s returned %d: %s", wellKnown, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &upstreamError{operation: "discovery", status: resp.StatusCode}
 	}
 
 	var doc DiscoveryDocument
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Errorf("discovery: decode: %w", err)
+		return nil, &upstreamError{operation: "discovery", status: resp.StatusCode}
+	}
+
+	// Discovery 1.0 sections 4.1 and 4.3: remove the trailing slash only
+	// when constructing the discovery URL, never when comparing issuers.
+	if doc.Issuer != issuerURL {
+		return nil, fmt.Errorf("discovery: %w", ErrIssuerMismatch)
 	}
 
 	return &doc, nil

@@ -27,8 +27,8 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/guard"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
-	"github.com/rakunlabs/ada/middleware/auth/strategy"
 	"github.com/rakunlabs/ada/middleware/auth/proxy"
+	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
 
 // maxBodyBytes caps request-a-link bodies at 64 KiB.
@@ -612,6 +612,7 @@ func (m *MemoryStore) Delete(_ context.Context, token string) error {
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
 	_ = json.NewEncoder(w).Encode(map[string]string{
@@ -622,6 +623,7 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
 	_ = json.NewEncoder(w).Encode(v)

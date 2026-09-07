@@ -2,8 +2,8 @@
 //
 // Login does one of three things depending on the request shape:
 //
-//   - GET without ?code= (initiate)   -> generate state, set state cookie, redirect to AuthURL.
-//   - GET with ?code= (callback)      -> validate state, exchange code, build Identity, revoke upstream token.
+//   - GET login (initiate)            -> save server flow, set opaque cookie, redirect to AuthURL.
+//   - GET callback                   -> consume flow, validate state, exchange code, build Identity, revoke upstream token.
 //   - POST (password flow, opt-in)    -> exchange username/password, build Identity, revoke upstream token.
 //
 // After Login returns, the upstream OAuth2 token is gone. The session lives in
@@ -27,8 +27,8 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/cookie"
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/internal/bodylimit"
-	"github.com/rakunlabs/ada/middleware/auth/strategy"
 	"github.com/rakunlabs/ada/middleware/auth/proxy"
+	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
 
 const (
@@ -67,6 +67,16 @@ type Config struct {
 	// Audience is the value that must appear in the id_token's aud claim.
 	// Defaults to ClientID, which is what OIDC mandates.
 	Audience string `cfg:"audience"`
+
+	// RequireIDToken selects strict OIDC authorization-code login rather than
+	// generic OAuth2 userinfo login. Scopes alone do not enable this mode.
+	// Requires an openid scope, IssuerURL, ClientID, JWKSURL (possibly discovered),
+	// and a signed ID token with valid issuer, client audience, expiry, nonce and
+	// nonempty sub. Identity.Subject is always that sub, ignoring subject mappings.
+	// SkipIDTokenVerify, DisableNonce, PasswordFlow and a non-client Audience
+	// are incompatible. Discovery/configuration errors disable Login even if
+	// the caller uses New, which cannot return an error.
+	RequireIDToken bool `cfg:"require_id_token"`
 
 	// SkipIDTokenVerify disables id_token signature and claim verification.
 	//
@@ -138,8 +148,21 @@ type Options struct {
 	// The strategy appends "/<name>" to it when building redirect_uri.
 	CallbackBasePath string
 
-	// FlowCookie overrides the attributes of the short-lived cookie holding
-	// state, nonce and PKCE verifier during an authorization request.
+	// FlowStore optionally shares atomic, server-held flows across replicas.
+	// Nil uses a per-strategy in-memory store capped at 4096 live flows, with
+	// lazy expiry and no goroutines. Replacing/restarting it invalidates flows.
+	FlowStore FlowStore
+	// FlowTTL is the server-enforced lifetime, independent of cookie MaxAge.
+	// Nonpositive values default to six minutes.
+	FlowTTL time.Duration
+	// FlowMaxPendingPerSource limits outstanding initiations per canonical client
+	// IP (default 10 for nonpositive values). Shared NATs share this quota.
+	// Only TrustedProxies permits forwarded client IPs; the unsafe forwarding
+	// option does not apply to admission. Injected FlowStores must enforce it
+	// atomically using FlowData.Source and SourceLimit. Callbacks are not IP-bound.
+	FlowMaxPendingPerSource int
+
+	// FlowCookie overrides the attributes of the short-lived opaque flow cookie.
 	//
 	// The defaults are already the safe ones: HttpOnly, SameSite=Lax, Secure
 	// inferred from the request. Set Domain here if the callback lands on a
@@ -185,6 +208,7 @@ type Strategy struct {
 	client *http.Client
 
 	flowCookie cookie.Options
+	flows      FlowStore
 	discovery  *discoveryCache
 
 	// keys verifies id_token signatures. Nil when the IdP publishes no key
@@ -193,19 +217,19 @@ type Strategy struct {
 
 	// issuer is the value the id_token's iss claim must equal. Taken from the
 	// discovery document when available, else from Config.IssuerURL.
-	issuer string
+	issuer  string
+	initErr error
 }
 
 // New returns an OAuth2 strategy.
 //
-// Deprecated behaviour note: New swallows discovery failures with a warning so
-// a transient IdP outage at boot does not take the process down. Use NewWithContext
-// when you want the error.
+// New logs initialization errors rather than returning them. Issuer mismatches
+// and strict OIDC initialization errors still disable Login. Use NewWithContext
+// to handle errors explicitly.
 func New(name string, cfg Config, opts Options) *Strategy {
 	s, err := NewWithContext(context.Background(), name, cfg, opts)
 	if err != nil {
-		slog.Warn("oauth2: discovery failed, using explicit config",
-			"strategy", name, "issuer", cfg.IssuerURL, "error", err.Error())
+		slog.Warn("oauth2: initialization failed", "strategy", name, "operation", "initialization")
 	}
 
 	return s
@@ -214,12 +238,22 @@ func New(name string, cfg Config, opts Options) *Strategy {
 // NewWithContext returns an OAuth2 strategy, performing OIDC discovery under
 // the caller's context when cfg.IssuerURL is set.
 //
-// A discovery failure is reported but never fatal: the returned Strategy is
-// always usable with whatever endpoints were configured explicitly.
+// A Strategy is always returned. Generic OAuth2 may use explicit endpoints on
+// discovery transport failures. Issuer mismatches and strict OIDC discovery or
+// configuration failures disable Login; callers should always handle the error.
 func NewWithContext(ctx context.Context, name string, cfg Config, opts Options) (*Strategy, error) {
 	cfg.Scopes = append([]string(nil), cfg.Scopes...)
 	opts.XUserClaims = cloneXUserClaims(opts.XUserClaims.withDefaults())
 	opts.TrustedProxies = append([]string(nil), opts.TrustedProxies...)
+	if opts.FlowTTL <= 0 {
+		opts.FlowTTL = 6 * time.Minute
+	}
+	if opts.FlowMaxPendingPerSource <= 0 {
+		opts.FlowMaxPendingPerSource = 10
+	}
+	if opts.FlowStore == nil {
+		opts.FlowStore = &memoryFlowStore{flows: make(map[string]FlowData)}
+	}
 
 	if cfg.Audience == "" {
 		cfg.Audience = cfg.ClientID
@@ -244,8 +278,9 @@ func NewWithContext(ctx context.Context, name string, cfg Config, opts Options) 
 		opts:       opts,
 		client:     client,
 		flowCookie: defaultFlowCookie(opts.FlowCookie),
+		flows:      opts.FlowStore,
 		discovery:  newDiscoveryCache(1 * time.Hour),
-		issuer:     strings.TrimSuffix(cfg.IssuerURL, "/"),
+		issuer:     cfg.IssuerURL,
 	}
 
 	var discErr error
@@ -254,16 +289,13 @@ func NewWithContext(ctx context.Context, name string, cfg Config, opts Options) 
 		doc, err := Discover(ctx, client, cfg.IssuerURL)
 		if err != nil {
 			discErr = err
+			if cfg.RequireIDToken || errors.Is(err, ErrIssuerMismatch) {
+				s.initErr = err
+			}
 		} else {
 			s.discovery.set(doc)
 			applyDiscovery(&cfg, doc)
 
-			// The document states its own issuer; per OIDC Discovery §4.3 it
-			// must match the URL we asked, and it is the value that goes into
-			// the iss check.
-			if doc.Issuer != "" {
-				s.issuer = doc.Issuer
-			}
 		}
 	}
 
@@ -271,6 +303,20 @@ func NewWithContext(ctx context.Context, name string, cfg Config, opts Options) 
 
 	if cfg.JWKSURL != "" {
 		s.keys = newKeySet(cfg.JWKSURL, client)
+	}
+
+	if cfg.RequireIDToken {
+		hasOpenID := false
+		for _, scope := range cfg.Scopes {
+			hasOpenID = hasOpenID || scope == "openid"
+		}
+		if s.initErr == nil && (!hasOpenID || s.issuer == "" || cfg.ClientID == "" || s.keys == nil ||
+			cfg.Audience != cfg.ClientID || cfg.SkipIDTokenVerify || cfg.DisableNonce || cfg.PasswordFlow) {
+			s.initErr = errors.New("oauth2: require_id_token requires openid scope, issuer_url, client_id, jwks_url, client audience and nonce verification; skip_id_token_verify, disable_nonce and password_flow are incompatible")
+		}
+		if s.initErr != nil {
+			return s, s.initErr
+		}
 	}
 
 	return s, discErr
@@ -342,10 +388,23 @@ func (s *Strategy) Descriptor() strategy.Descriptor {
 
 // Login dispatches to the right flow based on request shape.
 func (s *Strategy) Login(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.initErr != nil {
+		s.writeInternalError(w, http.StatusServiceUnavailable, "provider_configuration", "identity provider configuration is invalid", s.initErr)
+		return nil, strategy.OutcomeFailed, nil
+	}
+
 	switch r.Method {
 	case http.MethodGet:
-		q := r.URL.Query()
-		if q.Get("code") != "" || q.Get("error") != "" {
+		q, err := url.ParseQuery(r.URL.RawQuery)
+		ambiguous := false
+		for _, values := range q {
+			ambiguous = ambiguous || len(values) != 1
+		}
+		callback, _ := s.callbackURL(r)
+		callbackURL, _ := url.Parse(callback)
+		onCallback := callbackURL != nil && callbackURL.Path == r.URL.Path
+		if err != nil || ambiguous || s.flowCookieCount(r) > 1 || onCallback || q.Has("code") || q.Has("error") || q.Has("state") || q.Has("error_description") {
 			return s.handleCallback(w, r)
 		}
 
@@ -374,27 +433,26 @@ func (s *Strategy) Logout(ctx context.Context, _ *identity.Identity) error {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.LogoutURL, nil)
 	if err != nil {
-		return err
+		return &upstreamError{operation: "logout"}
 	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return err
+		return &upstreamError{operation: "logout"}
 	}
 
 	_ = resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("oauth2 logout: %s", resp.Status)
+		return &upstreamError{operation: "logout", status: resp.StatusCode}
 	}
 
 	return nil
 }
 
-// handleInitiate generates state, nonce and PKCE, stores them in one flow
-// cookie, and redirects to AuthURL.
+// handleInitiate stores state, nonce and PKCE server-side and redirects to AuthURL.
 func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
-	flow := flowState{}
+	flow := FlowData{}
 
 	state, err := randomURLSafe(16)
 	if err != nil {
@@ -429,12 +487,6 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 		flow.Verifier = pkce.Verifier
 	}
 
-	if err := s.setFlowCookie(w, r, flow); err != nil {
-		s.writeInternalError(w, http.StatusInternalServerError, "flow_cookie", "could not start authorization", err)
-
-		return nil, strategy.OutcomeFailed, nil
-	}
-
 	redirectURI, err := s.callbackURL(r)
 	if err != nil {
 		s.writeInternalError(w, http.StatusInternalServerError, "redirect_uri", "could not start authorization", err)
@@ -449,6 +501,15 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	flow.CallbackURL = redirectURI
+	if err := s.setFlowCookie(w, r, flow); err != nil {
+		if errors.Is(err, ErrFlowSourceFull) {
+			writeError(w, http.StatusTooManyRequests, "flow_source_full", "too many pending authorization flows; complete a login or retry after expiry")
+			return nil, strategy.OutcomeFailed, nil
+		}
+		s.writeInternalError(w, http.StatusServiceUnavailable, "flow_unavailable", "could not start authorization; retry login", err)
+		return nil, strategy.OutcomeFailed, nil
+	}
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 
 	return nil, strategy.OutcomePending, nil
@@ -457,16 +518,24 @@ func (s *Strategy) handleInitiate(w http.ResponseWriter, r *http.Request) (*iden
 // handleCallback validates state, exchanges code (with PKCE verifier), fetches
 // userinfo, builds Identity, revokes.
 func (s *Strategy) handleCallback(w http.ResponseWriter, r *http.Request) (*identity.Identity, strategy.Outcome, error) {
-	q := r.URL.Query()
+	q, queryErr := url.ParseQuery(r.URL.RawQuery)
 
 	flow, err := s.takeFlowCookie(w, r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "state_invalid", "authorization flow expired or cookie missing")
+		if !errors.Is(err, ErrFlowInvalid) {
+			s.writeInternalError(w, http.StatusServiceUnavailable, "flow_unavailable", "authorization flow unavailable; restart login", err)
+		} else {
+			writeError(w, http.StatusUnauthorized, "state_invalid", "authorization flow expired, invalid or already used; restart login")
+		}
 
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	if err := checkState(flow.State, q.Get("state")); err != nil {
+	invalid := queryErr != nil || len(q["state"]) != 1 || (q.Has("code") == q.Has("error"))
+	for _, values := range q {
+		invalid = invalid || len(values) != 1
+	}
+	if invalid || checkState(flow.State, q.Get("state")) != nil || (q.Get("code") == "" && q.Get("error") == "") {
 		writeError(w, http.StatusUnauthorized, "state_invalid", "state does not match")
 
 		return nil, strategy.OutcomeFailed, nil
@@ -475,8 +544,7 @@ func (s *Strategy) handleCallback(w http.ResponseWriter, r *http.Request) (*iden
 	// Provider denials are callbacks too. Validate and consume the flow before
 	// acknowledging one so an attacker cannot inject a plausible denial.
 	if e := q.Get("error"); e != "" {
-		desc := q.Get("error_description")
-		slog.Warn("oauth2 authorization denied", "strategy", s.name, "provider_error", e, "provider_description", desc)
+		slog.Warn("oauth2 authorization denied", "strategy", s.name, "provider_error", safeOAuthCode(e))
 		writeError(w, http.StatusUnauthorized, "authorization_denied", "authorization request was denied")
 
 		return nil, strategy.OutcomeFailed, nil
@@ -497,6 +565,10 @@ func (s *Strategy) handleCallback(w http.ResponseWriter, r *http.Request) (*iden
 		return nil, strategy.OutcomeFailed, nil
 	}
 
+	if !time.Now().Before(flow.ExpiresAt) {
+		writeError(w, http.StatusUnauthorized, "state_invalid", "authorization flow expired; restart login")
+		return nil, strategy.OutcomeFailed, nil
+	}
 	body, err := s.exchangeCode(r.Context(), q.Get("code"), redirectURI, flow.Verifier)
 	if err != nil {
 		s.writeInternalError(w, http.StatusBadGateway, "code_exchange", "identity provider request failed", err)
@@ -530,7 +602,7 @@ func (s *Strategy) handlePassword(w http.ResponseWriter, r *http.Request) (*iden
 
 			return nil, strategy.OutcomeFailed, nil
 		}
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid request body")
 
 		return nil, strategy.OutcomeFailed, nil
 	}
@@ -538,7 +610,7 @@ func (s *Strategy) handlePassword(w http.ResponseWriter, r *http.Request) (*iden
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
 		values, err := url.ParseQuery(string(body))
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid request body")
 
 			return nil, strategy.OutcomeFailed, nil
 		}
@@ -547,7 +619,7 @@ func (s *Strategy) handlePassword(w http.ResponseWriter, r *http.Request) (*iden
 		creds.Password = values.Get("password")
 	} else {
 		if err := json.Unmarshal(body, &creds); err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid request body")
 
 			return nil, strategy.OutcomeFailed, nil
 		}
@@ -555,7 +627,7 @@ func (s *Strategy) handlePassword(w http.ResponseWriter, r *http.Request) (*iden
 
 	tokenBody, err := s.exchangePassword(r.Context(), creds.Username, creds.Password)
 	if err != nil {
-		slog.Warn("oauth2 password exchange failed", "strategy", s.name, "error", err.Error())
+		s.logFailure("password_exchange", err)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid credentials")
 
 		return nil, strategy.OutcomeFailed, nil
@@ -612,7 +684,7 @@ func (s *Strategy) tokenRequest(ctx context.Context, values url.Values) ([]byte,
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.TokenURL, strings.NewReader(values.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, &upstreamError{operation: "token"}
 	}
 
 	authParams(s.cfg.ClientID, s.cfg.ClientSecret, req, s.cfg.AuthHeaderStyle)
@@ -623,17 +695,17 @@ func (s *Strategy) tokenRequest(ctx context.Context, values url.Values) ([]byte,
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &upstreamError{operation: "token"}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := bodylimit.ReadUpstream(resp.Body, maxUpstreamResponseBytes)
 	if err != nil {
-		return nil, err
+		return nil, readError("token", resp.StatusCode, err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, errors.New(strings.TrimSpace(string(body)))
+		return nil, responseError("token", resp.StatusCode, body)
 	}
 
 	return body, nil
@@ -704,7 +776,8 @@ func (s *Strategy) fetchClaims(ctx context.Context, tr tokenResponse, nonce stri
 			idSub, _ := idClaims["sub"].(string)
 			uiSub, _ := claims["sub"].(string)
 
-			if idSub != "" && uiSub != "" && idSub != uiSub {
+			if (s.cfg.RequireIDToken && (idSub == "" || uiSub == "")) ||
+				(idSub != "" && uiSub != "" && idSub != uiSub) {
 				return nil, fmt.Errorf("oauth2: userinfo sub %q does not match id_token sub %q", uiSub, idSub)
 			}
 		}
@@ -726,6 +799,14 @@ func (s *Strategy) fetchClaims(ctx context.Context, tr tokenResponse, nonce stri
 // verifyIDToken returns the verified claims of tr.IDToken, or nil when there
 // is no token to verify or verification is deliberately disabled.
 func (s *Strategy) verifyIDToken(ctx context.Context, idToken, nonce string) (map[string]any, error) {
+	if s.cfg.RequireIDToken {
+		if s.initErr != nil {
+			return nil, s.initErr
+		}
+		if idToken == "" || s.keys == nil || nonce == "" || s.cfg.SkipIDTokenVerify {
+			return nil, errors.New("oauth2: require_id_token requires an ID token, key verifier and flow nonce")
+		}
+	}
 	if idToken == "" {
 		return nil, nil
 	}
@@ -755,6 +836,21 @@ func (s *Strategy) verifyIDToken(ctx context.Context, idToken, nonce string) (ma
 	if err := validateIDToken(claims, checks); err != nil {
 		return nil, err
 	}
+	if s.cfg.RequireIDToken {
+		if _, ok := claims["exp"].(float64); !ok {
+			return nil, errors.New("oauth2: id_token exp must be a numeric date")
+		}
+		if sub, _ := claims["sub"].(string); sub == "" {
+			return nil, errors.New("oauth2: id_token has no sub claim")
+		}
+		// Core 3.1.3.7: verify the authorized party when supplied, and
+		// require it for multiple audiences to avoid client confusion.
+		azp, hasAZP := claims["azp"]
+		aud, _ := claims["aud"].([]any)
+		if (hasAZP || len(aud) > 1) && azp != s.cfg.ClientID {
+			return nil, errors.New("oauth2: id_token authorized party mismatch")
+		}
+	}
 
 	return claims, nil
 }
@@ -762,7 +858,7 @@ func (s *Strategy) verifyIDToken(ctx context.Context, idToken, nonce string) (ma
 func (s *Strategy) fetchUserInfo(ctx context.Context, accessToken string) (map[string]any, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.UserInfoURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, &upstreamError{operation: "userinfo"}
 	}
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
@@ -770,17 +866,17 @@ func (s *Strategy) fetchUserInfo(ctx context.Context, accessToken string) (map[s
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &upstreamError{operation: "userinfo"}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := bodylimit.ReadUpstream(resp.Body, maxUpstreamResponseBytes)
 	if err != nil {
-		return nil, err
+		return nil, readError("userinfo", resp.StatusCode, err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("userinfo: %s", strings.TrimSpace(string(body)))
+		return nil, responseError("userinfo", resp.StatusCode, body)
 	}
 
 	// A userinfo endpoint may answer with a signed JWT instead of plain JSON.
@@ -789,7 +885,22 @@ func (s *Strategy) fetchUserInfo(ctx context.Context, accessToken string) (map[s
 			return nil, errors.New("oauth2: signed userinfo response but no jwks_url")
 		}
 
-		return verifyJWT(ctx, s.keys, strings.TrimSpace(string(body)))
+		claims, err := verifyJWT(ctx, s.keys, strings.TrimSpace(string(body)))
+		if err != nil {
+			return nil, err
+		}
+		if s.cfg.RequireIDToken {
+			// Core 5.3.2 requires iss/aud for signed UserInfo, but not the
+			// ID-token nonce or expiry. fetchClaims checks the subject binding.
+			iss, _ := claims["iss"].(string)
+			if iss != s.issuer {
+				return nil, fmt.Errorf("oauth2: signed userinfo: %w: got %q, want %q", ErrIssuerMismatch, iss, s.issuer)
+			}
+			if !audienceContains(claims["aud"], s.cfg.ClientID) {
+				return nil, fmt.Errorf("oauth2: signed userinfo: %w", ErrAudienceMismatch)
+			}
+		}
+		return claims, nil
 	}
 
 	var claims map[string]any
@@ -831,6 +942,9 @@ func (s *Strategy) identityFromClaims(claims map[string]any, tr tokenResponse) *
 
 	if id.Subject = firstClaim(claims, s.opts.XUserClaims.Subject); id.Subject == "" {
 		id.Subject = firstClaim(claims, []string{"preferred_username", "email"})
+	}
+	if s.cfg.RequireIDToken {
+		id.Subject, _ = claims["sub"].(string)
 	}
 
 	id.Email = firstClaim(claims, s.opts.XUserClaims.Email)
@@ -913,7 +1027,7 @@ func (s *Strategy) revoke(ctx context.Context, accessToken string) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.RevocationURL, strings.NewReader(values.Encode()))
 	if err != nil {
-		slog.Warn("oauth2 revoke: build request", "strategy", s.name, "error", err.Error())
+		s.logFailure("revoke_request", err)
 
 		return
 	}
@@ -925,17 +1039,20 @@ func (s *Strategy) revoke(ctx context.Context, accessToken string) {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		slog.Warn("oauth2 revoke: do", "strategy", s.name, "error", err.Error())
+		s.logFailure("revoke", err)
 
 		return
 	}
 
 	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		s.logFailure("revoke", &upstreamError{operation: "revoke", status: resp.StatusCode})
+	}
 }
 
 // buildAuthCodeURL constructs the IdP authorize URL with state, nonce,
 // redirect_uri, and optional PKCE.
-func (s *Strategy) buildAuthCodeURL(flow flowState, redirectURI string, pkce *pkceParams) (string, error) {
+func (s *Strategy) buildAuthCodeURL(flow FlowData, redirectURI string, pkce *pkceParams) (string, error) {
 	u, err := url.Parse(s.cfg.AuthURL)
 	if err != nil {
 		return "", err
@@ -1010,11 +1127,12 @@ func (o Options) callbackOrigin(r *http.Request) (proxy.Origin, error) {
 }
 
 func (s *Strategy) writeInternalError(w http.ResponseWriter, status int, code, message string, err error) {
-	slog.Error("oauth2 request failed", "strategy", s.name, "operation", code, "error", err.Error())
+	s.logFailure(code, err)
 	writeError(w, status, code, message)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 

@@ -173,29 +173,31 @@ func (s *Session) resolve(w http.ResponseWriter, r *http.Request) (*identity.Ide
 	ctx := r.Context()
 	pair, err := s.Issuer.Resolve(ctx, cookie.Value)
 	if err != nil {
-		if errors.Is(err, issuer.ErrTransactionConflict) {
-			slog.Warn("session: resolve conflicted", "error", err.Error())
-			s.writeUnavailable(w)
-
-			return nil, false
-		}
-		if errors.Is(err, issuer.ErrNotFound) {
+		if issuer.IsTerminal(err) {
 			s.RedirectToLogin(w, r, true, true)
 
 			return nil, false
 		}
 
-		slog.Error("session: resolve failed", "error", err.Error())
-		s.RedirectToLogin(w, r, true, true)
+		slog.Error("session: resolve unavailable")
+		s.writeUnavailable(w)
 
 		return nil, false
 	}
 
+	if pair == nil || pair.Identity == nil {
+		s.writeUnavailable(w)
+		return nil, false
+	}
 	if pair.Access.Expired() {
+		if s.RejectFn != nil && s.RejectFn(pair.Identity) {
+			s.RedirectToLogin(w, r, true, true)
+			return nil, false
+		}
 		newPair, err := s.refreshResolvedPair(ctx, cookie.Value, pair)
 		if err != nil {
-			if errors.Is(err, issuer.ErrTransactionConflict) {
-				slog.Warn("session: refresh conflicted", "error", err.Error())
+			if !issuer.IsTerminal(err) {
+				slog.Warn("session: refresh unavailable")
 				s.writeUnavailable(w)
 
 				return nil, false
@@ -206,6 +208,10 @@ func (s *Session) resolve(w http.ResponseWriter, r *http.Request) (*identity.Ide
 		}
 
 		pair = newPair
+	}
+	if pair == nil || pair.Identity == nil || pair.Access.Expired() {
+		s.writeUnavailable(w)
+		return nil, false
 	}
 
 	if s.RejectFn != nil && s.RejectFn(pair.Identity) {
@@ -236,11 +242,10 @@ func (s *Session) refreshResolvedPair(ctx context.Context, sessionID string, pai
 
 		current, resolveErr := s.Issuer.Resolve(ctx, sessionID)
 		if resolveErr != nil {
-			if errors.Is(resolveErr, issuer.ErrNotFound) {
-				return nil, resolveErr
-			}
-
-			return nil, fmt.Errorf("refresh recovery resolve: %v: %w", resolveErr, issuer.ErrTransactionConflict)
+			return nil, fmt.Errorf("refresh recovery resolve: %w", resolveErr)
+		}
+		if current == nil || current.Identity == nil {
+			return nil, issuer.ErrTransactionConflict
 		}
 		changed := current.Access.Value != accessToken || current.Refresh.Value != refreshToken
 		if errors.Is(err, issuer.ErrRefreshInvalid) && !changed {
@@ -287,6 +292,7 @@ func (s *Session) CurrentSessionID(r *http.Request) string {
 //
 // removeSession, when true, clears the session cookie.
 func (s *Session) RedirectToLogin(w http.ResponseWriter, r *http.Request, addRedirectPath, removeSession bool) {
+	w.Header().Set("Cache-Control", "no-store")
 	if removeSession {
 		s.ClearCookie(w, r)
 	}
@@ -321,6 +327,7 @@ func (s *Session) RedirectToLogin(w http.ResponseWriter, r *http.Request, addRed
 // opts out of the redirect in the first place — saw a code that told them
 // to authenticate with an upstream proxy that does not exist.
 func (s *Session) writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
 	if s.ChallengeFn != nil {
 		if challenge := s.ChallengeFn(); challenge != "" {
 			w.Header().Set("WWW-Authenticate", challenge)
@@ -336,11 +343,12 @@ func (s *Session) writeUnauthorized(w http.ResponseWriter) {
 }
 
 func (s *Session) writeUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error":   "session_unavailable",
-		"message": "session could not be refreshed",
+		"message": "session temporarily unavailable",
 	})
 }
 

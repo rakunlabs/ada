@@ -43,6 +43,32 @@ func handleUser(c *ada.Context) error {
 }
 ```
 
+## JSON Lists
+
+A pointer to a slice can receive a JSON body with `Content-Type: application/json`:
+
+```go
+var users []User
+err := c.Bind(&users) // Accepts [{"username":"alice"}]
+```
+
+To also accept a single JSON object as a one-element slice, opt in explicitly:
+
+```go
+err := c.Bind(&users, bind.WithJSONSingleAsSlice(true))
+// Accepts {"username":"alice"} or [{"username":"alice"}]
+```
+
+The same option is available with `bind.Bind(r, &users, ...)`. Arrays replace
+existing slice contents; `[]` produces an empty slice and `null` produces a nil
+slice. Objects are rejected by default. Element decoding follows `encoding/json`,
+including support for pointer and map elements; interface numbers use `json.Number`.
+
+Slice targets are body-only: query parameters, headers, and path parameters do
+not override individual elements. Other or missing content types are rejected
+for slice targets. Struct binding is unchanged, including when the option is
+enabled. Body limits and rejection of trailing JSON data apply to both modes.
+
 ## Request Body Limit
 
 Binding applies **no body limit by default** (`bind.DefaultBodyLimit` is `0`).

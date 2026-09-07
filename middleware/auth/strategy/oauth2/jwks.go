@@ -369,9 +369,10 @@ func b64uint(s string) (*big.Int, error) {
 
 // jwtHeader is the protected header of a compact JWS.
 type jwtHeader struct {
-	Alg string `json:"alg"`
-	Kid string `json:"kid"`
-	Typ string `json:"typ"`
+	Alg  string          `json:"alg"`
+	Kid  string          `json:"kid"`
+	Typ  string          `json:"typ"`
+	Crit json.RawMessage `json:"crit"`
 }
 
 // verifyJWT checks a compact JWS against the key set and returns its claims.
@@ -393,6 +394,11 @@ func verifyJWT(ctx context.Context, ks *keySet, token string) (map[string]any, e
 	var hdr jwtHeader
 	if err := json.Unmarshal(headerRaw, &hdr); err != nil {
 		return nil, fmt.Errorf("oauth2: decode jws header: %w", err)
+	}
+	// OIDC forbids crit; this verifier implements no critical extensions.
+	// RawMessage also detects prohibited null, empty and malformed values.
+	if hdr.Crit != nil {
+		return nil, errors.New("oauth2: jws crit header is not supported")
 	}
 
 	// "none" is a signature algorithm only in the sense that a blank cheque is

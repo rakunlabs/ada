@@ -29,8 +29,8 @@ import (
 	"time"
 
 	"github.com/rakunlabs/ada/middleware/auth/identity"
-	"github.com/rakunlabs/ada/middleware/auth/strategy"
 	"github.com/rakunlabs/ada/middleware/auth/proxy"
+	"github.com/rakunlabs/ada/middleware/auth/strategy"
 )
 
 // ErrNoUserHeader is returned when the configured user header is missing or
@@ -303,6 +303,7 @@ func splitCSV(raw string) []string {
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
 	_ = json.NewEncoder(w).Encode(map[string]string{

@@ -33,6 +33,7 @@ type option struct {
 	MultipartFormMaxMemory int64
 	BodyLimit              int64
 	QuerySeparator         string
+	JSONSingleAsSlice      bool
 	err                    error
 }
 
@@ -62,6 +63,15 @@ func applyOptions(opts ...Option) *option {
 
 // Option defines a function type for setting options.
 type Option func(*option)
+
+// WithJSONSingleAsSlice allows a JSON object to populate a slice target as one
+// element. Arrays and null retain their normal JSON decoding behavior. Disabled
+// by default; this option does not affect struct targets or other content types.
+func WithJSONSingleAsSlice(enabled bool) Option {
+	return func(o *option) {
+		o.JSONSingleAsSlice = enabled
+	}
+}
 
 func (o *option) setError(message string) {
 	if o.err == nil {

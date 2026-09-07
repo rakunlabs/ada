@@ -38,6 +38,7 @@ func newStatusHandler() (*statusHandler, error) {
 }
 
 func (s *statusHandler) serve(w http.ResponseWriter, _ *http.Request, cookieName string) {
+	w.Header().Set("Cache-Control", "no-store")
 	var buf bytes.Buffer
 	if err := s.tmpl.Execute(&buf, map[string]any{"cookie": cookieName}); err != nil {
 		slog.Error("auth: render status iframe", "error", err.Error())

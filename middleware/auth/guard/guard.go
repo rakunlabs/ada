@@ -342,6 +342,7 @@ func WriteLocked(w http.ResponseWriter, d Decision) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusTooManyRequests)
 
 	_, _ = w.Write([]byte(`{"error":"too_many_attempts","message":"too many failed attempts, try again later"}` + "\n"))

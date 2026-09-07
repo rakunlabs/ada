@@ -621,6 +621,19 @@ func TestBindForwardsOptions(t *testing.T) {
 		Data string `json:"data"`
 	}
 
+	t.Run("single object as slice", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"data":"one"}`))
+		r.Header.Set(HeaderContentType, MIMEApplicationJSON)
+		c := NewContext(httptest.NewRecorder(), r)
+		var items []payload
+		if err := c.Bind(&items, bind.WithJSONSingleAsSlice(true)); err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 || items[0].Data != "one" {
+			t.Fatalf("unexpected items: %#v", items)
+		}
+	})
+
 	const size = (1 << 20) + 1
 
 	body := func() *strings.Reader {

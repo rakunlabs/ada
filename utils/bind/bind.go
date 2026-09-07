@@ -1,6 +1,7 @@
 package bind
 
 import (
+	"bufio"
 	"encoding"
 	"encoding/json"
 	"encoding/xml"
@@ -116,6 +117,7 @@ func getFieldCache(rt reflect.Type) *fieldCache {
 }
 
 // Bind binds HTTP request data to a struct based on content type and struct tags.
+// Slice targets accept JSON bodies only, without query, header, or URI binding.
 func Bind(req *http.Request, obj any, opts ...Option) (err error) {
 	// Every failure is reported as ErrBinding, but the cause stays in the
 	// chain: %s flattened it to text, which cost callers errors.Is/errors.As
@@ -145,12 +147,14 @@ func Bind(req *http.Request, obj any, opts ...Option) (err error) {
 	if !rv.CanSet() {
 		return fmt.Errorf("binding target must be settable")
 	}
-	if rv.Kind() != reflect.Struct {
-		return fmt.Errorf("binding target must point to a struct")
+	if rv.Kind() != reflect.Struct && rv.Kind() != reflect.Slice {
+		return fmt.Errorf("binding target must point to a struct or slice")
 	}
 
-	rt := rv.Type()
-	cache := getFieldCache(rt)
+	var cache *fieldCache
+	if rv.Kind() == reflect.Struct {
+		cache = getFieldCache(rv.Type())
+	}
 
 	opt := applyOptions(opts...)
 	if opt.err != nil {
@@ -166,6 +170,10 @@ func Bind(req *http.Request, obj any, opts ...Option) (err error) {
 		if parseErr != nil {
 			return fmt.Errorf("failed to parse Content-Type: %w", parseErr)
 		}
+	}
+
+	if rv.Kind() == reflect.Slice && mediaType != "application/json" {
+		return fmt.Errorf("slice binding requires application/json Content-Type")
 	}
 
 	var limitedBody *bodyLimitReadCloser
@@ -194,7 +202,7 @@ func Bind(req *http.Request, obj any, opts ...Option) (err error) {
 
 	switch mediaType {
 	case "application/json":
-		if err := bindJSON(req, rv); err != nil {
+		if err := bindJSON(req, rv, opt.JSONSingleAsSlice); err != nil {
 			return err
 		}
 	case "application/xml", "text/xml":
@@ -224,7 +232,11 @@ func Bind(req *http.Request, obj any, opts ...Option) (err error) {
 		}
 	}
 
-	// Always bind query parameters, headers, and URI parameters
+	if rv.Kind() == reflect.Slice {
+		return nil
+	}
+
+	// Bind query parameters, headers, and URI parameters for struct targets.
 	if err := bindQuery(req, rv, opt.QuerySeparator, cache); err != nil {
 		return err
 	}
@@ -250,15 +262,42 @@ func hasSupportedRequestBody(mediaType string) bool {
 }
 
 // bindJSON binds one JSON value from the request body.
-func bindJSON(req *http.Request, rv reflect.Value) error {
+func bindJSON(req *http.Request, rv reflect.Value, singleAsSlice bool) error {
 	if req.Body == nil {
 		return nil
 	}
 
-	decoder := json.NewDecoder(req.Body)
+	var reader io.Reader = req.Body
+	target := rv.Addr()
+	single := false
+	if singleAsSlice && rv.Kind() == reflect.Slice {
+		// Inspect only the first non-whitespace byte; keep decoding through the
+		// original limited body rather than buffering and retrying the payload.
+		buffered := bufio.NewReader(reader)
+		for {
+			b, err := buffered.ReadByte()
+			if err != nil {
+				return fmt.Errorf("failed to decode JSON: %w", err)
+			}
+			if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
+				continue
+			}
+			if err := buffered.UnreadByte(); err != nil {
+				return fmt.Errorf("failed to decode JSON: %w", err)
+			}
+			single = b == '{'
+			break
+		}
+		reader = buffered
+		if single {
+			target = reflect.New(rv.Type().Elem())
+		}
+	}
+
+	decoder := json.NewDecoder(reader)
 	decoder.UseNumber()
 
-	if err := decoder.Decode(rv.Addr().Interface()); err != nil {
+	if err := decoder.Decode(target.Interface()); err != nil {
 		return fmt.Errorf("failed to decode JSON: %w", err)
 	}
 
@@ -268,6 +307,11 @@ func bindJSON(req *http.Request, rv reflect.Value) error {
 			return fmt.Errorf("failed to decode JSON: multiple JSON values")
 		}
 		return fmt.Errorf("failed to decode JSON: trailing data: %w", err)
+	}
+	if single {
+		result := reflect.MakeSlice(rv.Type(), 1, 1)
+		result.Index(0).Set(target.Elem())
+		rv.Set(result)
 	}
 
 	return nil

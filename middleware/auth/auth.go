@@ -1021,10 +1021,15 @@ func (a *Auth) handleUI(w http.ResponseWriter, r *http.Request) {
 
 func (a *Auth) identity(w http.ResponseWriter, r *http.Request) (*identity.Identity, bool) {
 	if id := identity.FromContext(r.Context()); id != nil {
+		if PendingIdentity(id) {
+			writeError(w, http.StatusUnauthorized, "no_session", "authentication incomplete")
+			return nil, false
+		}
 		return id, true
 	}
 
-	// Resolve directly if Require() was not in the chain.
+	// Resolve directly if Require() was not in the chain. This is a read-only
+	// snapshot: /me never refreshes, rotates or clears session credentials.
 	sessionID := a.session.CurrentSessionID(r)
 	if sessionID == "" {
 		writeError(w, http.StatusUnauthorized, "no_session", "no session cookie")
@@ -1034,11 +1039,20 @@ func (a *Auth) identity(w http.ResponseWriter, r *http.Request) (*identity.Ident
 
 	pair, err := a.issuer.Resolve(r.Context(), sessionID)
 	if err != nil {
-		if !errors.Is(err, issuer.ErrNotFound) {
-			slog.Warn("auth: resolve identity", "error", err.Error())
+		if !issuer.IsTerminal(err) {
+			writeError(w, http.StatusServiceUnavailable, "session_unavailable", "session temporarily unavailable")
+			return nil, false
 		}
 		writeError(w, http.StatusUnauthorized, "no_session", "session not found")
 
+		return nil, false
+	}
+	if pair == nil || pair.Identity == nil {
+		writeError(w, http.StatusServiceUnavailable, "session_unavailable", "session temporarily unavailable")
+		return nil, false
+	}
+	if pair.Access.Expired() || PendingIdentity(pair.Identity) {
+		writeError(w, http.StatusUnauthorized, "no_session", "session expired or authentication incomplete")
 		return nil, false
 	}
 
@@ -1046,6 +1060,7 @@ func (a *Auth) identity(w http.ResponseWriter, r *http.Request) (*identity.Ident
 }
 
 func (a *Auth) respondAfterLogin(w http.ResponseWriter, r *http.Request, strategyName string) {
+	w.Header().Set("Cache-Control", "no-store")
 	redirectPath := session.SafeRedirectPath(r.URL.Query().Get("redirect_path"))
 
 	// JSON callers (typically the local strategy form) get a JSON OK; browsers
@@ -1096,6 +1111,7 @@ func (a *Auth) removeSuccessCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 

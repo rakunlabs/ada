@@ -24,6 +24,17 @@ var (
 	ErrTransactionConflict = errors.New("issuer: transaction conflict")
 )
 
+// IsTerminal reports known credential failures. Unknown errors (including
+// backend outages and conflicts) must not cause clients to discard credentials.
+func IsTerminal(err error) bool {
+	if errors.Is(err, ErrTransactionConflict) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, ErrNotFound) || errors.Is(err, ErrRevoked) ||
+		errors.Is(err, ErrAccessExpired) || errors.Is(err, ErrRefreshExpired) ||
+		errors.Is(err, ErrRefreshInvalid)
+}
+
 // Token is one of our opaque tokens. Value never leaves the server in clear
 // text; only the SessionID is exposed via cookie.
 type Token struct {
@@ -31,20 +42,20 @@ type Token struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// Expired reports whether t is past its expiry. A zero ExpiresAt is treated as
+// Expired reports whether t is at or past its expiry. A zero ExpiresAt is treated as
 // "never expires"; callers should set TTLs explicitly.
 func (t Token) Expired() bool {
 	return t.ExpiredAt(time.Now())
 }
 
-// ExpiredAt reports whether t is past its expiry relative to now. Callers with
+// ExpiredAt reports whether t is at or past its expiry relative to now. Callers with
 // an injected clock should use this instead of Expired.
 func (t Token) ExpiredAt(now time.Time) bool {
 	if t.ExpiresAt.IsZero() {
 		return false
 	}
 
-	return now.After(t.ExpiresAt)
+	return !now.Before(t.ExpiresAt)
 }
 
 // Pair is the live state for one session: the identity and our two tokens,

@@ -247,6 +247,7 @@ func (c *config) deny(w http.ResponseWriter, r *http.Request, id *identity.Ident
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
 	// The requirement is not echoed: telling an unauthorized caller exactly

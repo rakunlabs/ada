@@ -394,6 +394,7 @@ func (s *Strategy) Register(w http.ResponseWriter, r *http.Request) (*identity.I
 
 	// Auto-login disabled: tell the UI to flip to the login form.
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -520,6 +521,7 @@ func writeBadRequest(w http.ResponseWriter, err error) {
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
 	_ = json.NewEncoder(w).Encode(map[string]string{
