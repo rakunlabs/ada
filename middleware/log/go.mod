@@ -1,10 +1,10 @@
 module github.com/rakunlabs/ada/middleware/log
 
-go 1.24
+go 1.25
 
 require (
-	github.com/felixge/httpsnoop v1.0.4
-	github.com/rakunlabs/logi v0.4.5
+	github.com/felixge/httpsnoop v1.1.0
+	github.com/rakunlabs/logi v0.4.6
 )
 
 require (

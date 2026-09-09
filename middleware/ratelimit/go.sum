@@ -1,4 +1,4 @@
-github.com/rakunlabs/cache v0.3.3 h1:+F9BxUvPDIkNl2w/vVJWbLZKBFwMzuPMIdP0Mik4TPo=
-github.com/rakunlabs/cache v0.3.3/go.mod h1:sYiqAPj7bU5ZqxOSNGjvMll9CsTxTl+QkzqQjtQE408=
-github.com/rakunlabs/tummy v0.1.2 h1:rKKvdT/JLCZTeKwDAKWK7jwnDLETx/5hGPBv2LT6lDs=
-github.com/rakunlabs/tummy v0.1.2/go.mod h1:KEoD3yG+kC+7uR0WdFTVrfBZT/3WfqFdPCFWGmdB/Bs=
+github.com/rakunlabs/cache v0.4.0 h1:GKMc4UrbSh1wA/u9VNAsF3YoaNlwo0MerHyxMFnf0rM=
+github.com/rakunlabs/cache v0.4.0/go.mod h1:fS/o93H/6d21HfValg5rGOIn5qhpZJLvjsF9pwV7Q4Q=
+github.com/rakunlabs/tummy v0.1.3 h1:jt01GKnAZd+z0ZO0ScQa8r9Vl3ObY8Tl6CDGfqIF5ZQ=
+github.com/rakunlabs/tummy v0.1.3/go.mod h1:KEoD3yG+kC+7uR0WdFTVrfBZT/3WfqFdPCFWGmdB/Bs=
