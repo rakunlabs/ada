@@ -19,7 +19,7 @@ require (
 	github.com/rakunlabs/ada/middleware/server v0.5.3
 	github.com/rakunlabs/ada/middleware/telemetry v0.5.3
 	github.com/rakunlabs/into v0.5.3
-	github.com/rakunlabs/logi v0.4.5
+	github.com/rakunlabs/logi v0.4.6
 	github.com/rakunlabs/tell v0.1.5
 	github.com/swaggo/swag v1.16.6
 	golang.org/x/crypto v0.55.0
@@ -106,7 +106,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
-	github.com/rytsh/mugo v0.9.2 // indirect
+	github.com/rytsh/mugo v0.9.3 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
@@ -116,8 +116,8 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/swaggo/files/v2 v2.0.2 // indirect
 	github.com/swaggo/http-swagger/v2 v2.0.2 // indirect
-	github.com/tdewolff/minify/v2 v2.24.7 // indirect
-	github.com/tdewolff/parse/v2 v2.8.8 // indirect
+	github.com/tdewolff/minify/v2 v2.24.17 // indirect
+	github.com/tdewolff/parse/v2 v2.8.16 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/tidwall/btree v1.8.1 // indirect
 	github.com/twmb/tlscfg v1.3.0 // indirect
