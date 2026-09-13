@@ -58,7 +58,18 @@ type Session struct {
 	// Auth wires this to the strategy registry. Leaving it nil, or
 	// returning "", omits the header: a cookie-only deployment has no
 	// scheme to offer.
+	//
+	// ChallengeRequestFn takes precedence when set.
 	ChallengeFn func() string
+
+	// ChallengeRequestFn is ChallengeFn with the rejected request in hand,
+	// for challenge parameters that depend on it — RFC 9728 §5.1
+	// resource_metadata being the case that matters, since the metadata URL
+	// follows the request origin unless a deployment pinned one.
+	//
+	// When set it replaces ChallengeFn entirely rather than appending to it,
+	// so a strategy cannot end up advertised twice in one header.
+	ChallengeRequestFn func(r *http.Request) string
 
 	// RejectFn, when set, can veto an otherwise valid session. Auth uses it
 	// to refuse a half-authenticated identity that has not cleared its second
@@ -298,7 +309,7 @@ func (s *Session) RedirectToLogin(w http.ResponseWriter, r *http.Request, addRed
 	}
 
 	if GetDisableRedirect(r.Context()) {
-		s.writeUnauthorized(w)
+		s.writeUnauthorized(w, r)
 
 		return
 	}
@@ -326,12 +337,10 @@ func (s *Session) RedirectToLogin(w http.ResponseWriter, r *http.Request, addRed
 // that was never sent. Clients keying off the status — the reason a caller
 // opts out of the redirect in the first place — saw a code that told them
 // to authenticate with an upstream proxy that does not exist.
-func (s *Session) writeUnauthorized(w http.ResponseWriter) {
+func (s *Session) writeUnauthorized(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if s.ChallengeFn != nil {
-		if challenge := s.ChallengeFn(); challenge != "" {
-			w.Header().Set("WWW-Authenticate", challenge)
-		}
+	if challenge := s.challenge(r); challenge != "" {
+		w.Header().Set("WWW-Authenticate", challenge)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -340,6 +349,19 @@ func (s *Session) writeUnauthorized(w http.ResponseWriter) {
 		"error":   "unauthorized",
 		"message": "invalid or missing credentials",
 	})
+}
+
+// challenge resolves the WWW-Authenticate value for a rejected request,
+// preferring the request-aware hook.
+func (s *Session) challenge(r *http.Request) string {
+	if s.ChallengeRequestFn != nil && r != nil {
+		return s.ChallengeRequestFn(r)
+	}
+	if s.ChallengeFn != nil {
+		return s.ChallengeFn()
+	}
+
+	return ""
 }
 
 func (s *Session) writeUnavailable(w http.ResponseWriter) {

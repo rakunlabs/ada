@@ -33,17 +33,17 @@ func TestJWKSBlockedRefreshDoesNotBlockCachedKey(t *testing.T) {
 
 	ks := newKeySet("https://idp.example/jwks", client)
 	known := &rsa.PublicKey{N: big.NewInt(3), E: 3}
-	ks.keys["known"] = known
+	ks.SetKeys(map[string]crypto.PublicKey{"known": known})
 	refreshDone := make(chan error, 1)
 	go func() {
-		_, err := ks.key(context.Background(), "unknown")
+		_, err := ks.Key(context.Background(), "unknown")
 		refreshDone <- err
 	}()
 	<-started
 
 	lookupDone := make(chan crypto.PublicKey, 1)
 	go func() {
-		key, _ := ks.key(context.Background(), "known")
+		key, _ := ks.Key(context.Background(), "known")
 		lookupDone <- key
 	}()
 
@@ -86,7 +86,7 @@ func TestJWKSConcurrentMissesCoalesce(t *testing.T) {
 		go func() {
 			ready.Done()
 			<-begin
-			_, err := ks.key(context.Background(), "rotated")
+			_, err := ks.Key(context.Background(), "rotated")
 			errs <- err
 		}()
 	}
@@ -120,19 +120,19 @@ func TestJWKSFailedFetchUsesShortRetryBackoff(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	ks := newKeySet(server.URL, server.Client())
-	ks.now = func() time.Time { return now }
-	if _, err := ks.key(context.Background(), "current"); err == nil {
+	ks.Now = func() time.Time { return now }
+	if _, err := ks.Key(context.Background(), "current"); err == nil {
 		t.Fatal("first fetch unexpectedly succeeded")
 	}
-	if _, err := ks.key(context.Background(), "current"); !errors.Is(err, ErrUnknownKey) || !strings.Contains(err.Error(), "throttled") {
+	if _, err := ks.Key(context.Background(), "current"); !errors.Is(err, ErrUnknownKey) || !strings.Contains(err.Error(), "throttled") {
 		t.Fatalf("immediate retry error = %v", err)
 	}
 	if requests != 1 {
 		t.Fatalf("immediate retry made %d requests", requests)
 	}
 
-	now = now.Add(ks.retryRefresh)
-	if _, err := ks.key(context.Background(), "current"); err != nil {
+	now = now.Add(ks.RetryRefresh)
+	if _, err := ks.Key(context.Background(), "current"); err != nil {
 		t.Fatalf("retry after short backoff: %v", err)
 	}
 	if requests != 2 {
@@ -152,11 +152,11 @@ func TestJWKSSuccessCooldownStartsAfterFetch(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	ks := newKeySet(server.URL, server.Client())
-	ks.now = func() time.Time { return now }
-	if _, err := ks.key(context.Background(), "current"); err != nil {
+	ks.Now = func() time.Time { return now }
+	if _, err := ks.Key(context.Background(), "current"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ks.key(context.Background(), "rotated"); !errors.Is(err, ErrUnknownKey) || !strings.Contains(err.Error(), "throttled") {
+	if _, err := ks.Key(context.Background(), "rotated"); !errors.Is(err, ErrUnknownKey) || !strings.Contains(err.Error(), "throttled") {
 		t.Fatalf("unknown key during success cooldown = %v", err)
 	}
 	if requests != 1 {
@@ -170,12 +170,12 @@ func TestJWKSMissingKIDWithMultipleKeysIsImmediateAndAccurate(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	ks := newKeySet(server.URL, server.Client())
-	ks.keys = map[string]crypto.PublicKey{
+	ks.SetKeys(map[string]crypto.PublicKey{
 		"one": &rsa.PublicKey{N: big.NewInt(3), E: 3},
 		"two": &rsa.PublicKey{N: big.NewInt(5), E: 3},
-	}
+	})
 	for range 2 {
-		_, err := ks.key(context.Background(), "")
+		_, err := ks.Key(context.Background(), "")
 		if !errors.Is(err, ErrMissingKeyID) || strings.Contains(err.Error(), "throttled") {
 			t.Fatalf("missing kid error = %v", err)
 		}
@@ -194,7 +194,7 @@ func TestJWKSCountsMultipleUsableKeysWithoutKID(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	ks := newKeySet(server.URL, server.Client())
-	if _, err := ks.key(context.Background(), ""); !errors.Is(err, ErrMissingKeyID) {
+	if _, err := ks.Key(context.Background(), ""); !errors.Is(err, ErrMissingKeyID) {
 		t.Fatalf("missing kid error = %v", err)
 	}
 }

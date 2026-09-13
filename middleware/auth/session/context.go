@@ -1,6 +1,9 @@
 package session
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 type ctxKey int
 
@@ -21,6 +24,27 @@ func GetDisableRedirect(ctx context.Context) bool {
 	v, _ := ctx.Value(ctxKeyDisableRedirect).(bool)
 
 	return v
+}
+
+// DisableRedirect returns a middleware that marks every request under it as
+// non-interactive, so an unauthenticated caller gets 401 with a
+// WWW-Authenticate challenge instead of a 303 to the login page.
+//
+// Put it in front of anything a program talks to rather than a person — a
+// JSON API, an MCP endpoint, a webhook receiver. A redirect to an HTML login
+// form is a dead end for those callers: they follow it, get 200 and a page
+// they cannot parse, and report a bizarre failure far from its cause. The
+// 401 carries the RFC 9728 resource_metadata pointer, which is what lets an
+// MCP client discover the authorization server and authenticate on its own.
+//
+//	api := mux.Group("/mcp")
+//	api.Use(session.DisableRedirect(), authMW.Require())
+func DisableRedirect() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(SetDisableRedirect(r.Context(), true)))
+		})
+	}
 }
 
 // SetCookieName overrides the session cookie name for this request. Useful

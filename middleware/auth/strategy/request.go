@@ -117,6 +117,25 @@ type Challenger interface {
 	Challenge() string
 }
 
+// RequestChallenger is an optional interface for strategies whose challenge
+// depends on the request being rejected.
+//
+// A bare `Bearer` is a complete challenge only if the client already knows
+// where to get a token. RFC 9728 §5.1 closes that gap with a
+// resource_metadata parameter pointing at this resource's metadata document
+// — and that URL is derived from the request's own origin whenever the
+// deployment has not pinned one, so it cannot be computed at construction.
+//
+// A strategy implementing this takes precedence over its own Challenge()
+// for requests; Challenge() remains the answer when no request is in hand.
+type RequestChallenger interface {
+	Challenger
+
+	// ChallengeRequest returns one WWW-Authenticate value for r. An empty
+	// string contributes nothing.
+	ChallengeRequest(r *http.Request) string
+}
+
 // Challenge assembles the WWW-Authenticate value advertising every
 // registered strategy that can authenticate a request directly.
 //
@@ -126,6 +145,15 @@ type Challenger interface {
 // has no scheme to offer, and inventing one would send clients chasing an
 // endpoint that does not exist.
 func (r *Registry) Challenge() string {
+	return r.ChallengeRequest(nil)
+}
+
+// ChallengeRequest is Challenge for a specific request, letting strategies
+// that implement RequestChallenger tailor their parameters to it.
+//
+// A nil request is allowed and falls back to the static Challenge() of every
+// strategy, so callers with no request in hand keep working.
+func (r *Registry) ChallengeRequest(req *http.Request) string {
 	var challenges []string
 
 	for _, s := range r.List() {
@@ -134,7 +162,14 @@ func (r *Registry) Challenge() string {
 			continue
 		}
 
-		if v := c.Challenge(); v != "" {
+		v := ""
+		if rc, ok := s.(RequestChallenger); ok && req != nil {
+			v = rc.ChallengeRequest(req)
+		} else {
+			v = c.Challenge()
+		}
+
+		if v != "" {
 			challenges = append(challenges, v)
 		}
 	}

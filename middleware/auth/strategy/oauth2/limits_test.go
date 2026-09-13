@@ -49,7 +49,7 @@ func TestUpstreamResponseLimitsDetectNPlusOne(t *testing.T) {
 	}
 
 	ks := newKeySet(server.URL+"/jwks", server.Client())
-	if err := ks.refresh(context.Background()); !errors.Is(err, bodylimit.ErrUpstreamResponseTooLarge) {
+	if err := ks.Refresh(context.Background()); !errors.Is(err, bodylimit.ErrUpstreamResponseTooLarge) {
 		t.Fatalf("jwks error = %v", err)
 	}
 }

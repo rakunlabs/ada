@@ -49,6 +49,13 @@ func (f *fakeMux) HandleWithMethod(method, p string, h http.HandlerFunc, _ ...fu
 	}
 
 	f.routes = append(f.routes, method+" "+p)
+
+	if strings.HasSuffix(p, "/*") {
+		f.mu.HandleFunc(method+" "+strings.TrimSuffix(p, "*"), h)
+
+		return
+	}
+
 	f.mu.HandleFunc(method+" "+p, h)
 }
 func (f *fakeMux) HandleFuncWildcard(p string, h http.HandlerFunc, _ ...func(http.Handler) http.Handler) {

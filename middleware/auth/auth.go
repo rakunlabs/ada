@@ -21,6 +21,7 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/issuer"
 	"github.com/rakunlabs/ada/middleware/auth/issuer/backend"
+	"github.com/rakunlabs/ada/middleware/auth/resource"
 	"github.com/rakunlabs/ada/middleware/auth/session"
 	"github.com/rakunlabs/ada/middleware/auth/sessionstore"
 	"github.com/rakunlabs/ada/middleware/auth/strategy"
@@ -67,6 +68,17 @@ type Config struct {
 	// MFA tunes the second-factor step. Only consulted when a SecondFactor is
 	// registered via WithSecondFactor.
 	MFA MFAConfig `cfg:"mfa"`
+
+	// ProtectedResource, when set, publishes OAuth 2.0 Protected Resource
+	// Metadata (RFC 9728) at /.well-known/oauth-protected-resource and makes
+	// every 401 carry a resource_metadata pointer to it.
+	//
+	// This is what lets a client that has never been configured — an MCP
+	// client, a CLI running `auth login` — discover which authorization
+	// server to use and complete an OAuth flow on its own.
+	//
+	// WithProtectedResource takes precedence when both are used.
+	ProtectedResource *resource.Config `cfg:"protected_resource"`
 
 	// DisableRequestAuth turns off request-credential authentication in
 	// Require(), restoring cookie-only gating.
@@ -157,11 +169,12 @@ type Auth struct {
 	// request. Initialized from cfg.UI in New and replaced by SetUI.
 	liveUI atomic.Pointer[UIConfig]
 
-	registry *strategy.Registry
-	session  *session.Session
-	issuer   issuer.Issuer
-	ui       *uiHandler
-	status   *statusHandler
+	registry  *strategy.Registry
+	session   *session.Session
+	issuer    issuer.Issuer
+	ui        *uiHandler
+	status    *statusHandler
+	protected *resource.Server
 
 	// backend is the storage the default issuer was built on, kept so the
 	// short-lived pending-login issuer can share it.
@@ -292,6 +305,28 @@ func (a *Auth) WithPendingIssuer(i issuer.Issuer) *Auth {
 	return a
 }
 
+// WithProtectedResource publishes RFC 9728 metadata from an already-built
+// resource server, overriding Config.ProtectedResource.
+//
+// Use it when the same instance has to be shared with something constructed
+// before Init — a bearer strategy given an explicit Options.Resource, say.
+// Most deployments do not need it: Mount hands the server to every strategy
+// implementing strategy.ResourceBinder, so the bearer strategy picks it up
+// with no wiring at all.
+func (a *Auth) WithProtectedResource(rs *resource.Server) *Auth {
+	if rs == nil {
+		if a.deferred == nil {
+			a.deferred = fmt.Errorf("auth: nil protected resource")
+		}
+
+		return a
+	}
+
+	a.protected = rs
+
+	return a
+}
+
 // WithBackend overrides the default issuer backend. Ignored if WithIssuer is
 // used. Must be called before Init.
 func (a *Auth) WithBackend(b issuer.Backend) *Auth {
@@ -347,6 +382,15 @@ func (a *Auth) Init(_ context.Context) error {
 		a.issuer = issuer.NewDefault(a.backend, a.cfg.IssuerConfig)
 	}
 
+	if a.protected == nil && a.cfg.ProtectedResource != nil {
+		rs, err := resource.New(*a.cfg.ProtectedResource)
+		if err != nil {
+			return fmt.Errorf("auth: protected resource: %w", err)
+		}
+
+		a.protected = rs
+	}
+
 	if a.secondFactor != nil {
 		// A parked login gets its own issuer so it expires on the MFA window
 		// rather than the session window — minutes, not days.
@@ -397,8 +441,13 @@ func (a *Auth) Init(_ context.Context) error {
 		// Callers that opted out of the redirect get a 401, which has to
 		// name a scheme they can actually use. Read through the registry
 		// on each 401 so a Registry.Replace is reflected immediately.
-		ChallengeFn: a.registry.Challenge,
-		RejectFn:    PendingIdentity,
+		//
+		// The request-aware variant is what carries RFC 9728
+		// resource_metadata, so an MCP or API client learns where to get a
+		// token instead of being told only that it lacks one.
+		ChallengeFn:        a.registry.Challenge,
+		ChallengeRequestFn: a.registry.ChallengeRequest,
+		RejectFn:           PendingIdentity,
 	}
 
 	if err := a.session.Init(); err != nil {
@@ -468,7 +517,7 @@ func (a *Auth) Require() func(http.Handler) http.Handler {
 			case errors.Is(err, strategy.ErrNoCredentials):
 				sessionNext.ServeHTTP(w, r)
 			case errors.Is(err, strategy.ErrInvalidCredentials):
-				a.writeUnauthorized(w)
+				a.writeUnauthorized(w, r)
 			case err != nil:
 				slog.Error("auth: request authentication failed", "error", err.Error())
 				writeError(w, http.StatusInternalServerError, "auth_error", "authentication error")
@@ -483,8 +532,8 @@ func (a *Auth) Require() func(http.Handler) http.Handler {
 // WWW-Authenticate advertises the schemes the registered strategies
 // actually accept, so a client can discover how to authenticate instead of
 // guessing from a bare status code.
-func (a *Auth) writeUnauthorized(w http.ResponseWriter) {
-	if challenge := a.registry.Challenge(); challenge != "" {
+func (a *Auth) writeUnauthorized(w http.ResponseWriter, r *http.Request) {
+	if challenge := a.registry.ChallengeRequest(r); challenge != "" {
 		w.Header().Set("WWW-Authenticate", challenge)
 	}
 
@@ -506,6 +555,25 @@ func (a *Auth) Mount(mux Mux) {
 	for _, s := range a.registry.List() {
 		if b, ok := s.(strategy.CallbackBinder); ok {
 			b.SetCallbackBasePath(callbackBase)
+		}
+
+		if a.protected != nil {
+			if b, ok := s.(strategy.ResourceBinder); ok {
+				b.SetProtectedResource(a.protected)
+			}
+		}
+	}
+
+	// RFC 9728 metadata is mounted at the origin, not under Base: §3 pins the
+	// well-known path, and a client derives it from the resource identifier
+	// without ever seeing this deployment's route layout.
+	//
+	// It must stay unauthenticated. A discovery document behind the
+	// credential it tells you how to obtain is a closed loop.
+	if a.protected != nil {
+		handler := a.protected.Handler()
+		for _, pattern := range a.protected.Paths() {
+			mux.HandleWithMethod(http.MethodGet, pattern, handler)
 		}
 	}
 
@@ -541,6 +609,10 @@ func (a *Auth) Session() *session.Session { return a.session }
 
 // Registry exposes the strategy registry.
 func (a *Auth) Registry() *strategy.Registry { return a.registry }
+
+// ProtectedResource returns the RFC 9728 metadata server, or nil when the
+// deployment publishes none. Valid after Init.
+func (a *Auth) ProtectedResource() *resource.Server { return a.protected }
 
 // Close releases resources owned by registered strategies and the configured
 // second factor. Injected issuers, backends, and session stores remain owned by
