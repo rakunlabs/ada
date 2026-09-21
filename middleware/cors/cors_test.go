@@ -264,6 +264,103 @@ func TestDeniedPreflightDoesNotExposeAllowHeaders(t *testing.T) {
 	}
 }
 
+func TestPrivateNetworkPreflight(t *testing.T) {
+	config := Cors{
+		AllowOrigins:        []string{"https://client.example"},
+		AllowMethods:        []string{http.MethodGet},
+		AllowHeaders:        []string{"X-Token"},
+		AllowPrivateNetwork: true,
+	}
+
+	t.Run("granted when the browser asks for it", func(t *testing.T) {
+		handler := config.Middleware()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("preflight request reached downstream handler")
+		}))
+		req := preflightRequest(http.MethodGet, "X-Token")
+		req.Header.Set(headerAccessControlRequestPrivateNetwork, "true")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get(headerAccessControlAllowPrivateNetwork); got != "true" {
+			t.Fatalf("Access-Control-Allow-Private-Network = %q, want true", got)
+		}
+		if vary := rec.Header().Values(headerVary); !slices.Contains(vary, headerAccessControlRequestPrivateNetwork) {
+			t.Errorf("Vary = %q, missing %q", vary, headerAccessControlRequestPrivateNetwork)
+		}
+	})
+
+	t.Run("not sent when the browser does not ask", func(t *testing.T) {
+		handler := config.Middleware()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("preflight request reached downstream handler")
+		}))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, preflightRequest(http.MethodGet, "X-Token"))
+
+		if got := rec.Header().Get(headerAccessControlAllowPrivateNetwork); got != "" {
+			t.Fatalf("Access-Control-Allow-Private-Network = %q, want empty when unrequested", got)
+		}
+	})
+
+	t.Run("not sent when the option is off", func(t *testing.T) {
+		disabled := config
+		disabled.AllowPrivateNetwork = false
+		handler := disabled.Middleware()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("preflight request reached downstream handler")
+		}))
+		req := preflightRequest(http.MethodGet, "X-Token")
+		req.Header.Set(headerAccessControlRequestPrivateNetwork, "true")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get(headerAccessControlAllowPrivateNetwork); got != "" {
+			t.Fatalf("Access-Control-Allow-Private-Network = %q, want empty when disabled", got)
+		}
+		if vary := rec.Header().Values(headerVary); slices.Contains(vary, headerAccessControlRequestPrivateNetwork) {
+			t.Errorf("Vary = %q, must not name a header the response does not vary by", vary)
+		}
+	})
+
+	t.Run("not sent to a denied origin", func(t *testing.T) {
+		handler := config.Middleware()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("preflight request reached downstream handler")
+		}))
+		req := preflightRequest(http.MethodGet, "X-Token")
+		req.Header.Set(headerOrigin, "https://attacker.example")
+		req.Header.Set(headerAccessControlRequestPrivateNetwork, "true")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assertNoPreflightAllowHeaders(t, rec.Header())
+	})
+
+	t.Run("not sent when the preflight is denied", func(t *testing.T) {
+		handler := config.Middleware()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("preflight request reached downstream handler")
+		}))
+		req := preflightRequest(http.MethodDelete, "X-Token")
+		req.Header.Set(headerAccessControlRequestPrivateNetwork, "true")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assertNoPreflightAllowHeaders(t, rec.Header())
+	})
+
+	t.Run("not sent on an ordinary request", func(t *testing.T) {
+		handler := config.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+		req.Header.Set(headerOrigin, "https://client.example")
+		req.Header.Set(headerAccessControlRequestPrivateNetwork, "true")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get(headerAccessControlAllowPrivateNetwork); got != "" {
+			t.Fatalf("Access-Control-Allow-Private-Network = %q, want empty outside a preflight", got)
+		}
+	})
+}
+
 func TestMiddlewareSnapshotsCallerConfig(t *testing.T) {
 	cfg := &Cors{
 		AllowOrigins:     []string{"https://*.example.com"},
@@ -553,6 +650,7 @@ func assertNoPreflightAllowHeaders(t *testing.T, header http.Header) {
 		headerAccessControlAllowCredentials,
 		headerAccessControlAllowMethods,
 		headerAccessControlAllowHeaders,
+		headerAccessControlAllowPrivateNetwork,
 		headerAccessControlMaxAge,
 	} {
 		if got := header.Get(name); got != "" {

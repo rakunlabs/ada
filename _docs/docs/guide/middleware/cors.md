@@ -177,6 +177,36 @@ Use this option to expose additional headers.
 
 **MDN Reference:** [Access-Control-Expose-Headers](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Expose-Headers)
 
+### AllowPrivateNetwork
+
+Answers Chrome's Private Network Access preflight. When a page on a public
+address preflights a server on a private or loopback address, Chrome adds
+`Access-Control-Request-Private-Network: true` and blocks the request unless
+the response carries `Access-Control-Allow-Private-Network: true`.
+
+- **Type:** `bool`
+- **Default:** `false`
+
+**Example:**
+
+```go
+AllowPrivateNetwork: true
+```
+
+The grant is sent only on a preflight that the rest of the policy already
+allowed, and only when the browser asked for it. A denied origin, method or
+header gets nothing, so a refused preflight never advertises that the server
+is reachable on a private network. When the option is on, preflight responses
+also `Vary` on `Access-Control-Request-Private-Network`.
+
+::: warning Security Warning
+This lifts a browser protection that exists to stop a hostile public page from
+reaching services on the visitor's own network. Pair it with an explicit
+`AllowOrigins` allowlist rather than a wildcard.
+:::
+
+**Reference:** [Private Network Access preflights](https://developer.chrome.com/blog/private-network-access-preflight)
+
 ### MaxAge
 
 Determines the value of the `Access-Control-Max-Age` response header. This header indicates how long (in seconds) the results of a preflight request can be cached.
@@ -284,6 +314,7 @@ For complex requests, browsers send a preflight `OPTIONS` request before the act
    - `Access-Control-Allow-Origin`
    - `Access-Control-Allow-Methods`
    - `Access-Control-Allow-Headers`
+   - `Access-Control-Allow-Private-Network` (when `AllowPrivateNetwork` is set and requested)
    - `Access-Control-Max-Age`
 
 3. If the preflight is successful, browser sends the actual request

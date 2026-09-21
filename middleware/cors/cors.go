@@ -28,6 +28,9 @@ const (
 	headerAccessControlAllowMethods     = "Access-Control-Allow-Methods"
 	headerAccessControlAllowHeaders     = "Access-Control-Allow-Headers"
 	headerAccessControlMaxAge           = "Access-Control-Max-Age"
+
+	headerAccessControlRequestPrivateNetwork = "Access-Control-Request-Private-Network"
+	headerAccessControlAllowPrivateNetwork   = "Access-Control-Allow-Private-Network"
 )
 
 // Bounds on the size of an Origin header that is worth matching against the
@@ -155,6 +158,27 @@ type Cors struct {
 	// See also: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Expose-Header
 	ExposeHeaders []string `cfg:"expose_headers"`
 
+	// AllowPrivateNetwork determines whether a preflight that asks for
+	// private network access is granted one, by answering
+	// Access-Control-Request-Private-Network: true with
+	// Access-Control-Allow-Private-Network: true.
+	//
+	// Chrome sends that request header when a page on a public address
+	// preflights a server on a private or loopback address, and blocks the
+	// request unless the response grants it. The grant is only ever sent on a
+	// preflight the rest of the policy already allowed, and only when the
+	// browser asked for it, so a denied origin learns nothing about what the
+	// server can reach.
+	//
+	// Optional. Default value false.
+	//
+	// Security: this lifts a browser protection that exists to stop a hostile
+	// public page from reaching a service on the visitor's own network. Pair
+	// it with an explicit AllowOrigins allowlist rather than a wildcard.
+	//
+	// See also: https://developer.chrome.com/blog/private-network-access-preflight
+	AllowPrivateNetwork bool `cfg:"allow_private_network"`
+
 	// MaxAge determines the value of the Access-Control-Max-Age response header.
 	// This header indicates how long (in seconds) the results of a preflight
 	// request can be cached.
@@ -250,6 +274,13 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 			if preflight {
 				w.Header().Add(headerVary, headerAccessControlRequestMethod)
 				w.Header().Add(headerVary, headerAccessControlRequestHeaders)
+
+				// Only named when the option is on: with it off the response
+				// is the same either way, and a Vary the response does not
+				// honour only splits caches.
+				if cfg.AllowPrivateNetwork {
+					w.Header().Add(headerVary, headerAccessControlRequestPrivateNetwork)
+				}
 			}
 
 			// Check allowed origins
@@ -338,6 +369,14 @@ func (m *Cors) Middleware() func(http.Handler) http.Handler {
 			}
 			if cfg.MaxAge != 0 {
 				w.Header().Set(headerAccessControlMaxAge, maxAge)
+			}
+
+			// Reached only once the origin, method and headers have all been
+			// allowed, so a refused preflight never advertises that the
+			// server is reachable on a private network.
+			if cfg.AllowPrivateNetwork &&
+				r.Header.Get(headerAccessControlRequestPrivateNetwork) == "true" {
+				w.Header().Set(headerAccessControlAllowPrivateNetwork, "true")
 			}
 
 			w.WriteHeader(http.StatusNoContent)
