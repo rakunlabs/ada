@@ -114,8 +114,6 @@ require (
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/swaggo/files/v2 v2.0.2 // indirect
-	github.com/swaggo/http-swagger/v2 v2.0.2 // indirect
 	github.com/tdewolff/minify/v2 v2.24.17 // indirect
 	github.com/tdewolff/parse/v2 v2.8.16 // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect

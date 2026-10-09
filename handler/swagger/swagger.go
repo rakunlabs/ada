@@ -1,13 +1,57 @@
 package swagger
 
 import (
+	"embed"
+	"html/template"
+	"io/fs"
 	"net/http"
+	"path"
+	"strings"
 
-	httpSwagger "github.com/swaggo/http-swagger/v2"
 	"github.com/swaggo/swag"
 )
 
 var DefaultInfoInstanceName = "swagger"
+
+// dist holds only the Swagger UI assets referenced by the index page.
+// Source maps and unused bundles are intentionally left out to keep binaries small.
+//
+//go:embed dist/*
+var dist embed.FS
+
+var distFS, _ = fs.Sub(dist, "dist")
+
+var indexTemplate = template.Must(template.New("swagger_index.html").Parse(indexTempl))
+
+type SwaggerLayout string
+
+const (
+	BaseLayout       SwaggerLayout = "BaseLayout"
+	StandaloneLayout SwaggerLayout = "StandaloneLayout"
+)
+
+type ModelsExpandDepthType int
+
+const (
+	ShowModel ModelsExpandDepthType = 1
+	HideModel ModelsExpandDepthType = -1
+)
+
+// Config holds Swagger UI page settings.
+type Config struct {
+	// URL pointing to API definition. Default is `doc.json`.
+	URL                      string
+	DocExpansion             string
+	DomID                    string
+	BeforeScript             template.JS
+	AfterScript              template.JS
+	Plugins                  []template.JS
+	UIConfig                 map[template.JS]template.JS
+	DeepLinking              bool
+	PersistAuthorization     bool
+	Layout                   SwaggerLayout
+	DefaultModelsExpandDepth ModelsExpandDepthType
+}
 
 func Handler(opts ...Option) func(w http.ResponseWriter, r *http.Request) {
 	o := &option{
@@ -44,11 +88,60 @@ func Handler(opts ...Option) func(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	return httpSwagger.Handler(o.ConfigFns...)
+	config := &Config{
+		URL:                      "doc.json",
+		DocExpansion:             "list",
+		DomID:                    "swagger-ui",
+		DeepLinking:              true,
+		Layout:                   StandaloneLayout,
+		DefaultModelsExpandDepth: ShowModel,
+	}
+	for _, fn := range o.ConfigFns {
+		fn(config)
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		name := path.Base(r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/") {
+			name = ""
+		}
+
+		switch name {
+		case "":
+			http.Redirect(w, r, r.URL.Path+"index.html", http.StatusMovedPermanently)
+		case "index.html":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_ = indexTemplate.Execute(w, config)
+		case "doc.json":
+			doc, err := swag.ReadDoc(o.InfoInstanceName)
+			if err != nil {
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(doc))
+		default:
+			if info, err := fs.Stat(distFS, name); err != nil || info.IsDir() {
+				http.NotFound(w, r)
+
+				return
+			}
+
+			http.ServeFileFS(w, r, distFS, name)
+		}
+	}
 }
 
 type option struct {
-	ConfigFns []func(*httpSwagger.Config)
+	ConfigFns []func(*Config)
 
 	Version          *string
 	Host             *string
@@ -61,7 +154,8 @@ type option struct {
 
 type Option func(*option)
 
-func WithConfigFns(fns ...func(*httpSwagger.Config)) Option {
+// WithConfigFns customizes the Swagger UI page.
+func WithConfigFns(fns ...func(*Config)) Option {
 	return func(o *option) {
 		o.ConfigFns = append(o.ConfigFns, fns...)
 	}
