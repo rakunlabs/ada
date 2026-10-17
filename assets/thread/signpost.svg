@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <pattern id="h" width="2.2" height="2.2" patternUnits="userSpaceOnUse" patternTransform="rotate(-35)">
+      <path d="M0 0v2.2" stroke="#3fa9df" stroke-width=".6" opacity=".4"/>
+    </pattern>
+    <filter id="w" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency=".09" numOctaves="2" seed="7"/>
+      <feDisplacementMap in="SourceGraphic" scale="1.4"/>
+    </filter>
+  </defs>
+  <g filter="url(#w)" stroke-linejoin="round" stroke-linecap="round">
+    <path fill="#a6d9f3" d="M29 30h6v26h-6z"/>
+    <path fill="url(#h)" d="M29 30h6v26h-6z"/>
+    <path fill="none" stroke="#3fa9df" stroke-width="3" d="M29 30h6v26h-6z"/>
+    <path fill="#a6d9f3" d="M12 10h32l8 7-8 7H12z"/>
+    <path fill="url(#h)" d="M12 10h32l8 7-8 7H12z"/>
+    <path fill="none" stroke="#3fa9df" stroke-width="3" d="M12 10h32l8 7-8 7H12z"/>
+    <path fill="#a6d9f3" d="M52 30H20l-8 7 8 7h32z"/>
+    <path fill="url(#h)" d="M52 30H20l-8 7 8 7h32z"/>
+    <path fill="none" stroke="#3fa9df" stroke-width="3" d="M52 30H20l-8 7 8 7h32z"/>
+  </g>
+</svg>
