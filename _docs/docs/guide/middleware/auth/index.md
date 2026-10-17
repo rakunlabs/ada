@@ -103,11 +103,11 @@ app.GET("/dashboard", func(w http.ResponseWriter, r *http.Request) {
 graph TD
     subgraph Auth Middleware
         A[auth.Mount] --> R[Routes]
-        R --> INFO[/login/info]
-        R --> LOGIN[/login/pass/strategy]
-        R --> CALLBACK[/login/callback/strategy]
-        R --> LOGOUT[/logout]
-        R --> ME[/login/me]
+        R --> INFO["/login/info"]
+        R --> LOGIN["/login/pass/strategy"]
+        R --> CALLBACK["/login/callback/strategy"]
+        R --> LOGOUT["/logout"]
+        R --> ME["/login/me"]
 
         LOGIN --> REG[Strategy Registry]
         CALLBACK --> REG
