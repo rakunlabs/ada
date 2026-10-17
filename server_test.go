@@ -315,7 +315,7 @@ func TestServer_StopRacingStartup(t *testing.T) {
 		cancel()
 
 		select {
-		case <-errCh:
+		case <-errCh: //nolint:errcheck // any outcome is fine; only the absence of a panic/hang matters
 		case <-time.After(3 * time.Second):
 			t.Fatal("Start did not return after Stop raced startup")
 		}
