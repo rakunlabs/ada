@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <pattern id="h" width="2.2" height="2.2" patternUnits="userSpaceOnUse" patternTransform="rotate(-35)">
+      <path d="M0 0v2.2" stroke="#3fa9df" stroke-width=".6" opacity=".4"/>
+    </pattern>
+    <filter id="w" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency=".09" numOctaves="2" seed="7"/>
+      <feDisplacementMap in="SourceGraphic" scale="1.4"/>
+    </filter>
+  </defs>
+  <g filter="url(#w)" stroke-linejoin="round" stroke-linecap="round">
+    <path fill="none" stroke="#3fa9df" stroke-width="8" d="M15.3 29A17 17 0 0 1 45.9 22.2"/>
+    <path fill="none" stroke="#a6d9f3" stroke-width="3.6" d="M15.3 29A17 17 0 0 1 45.9 22.2"/>
+    <path fill="none" stroke="url(#h)" stroke-width="3.6" d="M15.3 29A17 17 0 0 1 45.9 22.2"/>
+    <path fill="none" stroke="#3fa9df" stroke-width="8" d="M48.7 35A17 17 0 0 1 18.1 41.8"/>
+    <path fill="none" stroke="#a6d9f3" stroke-width="3.6" d="M48.7 35A17 17 0 0 1 18.1 41.8"/>
+    <path fill="none" stroke="url(#h)" stroke-width="3.6" d="M48.7 35A17 17 0 0 1 18.1 41.8"/>
+    <path fill="#a6d9f3" d="M50.8 18.8 41 25.6l9 2.3z"/>
+    <path fill="url(#h)" d="M50.8 18.8 41 25.6l9 2.3z"/>
+    <path fill="none" stroke="#3fa9df" stroke-width="3" d="M50.8 18.8 41 25.6l9 2.3z"/>
+    <path fill="#a6d9f3" d="M13.2 45.2 23 38.4l-9-2.3z"/>
+    <path fill="url(#h)" d="M13.2 45.2 23 38.4l-9-2.3z"/>
+    <path fill="none" stroke="#3fa9df" stroke-width="3" d="M13.2 45.2 23 38.4l-9-2.3z"/>
+  </g>
+</svg>

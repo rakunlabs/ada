@@ -21,42 +21,42 @@ hero:
 
 features:
   - icon:
-      src: /assets/origami/plane.svg
+      src: /assets/thread/signpost.svg
       width: 44
       height: 44
     title: Simple Mux
     details: Static, parameter, and wildcard routes with backtracking. Path matching is method-agnostic.
     link: /guide/routing
   - icon:
-      src: /assets/origami/fortune.svg
+      src: /assets/thread/puzzle.svg
       width: 44
       height: 44
     title: Std Compatible
     details: Plain net/http handlers and middlewares work as-is, alongside ada.Context handlers.
     link: /guide/context
   - icon:
-      src: /assets/origami/boat.svg
+      src: /assets/thread/layers.svg
       width: 44
       height: 44
     title: Middleware Set
     details: Recover, log, CORS, rate limit, body limit, timeout, telemetry, encoding, and more.
     link: /guide/middleware/
   - icon:
-      src: /assets/origami/fox.svg
+      src: /assets/thread/padlock.svg
       width: 44
       height: 44
     title: Built-in Auth
     details: OAuth2/OIDC, passkeys, LDAP, magic links, MFA, sessions, and a login UI.
     link: /guide/middleware/auth/
   - icon:
-      src: /assets/origami/crane.svg
+      src: /assets/thread/reload.svg
       width: 44
       height: 44
     title: Runtime Reload
     details: Swap, disable, or add middlewares while the server is running, with no restart.
     link: /guide/runtime-reload
   - icon:
-      src: /assets/origami/star.svg
+      src: /assets/thread/feather.svg
       width: 44
       height: 44
     title: Low Overhead

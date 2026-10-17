@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <pattern id="h" width="2.2" height="2.2" patternUnits="userSpaceOnUse" patternTransform="rotate(-35)">
+      <path d="M0 0v2.2" stroke="#f0bb27" stroke-width=".6" opacity=".4"/>
+    </pattern>
+    <filter id="w" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency=".09" numOctaves="2" seed="7"/>
+      <feDisplacementMap in="SourceGraphic" scale="1.4"/>
+    </filter>
+  </defs>
+  <g filter="url(#w)" stroke-linejoin="round" stroke-linecap="round">
+    <path fill="#fde17e" d="M32 34l22 10-22 10-22-10z"/>
+    <path fill="url(#h)" d="M32 34l22 10-22 10-22-10z"/>
+    <path fill="none" stroke="#f0bb27" stroke-width="3" d="M32 34l22 10-22 10-22-10z"/>
+    <path fill="#fde17e" d="M32 22l22 10-22 10-22-10z"/>
+    <path fill="url(#h)" d="M32 22l22 10-22 10-22-10z"/>
+    <path fill="none" stroke="#f0bb27" stroke-width="3" d="M32 22l22 10-22 10-22-10z"/>
+    <path fill="#fde17e" d="M32 10l22 10-22 10-22-10z"/>
+    <path fill="url(#h)" d="M32 10l22 10-22 10-22-10z"/>
+    <path fill="none" stroke="#f0bb27" stroke-width="3" d="M32 10l22 10-22 10-22-10z"/>
+  </g>
+</svg>
