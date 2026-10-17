@@ -5,12 +5,15 @@ read them. It protects every handler in the chain, not only the ones that use
 [binding](../binding), and it rejects oversized requests with a `413 Content Too
 Large` response.
 
+## Import
+
 ```go
 import "github.com/rakunlabs/ada/middleware/bodylimit"
 ```
 
-Add the middleware to the mux, a group, or a single handler; usually placed near
-the top of the chain, after `recover` and the request logger:
+## Usage
+
+Usually placed near the top of the chain, after `recover` and the request logger:
 
 ```go
 mux.Use(bodylimit.Middleware(2 << 20)) // 2 MiB

@@ -1,18 +1,23 @@
 # Server
 
-> https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Server
+Adds the [`Server`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Server) HTTP header to every response, identifying the server software.
 
-This middleware adds the `Server` HTTP header to responses, indicating the server software being used.
-
-> Sometimes it's useful to identify the server software for debugging, analytics, or compliance purposes.  
-> However, be cautious as exposing server information can also pose security risks.
+## Import
 
 ```go
 mserver "github.com/rakunlabs/ada/middleware/server"
 ```
 
-Add middleware to directly mux, group or handler; usually placed in the top of the middleware chain:
+## Usage
+
+Usually placed at the top of the middleware chain:
 
 ```go
-mserver.Middleware("my-server:v1.2.3")
+server.Use(mserver.Middleware("my-server/v1.2.3"))
 ```
+
+`Middleware` takes the header value as its only argument; there are no other options.
+
+::: warning
+Identifying the server software helps with debugging, analytics, and compliance, but it also tells attackers what you run. Prefer a product name over an exact version on public endpoints.
+:::

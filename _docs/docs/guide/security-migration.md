@@ -15,9 +15,9 @@ by the client.
 | [Request log](./middleware/log) | `log.WithRealIP(proxy.TrustedRealIP(cidrs...))` | `log.WithRealIP(proxy.UnsafeRealIP)` |
 | [Rate limit](./middleware/ratelimit) | `ratelimit.LimitByKey(n, w, proxy.TrustedRealIP(cidrs...))` | `ratelimit.LimitByKey(n, w, proxy.UnsafeRealIP)` |
 | [Telemetry](./middleware/telemetry) | `telemetry.WithClientIP(proxy.TrustedRealIP(cidrs...))` | `telemetry.WithClientIP(proxy.UnsafeRealIP)` |
-| [Header auth](./middleware/auth#header-proxy-strategy) | `header.WithTrustedProxies(cidrs...)`, `WithSharedSecret(...)`, or both | `header.WithUnsafeTrustAll()` |
-| [Magic link](./middleware/auth#magic-link-strategy) | `magiclink.WithVerifyBaseURL(origin)` or `WithTrustedProxies(cidrs...)` | `magiclink.WithUnsafeRequestOrigin()` |
-| [OAuth2](./middleware/auth#oauth2--oidc-strategy) | `CallbackBaseURL` or `TrustedProxies` | `UnsafeTrustAllForwardedHeaders` |
+| [Header auth](./middleware/auth/strategies#header-proxy-strategy) | `header.WithTrustedProxies(cidrs...)`, `WithSharedSecret(...)`, or both | `header.WithUnsafeTrustAll()` |
+| [Magic link](./middleware/auth/strategies#magic-link-strategy) | `magiclink.WithVerifyBaseURL(origin)` or `WithTrustedProxies(cidrs...)` | `magiclink.WithUnsafeRequestOrigin()` |
+| [OAuth2](./middleware/auth/strategies#oauth2-oidc-strategy) | `CallbackBaseURL` or `TrustedProxies` | `UnsafeTrustAllForwardedHeaders` |
 
 The compatibility options restore legacy trust-all behavior. They are unsafe
 when untrusted clients can connect directly and should be temporary migration

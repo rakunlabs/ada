@@ -1,22 +1,28 @@
 # Swagger
 
-Swagger is a middleware that serves the Swagger UI and API documentation for your application. It allows you to easily document and test your API endpoints and easy to change the version and other information in the generated Swagger docs.
+Serves the Swagger UI and your generated API documentation, so you can browse and try your endpoints. The version and other details shown in the docs can be changed at runtime.
+
+Uses [github.com/swaggo/swag](https://github.com/swaggo/swag) to generate the docs.
+
+## Import
 
 ```go
 "github.com/rakunlabs/ada/handler/swagger"
 ```
 
-Uses [github.com/swaggo/swag](https://github.com/swaggo/swag).
+## Setup
 
-## Example
+### 1. Add the `swag` tool
 
-Add swaggo/swag in your project as tools dependency, this makes easier to use with `go generate`.
+Add `swaggo/swag` as a tool dependency so it is easy to run from `go generate`:
 
 ```sh
 go get -tool github.com/swaggo/swag/cmd/swag@v1.16.6
 ```
 
-Than add this in your go file usually in `server.go`
+### 2. Add general API info
+
+Add the `go:generate` directive and the general API annotations, usually in `server.go`:
 
 ```go
 //go:generate go tool swag init -pd -g swagger.go
@@ -31,8 +37,9 @@ func newServer() (*ada.Server, error) {
 }
 ```
 
-And add comments to your handlers.  
-Check details swaggo/swag package for more annotation options.
+### 3. Annotate handlers
+
+See the [swaggo/swag documentation](https://github.com/swaggo/swag#declarative-comments-format) for every annotation option.
 
 ```go
 // @Summary Get Info
@@ -48,14 +55,35 @@ func (h *Hello) Info(c *ada.Context) error {
 }
 ```
 
-Then in your server setup code add the swagger handler.
+### 4. Generate and serve
 
-When you click the generate button it will generate the docs folder with swagger files.  
-Don't forget to import the generated docs package for side effects.
+Run `go generate ./...` to create the `docs` package, then register the handler:
 
 ```go
-// "github.com/rakunlabs/ada/handler/swagger"
-// _ "...../docs" # import generated docs package for side effects
+import (
+    "github.com/rakunlabs/ada/handler/swagger"
+
+    _ "example.com/myapp/docs" // generated docs, imported for side effects
+)
 
 mux.HandleFunc("/swagger/*", swagger.Handler(swagger.WithVersion("v0.1.0")))
 ```
+
+::: warning
+Don't forget the blank import of the generated `docs` package. Without it the UI loads, but `doc.json` fails to load the spec.
+:::
+
+## Options
+
+These override the values from the generated spec at runtime:
+
+| Option | Description |
+|---|---|
+| `WithVersion(string)` | API version |
+| `WithTitle(string)` | API title |
+| `WithDescription(string)` | API description |
+| `WithHost(string)` | API host |
+| `WithBasePath(string)` | API base path |
+| `WithSchemes(...string)` | API schemes, e.g. `https` |
+| `WithInfoInstanceName(string)` | Generated swag instance to serve. Default `swagger` |
+| `WithConfigFns(...func(*Config))` | Customize the Swagger UI page |

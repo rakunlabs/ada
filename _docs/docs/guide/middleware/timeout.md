@@ -1,13 +1,14 @@
 # Timeout
 
-This middleware derives the request context with `context.WithTimeout`, so the
-context is cancelled once the deadline passes.
+Derives the request context with `context.WithTimeout`, so the context is cancelled once the deadline passes.
+
+## Import
 
 ```go
 "github.com/rakunlabs/ada/middleware/timeout"
 ```
 
-Add it to the mux, a group, or a single route:
+## Usage
 
 ```go
 server.Use(timeout.Middleware(10 * time.Second))
@@ -16,8 +17,7 @@ server.Use(timeout.Middleware(10 * time.Second))
 server.GET("/report", reportHandler, timeout.Middleware(30*time.Second))
 ```
 
-A `timeout <= 0` makes the middleware a no-op — handy for wiring the value
-straight from configuration.
+A `timeout <= 0` makes the middleware a no-op, which is handy when the value comes straight from configuration.
 
 ::: warning Cancellation is cooperative
 The middleware cancels the **context**; it does not write a response or stop
@@ -41,6 +41,8 @@ server.GET("/report", func(c *ada.Context) error {
 ```
 :::
 
-Note that the server itself also has read/write timeouts — see
-[Start Server](../start) — which bound the connection rather than the
-handler's work; the two complement each other.
+## Server Timeouts
+
+The server itself also has a header read timeout (see
+[Start Server](../start#header-read-timeout)). It bounds the connection rather
+than the handler's work, so the two complement each other.

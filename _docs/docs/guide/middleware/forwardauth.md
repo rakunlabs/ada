@@ -1,18 +1,19 @@
 # ForwardAuth
 
-ForwardAuth middleware delegates authentication to an external service.  
-It forwards the original request headers to an auth service and allows or denies the request based on the response.
+Delegates authentication to an external service. The middleware forwards the original request headers to an auth service and allows or denies the request based on its response.
+
+## Import
 
 ```go
 mforwardauth "github.com/rakunlabs/ada/middleware/forwardauth"
 ```
 
-Add middleware to directly mux, group or handler:
+## Usage
 
 ```go
-mforwardauth.Middleware(
+server.Use(mforwardauth.Middleware(
     mforwardauth.WithAddress("http://auth-service:9000/verify"),
-)
+))
 ```
 
 ## How It Works

@@ -2,25 +2,40 @@
 
 OpenTelemetry middleware for HTTP server traces and metrics.
 
+## Import
+
 ```go
 mtelemetry "github.com/rakunlabs/ada/middleware/telemetry"
 ```
 
-To use telemetry middleware, start and set global tracing and metrics providers,
-then register the middleware:
+## Usage
+
+Set up the global tracer and meter providers first, then register the middleware:
 
 ```go
-mux.Use(mtelemetry.Middleware())
+server.Use(mtelemetry.Middleware())
 ```
 
-Use `tell` package for that check (https://github.com/rakunlabs/tell)
-
-To start example must set `service.name` attribute.
+The [`tell`](https://github.com/rakunlabs/tell) package can set up the providers for you. The exporter is configured with the standard OpenTelemetry environment variables, and `service.name` must be set:
 
 ```sh
 export OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
 export OTEL_RESOURCE_ATTRIBUTES=service.name=my-service
 ```
+
+## Options
+
+| Option | Default | Description |
+|---|---|---|
+| `WithTracerProvider(trace.TracerProvider)` | global | Provider used to create spans |
+| `WithMeterProvider(metric.MeterProvider)` | global | Provider used to create metrics |
+| `WithPropagators(propagation.TextMapPropagator)` | global | Propagators used to extract context from requests |
+| `WithFilter(Filter)` | none | Add a filter; all filters must return `true` for a request to be recorded |
+| `WithSpanNameFormatter(func(routeName string, r *http.Request) string)` | `METHOD route` | Customize span names |
+| `WithPublicEndpoint()` | off | Link incoming span contexts instead of using them as the parent |
+| `WithPublicEndpointFn(func(*http.Request) bool)` | `nil` | Per-request version of `WithPublicEndpoint` (which takes precedence) |
+| `WithMetricAttributesFn(func(*http.Request) []attribute.KeyValue)` | `nil` | Extra metric attributes |
+| `WithClientIP(func(*http.Request) string)` | immediate peer | How `client.address` is derived. See [Client Address](#client-address) |
 
 ## Client Address
 

@@ -3,6 +3,8 @@
 The rate-limit module provides a lightweight request limiter and a configurable
 sliding-window limiter for sensitive endpoints.
 
+## Import
+
 ```go
 import (
     "net/http"

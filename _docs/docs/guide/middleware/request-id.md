@@ -1,26 +1,37 @@
 # Request ID
 
-Request ID middleware is used to generate a unique identifier for each request.  
-This ID can be used for logging, and debugging purposes. It helps in tracking requests across different services and systems.
+Assigns a unique identifier to each request. Use it to correlate logs and trace a request across services.
+
+## Import
 
 ```go
 mrequestid "github.com/rakunlabs/ada/middleware/requestid"
 ```
 
-Add middleware to directly mux, group or handler; usually placed in the top of the middleware chain:
+## Usage
+
+Usually placed at the top of the middleware chain:
 
 ```go
-// mux.Use(
-mrequestid.Middleware()
+server.Use(mrequestid.Middleware())
 ```
 
-## Configuration
+If the incoming request already has an `X-Request-Id` header, that value is kept. Otherwise a new ID is generated and set on the request. The ID is also echoed back in the `X-Request-Id` response header.
 
-Default function to generate request IDs uses [github.com/oklog/ulid/v2](https://github.com/oklog/ulid)
+::: tip
+Place it before [Log](./log) so every log line carries the `request_id` field.
+:::
+
+## Options
+
+| Option | Default | Description |
+|---|---|---|
+| `WithGenerateRequestID(func() string)` | [ULID](https://github.com/oklog/ulid) | Function that generates a new request ID |
 
 ```go
-// change request ID generator to something else
-mrequestid.Middleware(mrequestid.WithGenerateRequestID(func() string {
-    return myCustomIDGenerator()
-})),
+mrequestid.Middleware(
+    mrequestid.WithGenerateRequestID(func() string {
+        return myCustomIDGenerator()
+    }),
+)
 ```

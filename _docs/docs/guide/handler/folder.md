@@ -1,7 +1,15 @@
 # Folder
 
-Serves files from a directory. It can be used to serve static files or embed in your application.  
-It supports SPA (Single Page Application) mode, directory browsing, index file serving, and cache control based on regex patterns, redirecting / for folder paths, redirect to index and stripping index file names from URLs.
+Serves files from a directory on disk or from an embedded filesystem.
+
+It supports:
+
+- SPA (Single Page Application) mode
+- Directory browsing and index file serving
+- Cache control based on regex patterns
+- Redirecting folder paths to a trailing `/`, redirecting to the index, and stripping index file names from URLs
+
+## Import
 
 ```go
 "github.com/rakunlabs/ada/handler/folder"

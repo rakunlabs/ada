@@ -1,19 +1,49 @@
 # Log
 
-Log middleware is used to log incoming requests and outgoing responses.  
-It helps in monitoring and debugging your application by providing insights into the request lifecycle.
+Logs incoming requests and outgoing responses, giving you insight into the request lifecycle for monitoring and debugging.
 
-Default log uses `slog` to print logs in _debug_ mode.
+By default it logs with `slog` at _debug_ level.
+
+## Import
 
 ```go
 mlog "github.com/rakunlabs/ada/middleware/log"
 ```
 
-Add middleware to directly mux, group or handle; usually placed in the top of the middleware chain:
+## Usage
+
+Usually placed at the top of the middleware chain, after [Recover](./recover) and [Request ID](./request-id):
 
 ```go
-mlog.Middleware()
+server.Use(mlog.Middleware())
 ```
+
+Example output:
+
+```sh
+2025-11-01 18:35:33 CET DBG log/log.go:101 request user="" route=/ request_id=01K907T8BP43F4S0M30QE37J07 remote_ip=::1 host=localhost:8080 method=GET uri=/ user_agent=Mozilla/5.0 status=200 latency=276713 latency_human=276.713µs bytes_in="" bytes_out=29
+```
+
+The logger also adds `request_id`, `user`, and `user_agent` fields to the log context when they are available.
+
+## Options
+
+| Option | Default | Description |
+|---|---|---|
+| `WithLogger(Logger)` | `slog`-based | Replace the logger |
+| `WithSkipper(func(*http.Request) bool)` | `nil` | Return `true` to skip logging a request |
+| `WithRealIP(func(*http.Request) string)` | `mlog.RealIP` | How `remote_ip` is derived. See [Client Address](#client-address) |
+| `WithPreFunc(func(*http.Request) *http.Request)` | adds context fields | Runs before the handler |
+| `WithPostFunc(func(*http.Request, *Response))` | writes the log line | Runs after the handler |
+
+```go
+// Skip logging for GET requests
+mlog.Middleware(mlog.WithSkipper(func(r *http.Request) bool {
+    return r.Method == http.MethodGet
+}))
+```
+
+## Client Address
 
 By default, `remote_ip` is the immediate peer from `r.RemoteAddr`. Forwarding
 headers such as `X-Forwarded-For`, `X-Real-IP`, and `True-Client-IP` are ignored
@@ -34,37 +64,20 @@ mlog.Middleware(
 
 Only a matching immediate peer may supply forwarding headers. Ensure that the
 proxy overwrites incoming forwarding headers rather than appending untrusted
-values. `proxy.UnsafeRealIP` restores the trust-all behavior, but should only be
+values.
+
+::: warning
+`proxy.UnsafeRealIP` restores the trust-all behavior, but should only be
 used when an external network boundary is already enforced.
+:::
 
 `WithRealIP` takes any `func(*http.Request) string`, so a deployment that
 derives the client address some other way can supply its own. `mlog.RealIP` is
 the default and ignores forwarding headers.
 
-Example output:
+## Logging in Handlers
 
-```sh
-2025-11-01 18:35:33 CET DBG log/log.go:101 request user="" route=/ request_id=01K907T8BP43F4S0M30QE37J07 remote_ip=::1 host=localhost:8080 method=GET uri=/ user_agent=Mozilla/5.0 status=200 latency=276713 latency_human=276.713µs bytes_in="" bytes_out=29
-```
-
-## Configuration
-
-You can configure the middleware using `mlog.Option` functions.
-
-```go
-// skipper example to show skip logging for GET requests
-mlog.Middleware(mlog.WithSkipper(func(r *http.Request) bool {
-    if r.Method == http.MethodGet {
-        return true
-    }
-
-    return false
-}))
-```
-
-This logger also adds `request_id`, `user` and `user_agent` fields to the log context if available.
-
-Use our `logi` package to make context-aware logging in your handlers:
+Use the [`logi`](https://github.com/rakunlabs/logi) package for context-aware logging in your handlers:
 
 ```go
 // import "github.com/rakunlabs/logi"

@@ -8,23 +8,31 @@ export default withMermaid(defineConfig({
   head: [["link", { rel: "icon", href: "/ada/assets/favicon.ico" }]],
   base: "/ada/",
   ignoreDeadLinks: false,
-  // Configure syntax highlighting with Monokai theme
+  lastUpdated: true,
   markdown: {
     theme: {
       light: "monokai",
       dark: "monokai",
     },
-    // lineNumbers: true
   },
   themeConfig: {
     search: {
       provider: "local",
     },
 
+    outline: {
+      level: [2, 3],
+    },
+
+    editLink: {
+      pattern: "https://github.com/rakunlabs/ada/edit/main/_docs/docs/:path",
+      text: "Edit this page on GitHub",
+    },
+
     // https://vitepress.dev/reference/default-theme-config
     nav: [
       { text: "Home", link: "/" },
-      { text: "Documents", link: "/getting-started.md" },
+      { text: "Guide", link: "/getting-started.md" },
     ],
 
     sidebar: [
@@ -53,87 +61,122 @@ export default withMermaid(defineConfig({
             link: "/guide/binding.md",
           },
           {
-            text: "Security Migration",
-            link: "/guide/security-migration.md",
+            text: "Microservice",
+            link: "/guide/microservice.md",
+          },
+        ],
+      },
+      {
+        text: "Middleware",
+        link: "/guide/middleware/",
+        collapsed: false,
+        items: [
+          {
+            text: "Recover",
+            link: "/guide/middleware/recover.md",
           },
           {
-            text: "Middleware",
-            link: "/guide/middleware/",
-            items: [
-              {
-                text: "Recover",
-                link: "/guide/middleware/recover.md",
-              },
-              {
-                text: "Request ID",
-                link: "/guide/middleware/request-id.md",
-              },
-              {
-                text: "Log",
-                link: "/guide/middleware/log.md",
-              },
-              {
-                text: "Rate Limit",
-                link: "/guide/middleware/ratelimit.md",
-              },
-              {
-                text: "Body Limit",
-                link: "/guide/middleware/bodylimit.md",
-              },
-              {
-                text: "Timeout",
-                link: "/guide/middleware/timeout.md",
-              },
-              {
-                text: "Cors",
-                link: "/guide/middleware/cors.md",
-              },
-              {
-                text: "Telemetry",
-                link: "/guide/middleware/telemetry.md",
-              },
-              {
-                text: "Encoding",
-                link: "/guide/middleware/encoding.md",
-              },
-              {
-                text: "Server",
-                link: "/guide/middleware/server.md",
-              },
-              {
-                text: "ForwardAuth",
-                link: "/guide/middleware/forwardauth.md",
-              },
-              {
-                text: "Auth",
-                link: "/guide/middleware/auth.md",
-              }
-            ],
+            text: "Request ID",
+            link: "/guide/middleware/request-id.md",
           },
           {
-            text: "Handler",
+            text: "Log",
+            link: "/guide/middleware/log.md",
+          },
+          {
+            text: "Rate Limit",
+            link: "/guide/middleware/ratelimit.md",
+          },
+          {
+            text: "Body Limit",
+            link: "/guide/middleware/bodylimit.md",
+          },
+          {
+            text: "Timeout",
+            link: "/guide/middleware/timeout.md",
+          },
+          {
+            text: "CORS",
+            link: "/guide/middleware/cors.md",
+          },
+          {
+            text: "Telemetry",
+            link: "/guide/middleware/telemetry.md",
+          },
+          {
+            text: "Encoding",
+            link: "/guide/middleware/encoding.md",
+          },
+          {
+            text: "Server",
+            link: "/guide/middleware/server.md",
+          },
+          {
+            text: "ForwardAuth",
+            link: "/guide/middleware/forwardauth.md",
+          },
+          {
+            text: "Auth",
+            link: "/guide/middleware/auth/",
+            collapsed: true,
             items: [
               {
-                text: "Folder",
-                link: "/guide/handler/folder.md",
+                text: "Strategies",
+                link: "/guide/middleware/auth/strategies.md",
               },
               {
-                text: "Swagger",
-                link: "/guide/handler/swagger.md",
-              }
+                text: "Resource Server",
+                link: "/guide/middleware/auth/resource-server.md",
+              },
+              {
+                text: "Configuration",
+                link: "/guide/middleware/auth/configuration.md",
+              },
+              {
+                text: "Identity & Access",
+                link: "/guide/middleware/auth/access.md",
+              },
+              {
+                text: "Sessions",
+                link: "/guide/middleware/auth/sessions.md",
+              },
+              {
+                text: "Login UI",
+                link: "/guide/middleware/auth/login-ui.md",
+              },
             ],
           },
+        ],
+      },
+      {
+        text: "Handler",
+        collapsed: false,
+        items: [
+          {
+            text: "Folder",
+            link: "/guide/handler/folder.md",
+          },
+          {
+            text: "Swagger",
+            link: "/guide/handler/swagger.md",
+          },
+        ],
+      },
+      {
+        text: "Advanced",
+        collapsed: false,
+        items: [
           {
             text: "Runtime Reload",
             link: "/guide/runtime-reload.md",
           },
           {
-            text: "Microservice",
-            link: "/guide/microservice.md",
-          },
-          {
             text: "Performance",
             link: "/guide/performance.md",
+          },
+          {
+            text: "Security Migration",
+            link: "/guide/security-migration.md",
           },
         ],
       },

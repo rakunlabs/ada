@@ -3,9 +3,8 @@
 layout: home
 
 hero:
-  # name: "ada"
   text: "Go Web Framework"
-  # tagline: documentation
+  tagline: "A net/http compatible mux with batteries-included middleware, built-in auth, and runtime reload."
   image:
     src: /assets/ada.png
     alt: ada
@@ -16,12 +15,51 @@ hero:
     - theme: alt
       text: Guide
       link: /guide/
+    - theme: alt
+      text: GitHub
+      link: https://github.com/rakunlabs/ada
 
 features:
-  - title: Simple Mux
-    details: Path parameter and wildcard support without method
-  - title: Std Compatible
-    details: Compatible with net/http handlers and middlewares
-  - title: Helpful functions
-    details: All you need utility functions
+  - icon:
+      src: /assets/origami/plane.svg
+      width: 44
+      height: 44
+    title: Simple Mux
+    details: Static, parameter, and wildcard routes with backtracking. Path matching is method-agnostic.
+    link: /guide/routing
+  - icon:
+      src: /assets/origami/fortune.svg
+      width: 44
+      height: 44
+    title: Std Compatible
+    details: Plain net/http handlers and middlewares work as-is, alongside ada.Context handlers.
+    link: /guide/context
+  - icon:
+      src: /assets/origami/boat.svg
+      width: 44
+      height: 44
+    title: Middleware Set
+    details: Recover, log, CORS, rate limit, body limit, timeout, telemetry, encoding, and more.
+    link: /guide/middleware/
+  - icon:
+      src: /assets/origami/fox.svg
+      width: 44
+      height: 44
+    title: Built-in Auth
+    details: OAuth2/OIDC, passkeys, LDAP, magic links, MFA, sessions, and a login UI.
+    link: /guide/middleware/auth/
+  - icon:
+      src: /assets/origami/crane.svg
+      width: 44
+      height: 44
+    title: Runtime Reload
+    details: Swap, disable, or add middlewares while the server is running, with no restart.
+    link: /guide/runtime-reload
+  - icon:
+      src: /assets/origami/star.svg
+      width: 44
+      height: 44
+    title: Low Overhead
+    details: Zero heap allocations on the request hot path, with benchmarks against Echo and Gin.
+    link: /guide/performance
 ---

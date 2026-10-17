@@ -1,17 +1,33 @@
 # Recover
 
-Recover middleware is used to recover from panics in your application.  
-It ensures that your application can continue to run even if an unexpected error occurs, by catching the panic and allowing you to handle it gracefully.
+Recovers from panics in your handlers, so one unexpected error does not take down the server. The panic is caught, logged, and answered with a safe response.
+
+## Import
 
 ```go
 mrecover "github.com/rakunlabs/ada/middleware/recover"
 ```
 
+## Usage
+
+Register it **first**, so it covers every middleware after it:
+
+```go
+server.Use(mrecover.Middleware())
+```
+
 By default, a recovered panic returns HTTP 500 with the body `Internal Server Error`
 (followed by a newline). Panic details are never included in the default response.
 The original panic is logged using the configured logger, and a stack trace is
-printed to standard error by default. Use `WithLogger(nil)` to disable logging
-and `WithPrintStack(false)` to disable stack traces.
+printed to standard error by default.
+
+## Options
+
+| Option | Default | Description |
+|---|---|---|
+| `WithLogger(Logger)` | `slog.Default()` | Logger for recovered panics. `nil` disables logging |
+| `WithPrintStack(bool)` | `true` | Print the stack trace to standard error |
+| `WithErrorHandler(func(http.ResponseWriter, *http.Request, error))` | generic 500 | Replace the default response |
 
 ## Custom Error Handler
 

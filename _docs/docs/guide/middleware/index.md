@@ -12,6 +12,35 @@ func(next http.Handler) http.Handler
 
 They can be chained together and applied globally to all routes or to specific route groups.
 
+## Registering Middleware
+
+Every middleware in this guide can be added at three levels: the mux, a group, or a single route.
+
+```go
+server.Use(mrecover.Middleware())                    // mux: every route registered after this call
+api := server.Group("/api", mrequestid.Middleware()) // group: routes under /api
+api.GET("/users", handler, timeout.Middleware(5*time.Second)) // single route
+```
+
+Cross-cutting middlewares such as [Recover](./recover), [Request ID](./request-id), [Log](./log), and [CORS](./cors) usually sit at the top of the chain on the mux.
+
+## Bundled Middleware
+
+| Middleware | Package | Purpose |
+|---|---|---|
+| [Recover](./recover) | `middleware/recover` | Recover from panics and answer with a safe 500 |
+| [Request ID](./request-id) | `middleware/requestid` | Assign an `X-Request-Id` to every request |
+| [Log](./log) | `middleware/log` | Log requests and responses with `slog` |
+| [Rate Limit](./ratelimit) | `middleware/ratelimit` | Limit traffic globally, per IP, or per key |
+| [Body Limit](./bodylimit) | `middleware/bodylimit` | Cap request body size |
+| [Timeout](./timeout) | `middleware/timeout` | Attach a deadline to the request context |
+| [CORS](./cors) | `middleware/cors` | Handle cross-origin requests |
+| [Telemetry](./telemetry) | `middleware/telemetry` | OpenTelemetry traces and metrics |
+| [Encoding](./encoding) | `middleware/encoding` | Gzip response compression |
+| [Server](./server) | `middleware/server` | Set the `Server` response header |
+| [ForwardAuth](./forwardauth) | `middleware/forwardauth` | Delegate authentication to an external service |
+| [Auth](./auth/) | `middleware/auth` | Sessions, login strategies, MFA, and a login UI |
+
 ## Middleware Order
 
 The order of middleware matters. Middleware is executed in the order they are added:
@@ -27,7 +56,9 @@ api := mux.Group("/api", middleware3)       // Group: 1, 2, 3
 api.GET("/users", handler, middleware4)     // Route: 1, 2, 3, 4, handler
 ```
 
-> Middleware added with `Use` only affects handlers and groups registered after the call; it does not apply to routes or groups defined earlier.
+::: info
+Middleware added with `Use` only affects handlers and groups registered after the call; it does not apply to routes or groups defined earlier.
+:::
 
 ## Runtime Reload
 

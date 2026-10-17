@@ -8,29 +8,220 @@
  * -------------------------------------------------------------------------- */
 
 :root {
-  --vp-c-brand: #00b4d8;
-  --vp-c-brand-light: #48cae4;
-  --vp-c-brand-lighter: #90e0ef;
-  --vp-c-brand-lightest: #caf0f8;
-  --vp-c-brand-dark: #0096c7;
-  --vp-c-brand-darker: #023e8a;
-  --vp-c-brand-dimm: rgba(100, 108, 255, 0.08);
+  --vp-c-brand-1: #0b6e8f;
+  --vp-c-brand-2: #0a87a8;
+  --vp-c-brand-3: #0aa0bf;
+  --vp-c-brand-soft: rgba(10, 135, 168, 0.14);
+}
+
+.dark {
+  --vp-c-brand-1: #48cae4;
+  --vp-c-brand-2: #00b4d8;
+  --vp-c-brand-3: #0096c7;
+  --vp-c-brand-soft: rgba(72, 202, 228, 0.16);
 }
 
 /**
- * Component: Button
+ * Component: Code
+ * Code blocks always use the dark Monokai look, in both light and dark mode.
  * -------------------------------------------------------------------------- */
 
 :root {
-  --vp-button-brand-border: var(--vp-c-brand-light);
-  --vp-button-brand-text: var(--vp-c-white);
-  --vp-button-brand-bg: var(--vp-c-brand);
-  --vp-button-brand-hover-border: var(--vp-c-brand-light);
-  --vp-button-brand-hover-text: var(--vp-c-white);
-  --vp-button-brand-hover-bg: var(--vp-c-brand-light);
-  --vp-button-brand-active-border: var(--vp-c-brand-light);
-  --vp-button-brand-active-text: var(--vp-c-white);
-  --vp-button-brand-active-bg: var(--vp-button-brand-bg);
+  --vp-code-block-bg: #272822;
+  --vp-code-block-color: #f8f8f2;
+  --vp-code-block-divider-color: #1e1f1c;
+  --vp-code-lang-color: rgba(248, 248, 242, 0.5);
+  --vp-code-line-highlight-color: rgba(255, 255, 255, 0.08);
+  --vp-code-line-number-color: rgba(248, 248, 242, 0.4);
+
+  --vp-code-copy-code-border-color: rgba(255, 255, 255, 0.12);
+  --vp-code-copy-code-bg: #34352f;
+  --vp-code-copy-code-hover-border-color: rgba(255, 255, 255, 0.2);
+  --vp-code-copy-code-hover-bg: #3e3f38;
+  --vp-code-copy-code-active-text: rgba(248, 248, 242, 0.7);
+
+  --vp-code-tab-divider: #1e1f1c;
+  --vp-code-tab-text-color: rgba(248, 248, 242, 0.6);
+  --vp-code-tab-bg: #1e1f1c;
+  --vp-code-tab-hover-text-color: #f8f8f2;
+  --vp-code-tab-active-text-color: #f8f8f2;
+}
+
+/**
+ * Paper
+ * Near-neutral reading surfaces. Fine, static grain is limited to the home
+ * background; documentation and feature cards keep their clean surfaces.
+ * -------------------------------------------------------------------------- */
+
+:root {
+  --paper-sheet: #fdfdfb;
+
+  --vp-c-bg: #fafaf8;
+  --vp-c-bg-alt: #f3f3f0;
+  --vp-c-bg-elv: #fdfdfb;
+  --vp-c-bg-soft: #f0f1ee;
+
+  --vp-c-text-1: #2b2d2b;
+  --vp-c-text-2: #585d59;
+  --vp-c-text-3: #6f756f;
+
+  --vp-c-border: #d0d4ce;
+  --vp-c-divider: #e2e5df;
+  --vp-c-gutter: #e2e5df;
+
+  --vp-c-default-1: #d0d4ce;
+  --vp-c-default-2: #e0e3dd;
+  --vp-c-default-3: #eceee8;
+  --vp-c-default-soft: rgba(80, 90, 80, 0.06);
+
+  --vp-button-alt-bg: #eef0eb;
+  --vp-button-alt-hover-bg: #e3e7df;
+  --vp-button-alt-active-bg: #d8ddd4;
+
+  --vp-custom-block-info-bg: #f0f2ef;
+  --vp-custom-block-tip-bg: #edf5f2;
+  --vp-custom-block-warning-bg: #fbf6e9;
+  --vp-custom-block-danger-bg: #fbefed;
+  --vp-c-warning-1: #8a5a12;
+  --vp-c-danger-1: #a3352a;
+}
+
+.dark {
+  --paper-sheet: #222522;
+
+  --vp-c-bg: #1b1e1c;
+  --vp-c-bg-alt: #171a18;
+  --vp-c-bg-elv: #252925;
+  --vp-c-bg-soft: #232723;
+
+  --vp-c-text-1: #e6e9e3;
+  --vp-c-text-2: #a8b0a6;
+  --vp-c-text-3: #90998e;
+
+  --vp-c-border: #424940;
+  --vp-c-divider: #30362e;
+  --vp-c-gutter: #151815;
+
+  --vp-c-default-soft: rgba(210, 225, 205, 0.08);
+
+  --vp-button-alt-bg: #2b302a;
+  --vp-button-alt-hover-bg: #343c32;
+  --vp-button-alt-active-bg: #3e483b;
+
+  --vp-custom-block-info-bg: #252b25;
+  --vp-custom-block-tip-bg: #202e29;
+  --vp-custom-block-warning-bg: #2c2a20;
+  --vp-custom-block-danger-bg: #302421;
+  --vp-c-warning-1: #e2c888;
+  --vp-c-danger-1: #efaaa0;
+}
+
+::selection {
+  background-color: var(--vp-c-brand-soft);
+}
+
+/* The outline's fade-out strip assumes a flat background. */
+.VPDoc .aside-curtain {
+  display: none;
+}
+
+/* Static grain: a small tiled asset, not an animated full-screen filter. */
+.VPContent .VPHome {
+  --home-grain-opacity: 0.09;
+  position: relative;
+  isolation: isolate;
+  min-height: calc(100vh - var(--vp-nav-height));
+  margin-bottom: 0;
+  padding-bottom: 96px;
+}
+
+.VPHome::before {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--vp-nav-height)) 0 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: url("/assets/paper/grain.svg");
+  background-size: 192px 192px;
+  background-repeat: repeat;
+  mix-blend-mode: multiply;
+  opacity: var(--home-grain-opacity);
+}
+
+.dark .VPHome {
+  --home-grain-opacity: 0.06;
+}
+
+.dark .VPHome::before {
+  mix-blend-mode: screen;
+}
+
+@media (min-width: 768px) {
+  .VPContent .VPHome {
+    padding-bottom: 128px;
+  }
+}
+
+.VPHome .VPHero {
+  padding-bottom: 72px;
+}
+
+.VPHome .VPFeatures {
+  margin-top: 40px;
+}
+
+/* Straight, aligned surfaces let the origami illustrations carry the identity. */
+.VPFeatures .VPFeature {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background-color: var(--paper-sheet);
+  transition: border-color 0.2s ease-out, background-color 0.2s ease-out;
+}
+
+.VPFeatures .item .VPFeature.link:hover {
+  border-color: var(--vp-c-brand-1);
+  background-color: var(--vp-c-bg-soft);
+}
+
+.VPFeatures .VPFeature .box {
+  padding: 30px 26px;
+}
+
+.VPFeatures .VPFeature .icon {
+  background-color: var(--vp-c-default-soft);
+}
+
+.VPFeatures .VPFeature .box > .VPImage {
+  margin-bottom: 18px;
+}
+
+.VPFeature.link:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 3px;
+}
+
+/* Reading surfaces stay flat and unclipped, including their focus states. */
+.vp-doc .custom-block {
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.vp-doc div[class*="language-"] {
+  border-radius: 6px;
+}
+
+.vp-doc .vp-code-group .tabs {
+  border-radius: 6px 6px 0 0;
+}
+
+.vp-doc .vp-code-group div[class*="language-"] {
+  border-radius: 0 0 6px 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .VPFeatures .VPFeature {
+    transition: none;
+  }
 }
 
 /**
@@ -38,49 +229,11 @@
  * -------------------------------------------------------------------------- */
 
 :root {
-  --vp-home-hero-name-color: #0096c7;
-  --vp-home-hero-name-background: #0096c7;
-
-  --vp-home-hero-image-background-image: #0096c7;
-  --vp-home-hero-image-filter: blur(40px);
+  --vp-home-hero-name-color: var(--vp-c-brand-2);
 }
 
-@media (min-width: 640px) {
-  :root {
-    --vp-home-hero-image-filter: blur(56px);
-  }
-}
-
-@media (min-width: 960px) {
-  :root {
-    --vp-home-hero-image-filter: blur(72px);
-  }
-}
-
-/**
- * Component: Custom Block
- * -------------------------------------------------------------------------- */
-
-:root {
-  --vp-custom-block-tip-border: var(--vp-c-brand);
-  --vp-custom-block-tip-text: var(--vp-c-brand-darker);
-  --vp-custom-block-tip-bg: var(--vp-c-brand-dimm);
-
-  --vp-code-block-bg: #272822;
-}
-
-.dark {
-  --vp-custom-block-tip-border: var(--vp-c-brand);
-  --vp-custom-block-tip-text: var(--vp-c-brand-lightest);
-  --vp-custom-block-tip-bg: var(--vp-c-brand-dimm);
-}
-
-/**
- * Component: Algolia
- * -------------------------------------------------------------------------- */
-
-.DocSearch {
-  --docsearch-primary-color: var(--vp-c-brand) !important;
+.VPHero .image-bg {
+  display: none;
 }
 
 .VPHero .image-src {
@@ -88,6 +241,10 @@
   min-width: 340px;
   height: auto;
 }
+
+/**
+ * Content
+ * -------------------------------------------------------------------------- */
 
 .vp-doc ul {
   list-style-type: square;

@@ -6,122 +6,110 @@ next: false
 Learn how to use Ada with our comprehensive documentation.
 
 <script setup>
-const guides = [
+const sections = [
   {
-    icon: '🎬',
-    title: 'Start',
-    description: 'How to start server and shutdown',
-    href: './start'
+    title: 'Basics',
+    guides: [
+      { title: 'Start Server', description: 'Start, stop, and gracefully shut down the server', href: './start' },
+      { title: 'Routing', description: 'Static, parameter, and wildcard routes, groups, and matching rules', href: './routing' },
+      { title: 'Context', description: 'ada.Context handlers, responses, and error handling', href: './context' },
+      { title: 'Binding', description: 'Bind path, query, header, and body data to structs', href: './binding' },
+      { title: 'Microservice', description: 'A ready-to-use middleware stack for services', href: './microservice' },
+    ],
   },
   {
-    icon: '📄',
-    title: 'Routing',
-    description: 'Learn how to handle HTTP requests and create powerful routing patterns',
-    href: './routing'
+    title: 'Middleware & Handlers',
+    guides: [
+      { title: 'Middleware', description: 'Ordering, custom middleware, and every bundled middleware', href: './middleware/' },
+      { title: 'Auth', description: 'Strategies, sessions, MFA, authorization, and the login UI', href: './middleware/auth/' },
+      { title: 'Folder', description: 'Serve static files and SPAs from disk or embed.FS', href: './handler/folder' },
+      { title: 'Swagger', description: 'Serve Swagger UI and generated API docs', href: './handler/swagger' },
+    ],
   },
   {
-    icon: '⚡',
-    title: 'Middleware',
-    description: 'Add powerful middleware functions to enhance your application',
-    href: './middleware'
+    title: 'Advanced',
+    guides: [
+      { title: 'Runtime Reload', description: 'Replace, disable, and add middlewares while running', href: './runtime-reload' },
+      { title: 'Performance', description: 'Benchmarks against Echo and Gin', href: './performance' },
+      { title: 'Security Migration', description: 'Trusted proxies, authentication, CORS, and request limits', href: './security-migration' },
+    ],
   },
-  {
-    icon: '🔌',
-    title: 'Microservice',
-    description: 'Build microservices with essential middleware and best practices',
-    href: './microservice'
-  },
-  {
-     icon: '🪢',
-     title: 'Binding',
-     description: 'Bind request data to structs',
-     href: './binding'
-  },
-  {
-    icon: '🔒',
-    title: 'Security Migration',
-    description: 'Migrate trusted proxies, authentication, CORS, and request limits',
-    href: './security-migration'
-  },
-  // {
-  //   icon: '🔧',
-  //   title: 'API Reference',
-  //   description: 'Complete API documentation and examples',
-  //   href: './api'
-  // },
-  // {
-  //   icon: '🚀',
-  //   title: 'Deployment',
-  //   description: 'Deploy your Ada application to production',
-  //   href: './deployment'
-  // },
-  // {
-  //   icon: '🧪',
-  //   title: 'Testing',
-  //   description: 'Testing strategies and best practices',
-  //   href: './testing'
-  // }
 ]
 </script>
 
-<div :class="$style.container">
-  <a
-    v-for="guide in guides"
-    :key="guide.title"
-    :class="$style.card"
-    :href="guide.href"
-  >
-    <h3 :class="$style.title">{{ guide.icon }} {{ guide.title }}</h3>
-    <p :class="$style.description">{{ guide.description }}</p>
-  </a>
-</div>
+<section v-for="section in sections" :key="section.title" :class="$style.section">
+  <h2 :id="section.title.toLowerCase().replace(/[^a-z]+/g, '-')" :class="$style.heading">{{ section.title }}</h2>
+  <div :class="$style.grid">
+    <a
+      v-for="guide in section.guides"
+      :key="guide.title"
+      :class="$style.card"
+      :href="guide.href"
+    >
+      <span :class="$style.title">{{ guide.title }}</span>
+      <span :class="$style.description">{{ guide.description }}</span>
+    </a>
+  </div>
+</section>
 
 <style module>
-.container {
+.section {
+  margin-top: 2.5rem;
+}
+
+.heading {
+  margin: 0 0 1rem !important;
+  padding-top: 0 !important;
+  border-top: none !important;
+  font-size: 0.8125rem !important;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-2);
+}
+
+.grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 1rem;
-  margin-top: 2rem;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.75rem;
 }
 
 .card {
-  display: block;
-  padding: 1.5rem;
-  border: 1px solid var(--vp-c-text-3);
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--vp-c-divider);
   border-radius: 8px;
+  background-color: var(--vp-c-bg-soft);
   text-decoration: none !important;
   color: inherit !important;
-  transition: all 0.2s ease;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 
 .card:hover {
-  border-color: var(--vp-c-text-1);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
-  text-decoration: none !important;
-  color: inherit !important;
+  border-color: var(--vp-c-brand-1);
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 2px;
 }
 
 .title {
-  font-size: 1.125rem;
+  font-size: 1rem;
   font-weight: 600;
-  margin: 0 0 0.5rem 0 !important;
-  color: var(--vp-c-text-1) !important;
+  line-height: 1.4;
+  color: var(--vp-c-text-1);
+}
+
+.card:hover .title {
+  color: var(--vp-c-brand-1);
 }
 
 .description {
   font-size: 0.875rem;
-  color: var(--vp-c-text-1) !important;
-  margin: 0;
   line-height: 1.5;
-}
-
-@media (max-width: 768px) {
-  .container {
-    grid-template-columns: 1fr;
-  }
-
-  .card {
-    padding: 1.25rem;
-  }
+  color: var(--vp-c-text-2);
 }
 </style>
