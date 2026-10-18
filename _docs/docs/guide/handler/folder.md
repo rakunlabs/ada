@@ -7,6 +7,7 @@ It supports:
 - SPA (Single Page Application) mode
 - Directory browsing and index file serving
 - Cache control based on regex patterns
+- Weak or strong `ETag` generation for conditional requests
 - Redirecting folder paths to a trailing `/`, redirecting to the index, and stripping index file names from URLs
 
 ## Import
@@ -59,6 +60,30 @@ Swapping those two entries makes the `app.js` rule dead code.
 The first rule whose replacement changes the request path selects the index file
 to serve; the rest are skipped. If no rule changes the path, `SPAIndex` is
 served.
+
+## ETag
+
+`ETag` turns on `ETag` generation so clients can revalidate with
+`If-None-Match` and get `304 Not Modified`. It is off by default.
+
+| Value | ETag | Use for |
+|---|---|---|
+| `folder.ETagWeak` (`"weak"`) | `W/"<modtime>-<size>"`, computed without reading the file | Files on disk |
+| `folder.ETagStrong` (`"strong"`) | `"<sha256 of content>"` | Embedded files, or when the exact content must be identified |
+
+Embedded filesystems (`embed.FS`) have no modtime, so `http.ServeContent`
+never sends `Last-Modified`; without `ETag: folder.ETagStrong` every request
+downloads the full file again. Weak mode produces no ETag for such files.
+
+Strong hashes are cached per file path and recomputed when the file's modtime
+or size changes. With `SetCustomContent` the content may differ per request:
+strong mode hashes it on every request and weak mode is skipped. An `ETag`
+header already set by an earlier handler is kept. Any other value makes `New`
+return an error.
+
+When the [Encoding](../middleware/encoding) middleware compresses a response,
+it weakens a strong ETag to `W/"…"`. `If-None-Match` uses weak comparison, so
+`304` responses keep working.
 
 ## Example
 
@@ -119,6 +144,7 @@ f, err := folder.New(&folder.Config{
     SPA:            false,
     Index:          true,
     StripIndexName: true,
+    ETag:           folder.ETagStrong, // embedded files have no modtime
     CacheRegex: []*folder.RegexCacheStore{
         {
             Regex:        `index\.html$`,

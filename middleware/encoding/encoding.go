@@ -1,7 +1,8 @@
+// Package encoding compresses HTTP responses with zstd, brotli or gzip
+// according to the client's Accept-Encoding header.
 package encoding
 
 import (
-	"compress/gzip"
 	"fmt"
 	"net/http"
 	"slices"
@@ -9,18 +10,72 @@ import (
 	"strings"
 )
 
+const (
+	EncodingZstd   = "zstd"
+	EncodingBrotli = "br"
+	EncodingGzip   = "gzip"
+)
+
+// DefaultMinLength is the default minimum body size in bytes worth compressing.
+const DefaultMinLength = 1024
+
+var defaultEncodings = []string{EncodingZstd, EncodingBrotli, EncodingGzip}
+
+// DefaultExcludedContentTypes lists already compressed formats that are not
+// worth compressing again. Compressible images (SVG, BMP, ICO) are still
+// compressed while this default list is in use.
+var DefaultExcludedContentTypes = []string{
+	"image/*",
+	"video/*",
+	"audio/*",
+	"font/woff",
+	"font/woff2",
+	"application/zip",
+	"application/gzip",
+	"application/x-gzip",
+	"application/zstd",
+	"application/x-7z-compressed",
+	"application/x-rar-compressed",
+	"application/octet-stream",
+	"application/grpc",
+}
+
+// compressibleImages are image types that still benefit from compression.
+var compressibleImages = []string{"image/svg+xml", "image/bmp", "image/x-icon", "image/vnd.microsoft.icon"}
+
 type Config struct {
 	// Disabled bypasses negotiation and compression. Other configuration is
 	// still validated during middleware construction.
 	Disabled bool `cfg:"disabled"`
-	// Encoding lists enabled response encodings. Only gzip is supported. Values
-	// are trimmed and case-insensitive; empty, duplicate or unsupported values
-	// panic during middleware construction. The default is []string{"gzip"}.
+	// Encoding lists enabled response encodings in server preference order.
+	// When the client accepts several with the same quality, the first one
+	// wins. Supported values are "zstd", "br" and "gzip". Values are trimmed
+	// and case-insensitive; empty, duplicate or unsupported values panic during
+	// middleware construction. The default is []string{"zstd", "br", "gzip"}.
 	Encoding []string `cfg:"encoding"`
+	// MinLength is the minimum response size in bytes to compress. Up to
+	// MinLength bytes are buffered to decide; a Flush ends buffering early.
+	// Set 1 to compress every non-empty body. Negative values panic. The
+	// default is DefaultMinLength.
+	MinLength int `cfg:"min_length"`
+	// ExcludedContentTypes are never compressed. "type/*" wildcards are
+	// supported and parameters such as charset are ignored. A nil value uses
+	// DefaultExcludedContentTypes; an empty non-nil slice excludes nothing.
+	ExcludedContentTypes []string `cfg:"excluded_content_types"`
+	// IncludedContentTypes, when set, restricts compression to these content
+	// types and ExcludedContentTypes is ignored.
+	IncludedContentTypes []string `cfg:"included_content_types"`
+
+	// GzipLevel defaults to gzip.DefaultCompression; valid range is -2..9.
+	GzipLevel *int `cfg:"gzip_level"`
+	// BrotliLevel defaults to 4; valid range is 0..11.
+	BrotliLevel *int `cfg:"brotli_level"`
+	// ZstdLevel defaults to the encoder's default speed; valid range is 1..22.
+	ZstdLevel *int `cfg:"zstd_level"`
 }
 
 // Middleware constructs response encoding middleware. It panics when Config
-// contains an invalid or unsupported encoding.
+// contains an invalid or unsupported value.
 func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 	var opt option
 	for _, o := range opts {
@@ -28,25 +83,62 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 	}
 
 	cfg := opt.Config
-	cfg.Encoding = slices.Clone(cfg.Encoding)
-	if len(cfg.Encoding) == 0 {
-		cfg.Encoding = []string{"gzip"}
+
+	encodings := slices.Clone(cfg.Encoding)
+	if len(encodings) == 0 {
+		encodings = slices.Clone(defaultEncodings)
 	}
 
-	seen := make(map[string]struct{}, len(cfg.Encoding))
-	for i, configured := range cfg.Encoding {
-		encoding := strings.ToLower(strings.TrimSpace(configured))
-		if encoding == "" {
+	pools := make(map[string]*encoderPool, len(encodings))
+	for i, configured := range encodings {
+		enc := strings.ToLower(strings.TrimSpace(configured))
+		if enc == "" {
 			panic("encoding: configured encoding must not be empty")
 		}
-		if _, ok := seen[encoding]; ok {
-			panic(fmt.Sprintf("encoding: duplicate configured encoding %q", encoding))
+		if _, ok := pools[enc]; ok {
+			panic(fmt.Sprintf("encoding: duplicate configured encoding %q", enc))
 		}
-		if encoding != "gzip" {
-			panic(fmt.Sprintf("encoding: unsupported configured encoding %q (supported: gzip)", encoding))
+
+		var (
+			pool *encoderPool
+			err  error
+		)
+		switch enc {
+		case EncodingGzip:
+			pool, err = newGzipPool(cfg.GzipLevel)
+		case EncodingBrotli:
+			pool, err = newBrotliPool(cfg.BrotliLevel)
+		case EncodingZstd:
+			pool, err = newZstdPool(cfg.ZstdLevel)
+		default:
+			panic(fmt.Sprintf("encoding: unsupported configured encoding %q (supported: zstd, br, gzip)", enc))
 		}
-		seen[encoding] = struct{}{}
-		cfg.Encoding[i] = encoding
+		if err != nil {
+			panic(fmt.Sprintf("encoding: %v", err))
+		}
+
+		pools[enc] = pool
+		encodings[i] = enc
+	}
+
+	minLength := cfg.MinLength
+	if minLength < 0 {
+		panic("encoding: MinLength must not be negative")
+	}
+	if minLength == 0 {
+		minLength = DefaultMinLength
+	}
+
+	excluded := cfg.ExcludedContentTypes
+	if excluded == nil {
+		excluded = DefaultExcludedContentTypes
+	}
+
+	filter := &contentTypeFilter{
+		excluded: normalizeTypes(excluded),
+		included: normalizeTypes(cfg.IncludedContentTypes),
+		// The default image/* exclusion must not drop compressible images.
+		allowImages: cfg.ExcludedContentTypes == nil,
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -56,17 +148,27 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 				return
 			}
 
+			// Upgrades (WebSocket) need the raw ResponseWriter so the handler
+			// can hijack the connection.
+			if isUpgrade(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			addVary(w.Header(), "Accept-Encoding")
 
+			acceptEncoding := r.Header.Values("Accept-Encoding")
+			qualities := parseEncodingQualities(acceptEncoding)
+
 			selectedEncoding, selectedQuality := "", float64(0)
-			for _, enc := range cfg.Encoding {
-				if quality := encodingQuality(r.Header.Values("Accept-Encoding"), enc); quality > selectedQuality {
+			for _, enc := range encodings {
+				if quality := encodingQuality(qualities, enc); quality > selectedQuality {
 					selectedEncoding, selectedQuality = enc, quality
 				}
 			}
 
 			if selectedEncoding == "" {
-				if !identityAccepted(r.Header.Values("Accept-Encoding")) {
+				if !identityAccepted(qualities) {
 					http.Error(w, "no acceptable content encoding", http.StatusNotAcceptable)
 					return
 				}
@@ -74,34 +176,47 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 				return
 			}
 
-			switch selectedEncoding {
-			case "gzip":
-				gz := gzipWriterPool.Get().(*gzip.Writer)
-				gzw := &gzipResponseWriter{
-					ResponseWriter: w,
-					writer:         gz,
-					requestMethod:  r.Method,
-				}
-				defer func() {
-					gzw.close()
-					gzipWriterPool.Put(gz)
-				}()
-				next.ServeHTTP(gzw, r)
+			if r.Method == http.MethodHead {
+				next.ServeHTTP(w, r)
+				return
 			}
+
+			cw := &responseWriter{
+				ResponseWriter: w,
+				encoding:       selectedEncoding,
+				pool:           pools[selectedEncoding],
+				minLength:      minLength,
+				filter:         filter,
+			}
+			defer cw.close()
+
+			next.ServeHTTP(cw, r)
 		})
 	}
 }
 
-func encodingQuality(headerValues []string, encoding string) float64 {
-	qualities := parseEncodingQualities(headerValues)
-	if quality, ok := qualities[strings.ToLower(encoding)]; ok {
+func isUpgrade(r *http.Request) bool {
+	if r.Header.Get("Upgrade") == "" {
+		return false
+	}
+	for _, value := range r.Header.Values("Connection") {
+		for token := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func encodingQuality(qualities map[string]float64, encoding string) float64 {
+	if quality, ok := qualities[encoding]; ok {
 		return quality
 	}
 	return qualities["*"]
 }
 
-func identityAccepted(headerValues []string) bool {
-	qualities := parseEncodingQualities(headerValues)
+func identityAccepted(qualities map[string]float64) bool {
 	if quality, ok := qualities["identity"]; ok {
 		return quality > 0
 	}
@@ -183,6 +298,44 @@ func addVary(header http.Header, value string) {
 		return
 	}
 	header.Set("Vary", strings.Join(values, ", ")+", "+value)
+}
+
+type contentTypeFilter struct {
+	excluded    []string
+	included    []string
+	allowImages bool
+}
+
+func normalizeTypes(types []string) []string {
+	out := make([]string, 0, len(types))
+	for _, t := range types {
+		if t = strings.ToLower(strings.TrimSpace(t)); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func matchType(pattern, contentType string) bool {
+	if prefix, ok := strings.CutSuffix(pattern, "/*"); ok {
+		return strings.HasPrefix(contentType, prefix+"/")
+	}
+	return pattern == contentType
+}
+
+func (f *contentTypeFilter) allowed(contentType string) bool {
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+
+	if len(f.included) > 0 {
+		return slices.ContainsFunc(f.included, func(p string) bool { return matchType(p, mediaType) })
+	}
+
+	if f.allowImages && slices.Contains(compressibleImages, mediaType) {
+		return true
+	}
+
+	return !slices.ContainsFunc(f.excluded, func(p string) bool { return matchType(p, mediaType) })
 }
 
 // ////////////////////////////////////////////////////////////////////

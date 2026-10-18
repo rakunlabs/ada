@@ -178,10 +178,16 @@ logging, limiting, and tracing by the immediate peer.
 
 ## Configuration Validation
 
-- Encoding middleware supports `gzip` only. Empty, duplicate, or unsupported
-  configured encodings now panic during construction instead of silently
-  passing responses through. Eligible responses are still streamed and gzip is
-  applied regardless of body size.
+- Encoding middleware supports `zstd`, `br`, and `gzip`, and enables all
+  three by default in that preference order. Pass
+  `Encoding: []string{"gzip"}` to keep gzip-only output. Empty, duplicate, or
+  unsupported configured encodings and out-of-range levels panic during
+  construction instead of silently passing responses through.
+- Encoding middleware no longer compresses bodies smaller than `MinLength`
+  (default 1024 bytes) or already compressed content types such as images and
+  archives. Set `MinLength: 1` and `ExcludedContentTypes: []string{}` to
+  restore the previous compress-everything behavior. A `Flush` still starts
+  compression immediately, so streaming is not delayed.
 - CORS wildcard/regex matching now accepts legal origins containing a port up
   to its documented bounded input size. `OnOriginTooLong` can observe requests
   rejected for exceeding that bound; ordinary policy denials remain unchanged.

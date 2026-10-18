@@ -35,8 +35,9 @@ Cross-cutting middlewares such as [Recover](./recover), [Request ID](./request-i
 | [Body Limit](./bodylimit) | `middleware/bodylimit` | Cap request body size |
 | [Timeout](./timeout) | `middleware/timeout` | Attach a deadline to the request context |
 | [CORS](./cors) | `middleware/cors` | Handle cross-origin requests |
+| [CSRF](./csrf) | `middleware/csrf` | Reject cross-site unsafe requests, with an optional token check |
 | [Telemetry](./telemetry) | `middleware/telemetry` | OpenTelemetry traces and metrics |
-| [Encoding](./encoding) | `middleware/encoding` | Gzip response compression |
+| [Encoding](./encoding) | `middleware/encoding` | zstd, Brotli, and gzip response compression |
 | [Server](./server) | `middleware/server` | Set the `Server` response header |
 | [ForwardAuth](./forwardauth) | `middleware/forwardauth` | Delegate authentication to an external service |
 | [Auth](./auth/) | `middleware/auth` | Sessions, login strategies, MFA, and a login UI |

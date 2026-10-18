@@ -38,6 +38,7 @@ func Run(ctx context.Context) error {
 			SPA:            false,
 			Index:          false,
 			StripIndexName: true,
+			ETag:           folder.ETagStrong,
 			// PrefixPath:     "/mypath",
 			CacheRegex: []*folder.RegexCacheStore{
 				{

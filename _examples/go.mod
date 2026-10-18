@@ -49,6 +49,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/Masterminds/sprig/v3 v3.3.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/andybalholm/brotli v1.2.6 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/bufbuild/buf v1.72.0 // indirect
 	github.com/bufbuild/protocompile v0.14.2-0.20260716165721-bb5762d29672 // indirect
@@ -87,7 +88,7 @@ require (
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jdx/go-netrc v1.0.0 // indirect
-	github.com/klauspost/compress v1.19.0 // indirect
+	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/lmittmann/tint v1.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect

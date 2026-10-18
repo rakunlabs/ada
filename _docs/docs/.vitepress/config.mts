@@ -100,6 +100,10 @@ export default withMermaid(defineConfig({
             link: "/guide/middleware/cors.md",
           },
           {
+            text: "CSRF",
+            link: "/guide/middleware/csrf.md",
+          },
+          {
             text: "Telemetry",
             link: "/guide/middleware/telemetry.md",
           },

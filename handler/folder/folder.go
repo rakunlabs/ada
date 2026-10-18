@@ -8,13 +8,20 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
 const indexPage = "/index.html"
+
+const (
+	// ETagWeak generates W/"<modtime>-<size>" without reading the file.
+	ETagWeak = "weak"
+	// ETagStrong generates a SHA-256 of the content and works without modtime.
+	ETagStrong = "strong"
+)
 
 var BrowserFunc func(w http.ResponseWriter, r *http.Request, opt BrowserOption) error
 
@@ -64,6 +71,17 @@ type Config struct {
 	BrowseCache string `cfg:"browse_cache"`
 
 	DisableFolderSlashRedirect bool `cfg:"disable_folder_slash_redirect"`
+
+	// ETag enables ETag generation for served files; empty disables it.
+	//   - ETagWeak: W/"<modtime>-<size>", cheap and computed without reading
+	//     the file. Files without a modtime (embed.FS) and responses with
+	//     SetCustomContent get no ETag.
+	//   - ETagStrong: "<sha256 of content>". Use it for embedded filesystems,
+	//     where modtime is zero and Last-Modified is never sent. Hashes are
+	//     cached per file path and refreshed when modtime or size changes;
+	//     custom content is hashed on every request.
+	// An ETag already set by an earlier handler is kept.
+	ETag string `cfg:"etag"`
 }
 
 type RegexPathStore struct {
@@ -83,6 +101,7 @@ type Folder struct {
 
 	fs            http.FileSystem
 	customContent func(r *http.Request, name string, content io.ReadSeeker) io.ReadSeeker
+	etagCache     sync.Map // file path -> etagCacheEntry
 }
 
 func New(cfg *Config) (*Folder, error) {
@@ -139,6 +158,12 @@ func New(cfg *Config) (*Folder, error) {
 		}
 
 		cfg.CacheRegex[i].rgx = rgx
+	}
+
+	switch cfg.ETag {
+	case "", ETagWeak, ETagStrong:
+	default:
+		return nil, fmt.Errorf("unsupported etag mode %q, use %q or %q", cfg.ETag, ETagWeak, ETagStrong)
 	}
 
 	if cfg.BrowseCache == "" {
@@ -242,7 +267,7 @@ func (f *Folder) serveFile(w http.ResponseWriter, r *http.Request, uPath, cPath 
 	file, err := f.fs.Open(cPath)
 	if err != nil {
 		if os.IsNotExist(err) && f.cfg.SPA {
-			if f.cfg.SPAEnableFile || !strings.Contains(filepath.Base(cPath), ".") {
+			if f.cfg.SPAEnableFile || !strings.Contains(path.Base(cPath), ".") {
 				for _, spaR := range f.cfg.SPAIndexRegex {
 					spaFile := spaR.rgx.ReplaceAllString(uPath, spaR.Replacement)
 					if spaFile != uPath {
@@ -277,15 +302,18 @@ func (f *Folder) serveFile(w http.ResponseWriter, r *http.Request, uPath, cPath 
 		}
 	}
 
+	filePath := cPath
 	if d.IsDir() && f.cfg.Index {
 		// use contents of index.html for directory, if present
-		ff, err := f.fs.Open(filepath.Join(cPath, f.cfg.IndexName))
+		indexPath := path.Join(cPath, f.cfg.IndexName)
+		ff, err := f.fs.Open(indexPath)
 		if err == nil {
 			defer func() { _ = ff.Close() }()
 			dd, err := ff.Stat()
 			if err == nil {
 				d = dd
 				file = ff
+				filePath = indexPath
 			}
 		}
 	}
@@ -304,7 +332,7 @@ func (f *Folder) serveFile(w http.ResponseWriter, r *http.Request, uPath, cPath 
 		return toHTTPError(os.ErrNotExist)
 	}
 
-	return f.fsFileInfo(w, r, d, file)
+	return f.fsFileInfo(w, r, filePath, d, file)
 }
 
 // localRedirect gives a Moved Permanently response.
@@ -346,13 +374,13 @@ func (f *Folder) fsFile(w http.ResponseWriter, r *http.Request, file string) err
 		return toHTTPError(err)
 	}
 
-	f.serveContent(w, r, fi.Name(), fi.ModTime(), hFile)
+	f.serveContent(w, r, file, fi.Name(), fi.ModTime(), hFile)
 
 	return nil
 }
 
-func (f *Folder) fsFileInfo(w http.ResponseWriter, r *http.Request, fi fs.FileInfo, file http.File) error {
-	f.serveContent(w, r, fi.Name(), fi.ModTime(), file)
+func (f *Folder) fsFileInfo(w http.ResponseWriter, r *http.Request, filePath string, fi fs.FileInfo, file http.File) error {
+	f.serveContent(w, r, filePath, fi.Name(), fi.ModTime(), file)
 
 	return nil
 }
@@ -367,10 +395,21 @@ func (f *Folder) cache(w http.ResponseWriter, fileName string) {
 	}
 }
 
-func (f *Folder) serveContent(w http.ResponseWriter, req *http.Request, name string, modtime time.Time, content io.ReadSeeker) {
+// serveContent serves the content; filePath is the key used to cache strong
+// ETags.
+func (f *Folder) serveContent(w http.ResponseWriter, req *http.Request, filePath, name string, modtime time.Time, content io.ReadSeeker) {
 	f.cache(w, name)
 	if f.customContent != nil {
 		content = f.customContent(req, name, content)
+	}
+
+	if f.cfg.ETag != "" && w.Header().Get("ETag") == "" {
+		etag, err := f.etag(filePath, modtime, content)
+		if err != nil {
+			slog.Warn("folder: cannot generate etag", "file", filePath, "error", err)
+		} else if etag != "" {
+			w.Header().Set("ETag", etag)
+		}
 	}
 
 	http.ServeContent(w, req, name, modtime, content)

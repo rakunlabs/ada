@@ -39,7 +39,7 @@ features:
       width: 44
       height: 44
     title: Middleware Set
-    details: Recover, log, CORS, rate limit, body limit, timeout, telemetry, encoding, and more.
+    details: Recover, log, CORS, CSRF, rate limit, body limit, timeout, telemetry, encoding, and more.
     link: /guide/middleware/
   - icon:
       src: /assets/thread/padlock.svg

@@ -10,6 +10,10 @@ import (
 	"testing"
 )
 
+// gzipOnly keeps the negotiation tests focused on a single coding and
+// compresses every non-empty body.
+var gzipOnly = Config{Encoding: []string{"gzip"}, MinLength: 1}
+
 func TestAcceptEncodingNegotiation(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -53,8 +57,13 @@ func TestEncodingConfigValidation(t *testing.T) {
 		config    Config
 		wantPanic string
 	}{
-		{name: "unsupported", config: Config{Encoding: []string{"br"}}, wantPanic: `unsupported configured encoding "br"`},
-		{name: "unsupported while disabled", config: Config{Disabled: true, Encoding: []string{"br"}}, wantPanic: `unsupported configured encoding "br"`},
+		{name: "unsupported", config: Config{Encoding: []string{"deflate"}}, wantPanic: `unsupported configured encoding "deflate"`},
+		{name: "unsupported while disabled", config: Config{Disabled: true, Encoding: []string{"deflate"}}, wantPanic: `unsupported configured encoding "deflate"`},
+		{name: "negative min length", config: Config{MinLength: -1}, wantPanic: "MinLength must not be negative"},
+		{name: "gzip level", config: Config{GzipLevel: intPtr(99)}, wantPanic: "gzip level"},
+		{name: "brotli level", config: Config{BrotliLevel: intPtr(99)}, wantPanic: "brotli level"},
+		{name: "zstd level", config: Config{ZstdLevel: intPtr(99)}, wantPanic: "zstd level"},
+		{name: "level checked only for enabled encodings", config: Config{Encoding: []string{"gzip"}, ZstdLevel: intPtr(99)}},
 		{name: "empty", config: Config{Encoding: []string{"  "}}, wantPanic: "must not be empty"},
 		{name: "normalized duplicate", config: Config{Encoding: []string{"gzip", " GZIP "}}, wantPanic: `duplicate configured encoding "gzip"`},
 	}
@@ -62,6 +71,12 @@ func TestEncodingConfigValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			defer func() {
 				got := recover()
+				if tt.wantPanic == "" {
+					if got != nil {
+						t.Fatalf("unexpected panic: %v", got)
+					}
+					return
+				}
 				if got == nil || !strings.Contains(fmt.Sprint(got), tt.wantPanic) {
 					t.Fatalf("panic = %v, want text %q", got, tt.wantPanic)
 				}
@@ -72,9 +87,9 @@ func TestEncodingConfigValidation(t *testing.T) {
 }
 
 func TestEncodingConfigIsNormalizedAndSnapshotted(t *testing.T) {
-	config := Config{Encoding: []string{" GZIP "}}
+	config := Config{Encoding: []string{" GZIP "}, MinLength: 1}
 	middleware := Middleware(WithConfig(config))
-	config.Encoding[0] = "br"
+	config.Encoding[0] = "zstd"
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Accept-Encoding", "gzip")
@@ -189,7 +204,7 @@ func TestContentEncodingIsDeferred(t *testing.T) {
 
 func TestFlushAndResponseController(t *testing.T) {
 	underlying := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
-	handler := Middleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := Middleware(WithConfig(gzipOnly))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		controller := http.NewResponseController(w)
 		if err := controller.EnableFullDuplex(); err != nil {
 			t.Fatalf("EnableFullDuplex: %v", err)
@@ -237,7 +252,7 @@ func serve(t *testing.T, method, acceptEncoding string, handler http.HandlerFunc
 	if acceptEncoding != "" {
 		req.Header.Set("Accept-Encoding", acceptEncoding)
 	}
-	Middleware()(handler).ServeHTTP(recorder, req)
+	Middleware(WithConfig(gzipOnly))(handler).ServeHTTP(recorder, req)
 	return recorder
 }
 
