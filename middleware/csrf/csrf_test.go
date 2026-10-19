@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -311,6 +313,8 @@ func TestInvalidConfigPanics(t *testing.T) {
 		{"negative max age", Config{Token: Token{Enabled: true, CookieMaxAge: -time.Second}}, "CookieMaxAge"},
 		{"host prefix domain", Config{Token: Token{Enabled: true, CookieName: "__Host-csrf", CookieDomain: "example.com"}}, "__Host-"},
 		{"secure prefix insecure", Config{Token: Token{Enabled: true, CookieName: "__Secure-csrf", CookieInsecure: true}}, "__Secure-"},
+		{"session without secret", Config{Token: Token{Enabled: true, SessionID: func(*http.Request) string { return "" }}}, "requires Token.Secret"},
+		{"negative form size", Config{Token: Token{Enabled: true, MaxFormSize: -1}}, "MaxFormSize"},
 	}
 
 	for _, tt := range tests {
@@ -324,4 +328,212 @@ func TestInvalidConfigPanics(t *testing.T) {
 			Middleware(WithConfig(tt.config))
 		})
 	}
+}
+
+func TestTokenSessionBinding(t *testing.T) {
+	sessionID := func(r *http.Request) string {
+		if c, err := r.Cookie("session"); err == nil {
+			return c.Value
+		}
+		return ""
+	}
+	h := newHandler(Config{Token: Token{Enabled: true, Secret: "s3cret", SessionID: sessionID}})
+
+	issueFor := func(session string) *http.Cookie {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		if session != "" {
+			req.AddCookie(&http.Cookie{Name: "session", Value: session})
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == DefaultCookieName {
+				return c
+			}
+		}
+		t.Fatal("csrf cookie not set")
+		return nil
+	}
+
+	post := func(cookie *http.Cookie, session string) int {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.AddCookie(cookie)
+		if session != "" {
+			req.AddCookie(&http.Cookie{Name: "session", Value: session})
+		}
+		req.Header.Set(DefaultHeaderName, cookie.Value)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	attacker := issueFor("attacker")
+	if got := post(attacker, "attacker"); got != http.StatusOK {
+		t.Fatalf("own session status = %d", got)
+	}
+	if got := post(attacker, "victim"); got != http.StatusForbidden {
+		t.Fatalf("planted token status = %d, want 403", got)
+	}
+
+	anonymous := issueFor("")
+	if got := post(anonymous, "victim"); got != http.StatusForbidden {
+		t.Fatalf("pre-login token after login status = %d, want 403", got)
+	}
+
+	// After login the old cookie is invalid, so a safe request reissues it.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(anonymous)
+	req.AddCookie(&http.Cookie{Name: "session", Value: "victim"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if len(rec.Result().Cookies()) != 1 {
+		t.Fatal("token not reissued after session change")
+	}
+	if got := post(rec.Result().Cookies()[0], "victim"); got != http.StatusOK {
+		t.Fatalf("reissued token status = %d", got)
+	}
+
+	// Unambiguous encoding: shifting bytes between token and identifier
+	// must not keep the signature valid.
+	signer := tokenSigner{secret: []byte("s3cret"), bound: true}
+	if signer.sign("ab", "c") == signer.sign("a", "bc") {
+		t.Fatal("signature input is ambiguous")
+	}
+	unbound := tokenSigner{secret: []byte("s3cret")}
+	if signer.sign("tok", "") == unbound.sign("tok", "") {
+		t.Fatal("bound and unbound signatures collide")
+	}
+}
+
+func TestTokenIssueCacheHeaders(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{"none", "", "private"},
+		{"public", "public, max-age=60", "private, max-age=60"},
+		{"no-store kept", "no-store", "no-store"},
+		{"private kept", "private, max-age=10", "private, max-age=10"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mw := Middleware(WithConfig(Config{Token: Token{Enabled: true, Secret: "s3cret"}}))
+			h := mw(okHandler)
+
+			rec := httptest.NewRecorder()
+			if tt.existing != "" {
+				rec.Header().Set("Cache-Control", tt.existing)
+			}
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+			if got := rec.Header().Get("Cache-Control"); got != tt.want {
+				t.Fatalf("Cache-Control = %q, want %q", got, tt.want)
+			}
+			if got := rec.Header().Values("Vary"); len(got) != 1 || got[0] != "Cookie" {
+				t.Fatalf("Vary = %q, want [Cookie]", got)
+			}
+		})
+	}
+
+	t.Run("not issued", func(t *testing.T) {
+		h := newHandler(Config{Token: Token{Enabled: true, Secret: "s3cret"}})
+		cookie, _ := issueCookie(t, h, DefaultCookieName)
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Header().Get("Cache-Control") != "" || rec.Header().Get("Vary") != "" {
+			t.Fatalf("cache headers set without issuing: %v", rec.Header())
+		}
+	})
+}
+
+func TestTokenFormLimitsAndCleanup(t *testing.T) {
+	var gotForm url.Values
+	var gotFile string
+	var multipartForm *multipart.Form
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotForm = r.PostForm
+		multipartForm = r.MultipartForm
+		if r.MultipartForm != nil {
+			if fh := r.MultipartForm.File["upload"]; len(fh) == 1 {
+				f, err := fh[0].Open()
+				if err == nil {
+					b, _ := io.ReadAll(f)
+					_ = f.Close()
+					gotFile = string(b)
+				}
+			}
+		}
+	})
+
+	cfg := Config{Token: Token{Enabled: true, Secret: "s3cret", MaxFormSize: 1 << 10, MaxMultipartMemory: 16}}
+	h := Middleware(WithConfig(cfg))(handler)
+	cookie, _ := issueCookie(t, newHandler(cfg), DefaultCookieName)
+
+	t.Run("urlencoded visible downstream", func(t *testing.T) {
+		gotForm = nil
+		body := url.Values{DefaultFormField: {cookie.Value}, "name": {"x"}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK || gotForm.Get("name") != "x" {
+			t.Fatalf("status = %d, form = %v", rec.Code, gotForm)
+		}
+	})
+
+	t.Run("urlencoded over limit", func(t *testing.T) {
+		body := url.Values{DefaultFormField: {cookie.Value}, "pad": {strings.Repeat("a", 2<<10)}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+	})
+
+	t.Run("multipart upload and temp file cleanup", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("TMPDIR", tmp)
+
+		var buf strings.Builder
+		mw := multipart.NewWriter(&buf)
+		_ = mw.WriteField(DefaultFormField, cookie.Value)
+		fw, _ := mw.CreateFormFile("upload", "big.bin")
+		content := strings.Repeat("z", 4<<10)
+		_, _ = io.WriteString(fw, content)
+		_ = mw.Close()
+
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(buf.String()))
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK || gotFile != content {
+			t.Fatalf("status = %d, file length = %d", rec.Code, len(gotFile))
+		}
+		if multipartForm == nil {
+			t.Fatal("multipart form not visible downstream")
+		}
+
+		entries, err := os.ReadDir(tmp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("temp files leaked: %v", entries)
+		}
+	})
 }

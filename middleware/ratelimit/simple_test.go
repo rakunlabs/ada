@@ -207,8 +207,8 @@ func TestKeyByIPIgnoresForwardingHeaders(t *testing.T) {
 	r.Header.Set("True-Client-IP", "192.0.2.2")
 	r.Header.Set("X-Forwarded-For", "192.0.2.3")
 
-	if got := ratelimit.KeyByIP(r); got != "2001:db8::10" {
-		t.Fatalf("key = %q, want the immediate peer", got)
+	if got := ratelimit.KeyByIP(r); got != "2001:db8::/64" {
+		t.Fatalf("key = %q, want the immediate peer's /64", got)
 	}
 }
 
@@ -250,4 +250,132 @@ func TestSimpleLimiterDoesNotSerialize(t *testing.T) {
 		}
 	}
 	close(release)
+}
+
+func TestKeyByIPMasksIPv6ToPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		remote string
+		want   string
+	}{
+		{remote: "[2001:db8:1:2:aaaa::1]:80", want: "2001:db8:1:2::/64"},
+		{remote: "[2001:db8:1:2:ffff:ffff:ffff:ffff]:80", want: "2001:db8:1:2::/64"},
+		{remote: "[::ffff:198.51.100.9]:80", want: "198.51.100.9"},
+		{remote: "198.51.100.9:80", want: "198.51.100.9"},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = tc.remote
+		if got := ratelimit.KeyByIP(r); got != tc.want {
+			t.Fatalf("KeyByIP(%q) = %q, want %q", tc.remote, got, tc.want)
+		}
+	}
+}
+
+// A client holding a /64 must not escape its budget by rotating the interface
+// identifier.
+func TestLimitByIPSharesBudgetAcrossIPv6Prefix(t *testing.T) {
+	useTummy(t)
+
+	h := ratelimit.LimitByIP(2, time.Minute)(okHandler())
+	for i, remote := range []string{"[2001:db8::1]:1", "[2001:db8::2]:1"} {
+		if rec := sendFrom(h, remote, nil); rec.Code != http.StatusOK {
+			t.Fatalf("request %d: got %d, want 200", i+1, rec.Code)
+		}
+	}
+	if rec := sendFrom(h, "[2001:db8::ffff:3]:1", nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("rotated address in same /64: got %d, want 429", rec.Code)
+	}
+	if rec := sendFrom(h, "[2001:db8:0:1::1]:1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("neighbouring /64: got %d, want 200", rec.Code)
+	}
+}
+
+func TestWithIPv6PrefixConfiguresMasking(t *testing.T) {
+	useTummy(t)
+
+	h := ratelimit.LimitByIP(1, time.Minute, ratelimit.WithIPv6Prefix(128))(okHandler())
+	if rec := sendFrom(h, "[2001:db8::1]:1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("first /128: got %d, want 200", rec.Code)
+	}
+	if rec := sendFrom(h, "[2001:db8::2]:1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("second /128: got %d, want independent budget", rec.Code)
+	}
+
+	h = ratelimit.LimitByIP(1, time.Minute, ratelimit.WithIPv6Prefix(48))(okHandler())
+	if rec := sendFrom(h, "[2001:db8:5:1::1]:1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("first /48 member: got %d, want 200", rec.Code)
+	}
+	if rec := sendFrom(h, "[2001:db8:5:2::1]:1", nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second /48 member: got %d, want 429", rec.Code)
+	}
+	if rec := sendFrom(h, "192.0.2.1:1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("IPv4: got %d, want 200", rec.Code)
+	}
+	if rec := sendFrom(h, "192.0.2.2:1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("IPv4 neighbour: got %d, want independent /32 budget", rec.Code)
+	}
+}
+
+func TestLimitByKeyMasksIPv6ResolverKeys(t *testing.T) {
+	useTummy(t)
+
+	h := ratelimit.LimitByKey(1, time.Minute, func(r *http.Request) string {
+		return r.Header.Get("X-Client")
+	})(okHandler())
+
+	if rec := sendFrom(h, "10.0.0.1:80", map[string]string{"X-Client": "2001:db8::1"}); rec.Code != http.StatusOK {
+		t.Fatalf("first: got %d, want 200", rec.Code)
+	}
+	if rec := sendFrom(h, "10.0.0.1:80", map[string]string{"X-Client": "2001:db8::2"}); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("same /64 via resolver: got %d, want 429", rec.Code)
+	}
+}
+
+func TestSimpleLimiterPanicsOnInvalidOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opt  ratelimit.Option
+	}{
+		{name: "zero prefix", opt: ratelimit.WithIPv6Prefix(0)},
+		{name: "prefix over 128", opt: ratelimit.WithIPv6Prefix(129)},
+		{name: "zero max keys", opt: ratelimit.WithMaxKeys(0)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("LimitByIP accepted invalid option")
+				}
+			}()
+			_ = ratelimit.LimitByIP(1, time.Minute, tc.opt)
+		})
+	}
+}
+
+// At the key cap a new key is refused rather than evicting a live one, and
+// stale keys are reclaimed once they age out.
+func TestWithMaxKeysCapsTrackedKeys(t *testing.T) {
+	useTummy(t)
+
+	h := ratelimit.LimitByIP(1, time.Minute, ratelimit.WithMaxKeys(2))(okHandler())
+	for _, remote := range []string{"192.0.2.1:1", "192.0.2.2:1"} {
+		if rec := sendFrom(h, remote, nil); rec.Code != http.StatusOK {
+			t.Fatalf("%s: got %d, want 200", remote, rec.Code)
+		}
+	}
+
+	rec := sendFrom(h, "192.0.2.3:1", nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("key over cap: got %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("expected Retry-After on cap reject")
+	}
+	if rec := sendFrom(h, "192.0.2.1:1", nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("tracked key lost its state at cap: got %d, want 429", rec.Code)
+	}
+
+	tummy.AddDuration(2 * time.Minute)
+
+	if rec := sendFrom(h, "192.0.2.3:1", nil); rec.Code != http.StatusOK {
+		t.Fatalf("new key after stale entries expire: got %d, want 200", rec.Code)
+	}
 }

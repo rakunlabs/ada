@@ -3,6 +3,8 @@ package ada
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -800,4 +802,164 @@ func TestSiblingGroupsUnaffectedByEachOther(t *testing.T) {
 	if got := rec.Header().Values("X-Order"); len(got) != 2 || got[0] != "b" || got[1] != "b2" {
 		t.Errorf("/b: X-Order = %v, want [b b2]", got)
 	}
+}
+
+// TestSamePrefixGroupOwnsErrorScope pins the v0.5.x contract that a Group
+// sharing its parent's prefix claims that prefix for error dispatch. Apps rely
+// on Group("", cors) putting CORS headers on preflight (auto-OPTIONS), 404 and
+// 405 responses; leaving those with the parent breaks browser preflights.
+func TestSamePrefixGroupOwnsErrorScope(t *testing.T) {
+	cors := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	for _, prefix := range []string{"", "/"} {
+		t.Run(strconv.Quote(prefix), func(t *testing.T) {
+			mux := NewMux()
+			api := mux.Group(prefix, cors)
+			api.GET("/users", func(http.ResponseWriter, *http.Request) {})
+			api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "group-404", http.StatusNotFound)
+			})
+
+			for _, tc := range []struct {
+				method, path string
+				code         int
+			}{
+				{http.MethodOptions, "/users", http.StatusNoContent},
+				{http.MethodPost, "/users", http.StatusMethodNotAllowed},
+				{http.MethodGet, "/missing", http.StatusNotFound},
+			} {
+				rec := serve(mux, tc.method, tc.path)
+				if rec.Code != tc.code {
+					t.Errorf("%s %s: status = %d, want %d", tc.method, tc.path, rec.Code, tc.code)
+				}
+				if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+					t.Errorf("%s %s: CORS header = %q, want group middleware to run", tc.method, tc.path, got)
+				}
+			}
+			if rec := serve(mux, http.MethodGet, "/missing"); rec.Body.String() != "group-404\n" {
+				t.Errorf("/missing body = %q, want group NotFound", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestUseAppliesToLaterRegistrations pins the intended layering: a route's
+// chain is composed when the route is registered, so Use affects routes
+// registered after it. Setup code relies on this to stack middleware between
+// groups (Use, Group, Use again, Group), and routes registered earlier must
+// keep the chain they were built with.
+func TestUseAppliesToLaterRegistrations(t *testing.T) {
+	mark := func(value string) MiddlewareFunc {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Add("X-Order", value)
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+	ok := func(http.ResponseWriter, *http.Request) {}
+
+	check := func(t *testing.T, mux *Mux, want map[string]string) {
+		t.Helper()
+		for path, wantOrder := range want {
+			rec := serve(mux, http.MethodGet, path)
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s: status = %d, want 200", path, rec.Code)
+			}
+			if got := strings.Join(rec.Header().Values("X-Order"), ","); got != wantOrder {
+				t.Errorf("%s: X-Order = %q, want %q", path, got, wantOrder)
+			}
+		}
+	}
+
+	t.Run("groups between Use calls", func(t *testing.T) {
+		mux := NewMux()
+		mux.Use(mark("log"))
+		public := mux.Group("/public")
+		public.GET("/x", ok)
+
+		mux.Use(mark("auth"))
+		private := mux.Group("/private")
+		private.GET("/x", ok)
+
+		check(t, mux, map[string]string{
+			"/public/x":  "log",
+			"/private/x": "log,auth",
+		})
+	})
+
+	t.Run("root routes before and after Use", func(t *testing.T) {
+		mux := NewMux()
+		mux.GET("/bare", ok)
+		mux.Use(mark("log"))
+		mux.GET("/logged", ok)
+		mux.Use(mark("auth"))
+		mux.GET("/authed", ok)
+
+		check(t, mux, map[string]string{
+			"/bare":   "",
+			"/logged": "log",
+			"/authed": "log,auth",
+		})
+	})
+
+	// Registration time decides, not group creation time: a route added to
+	// an earlier group after a later parent Use picks that Use up too.
+	t.Run("registration time decides, not group creation", func(t *testing.T) {
+		mux := NewMux()
+		mux.Use(mark("log"))
+		public := mux.Group("/public")
+		public.GET("/early", ok)
+
+		mux.Use(mark("auth"))
+		public.GET("/late", ok)
+
+		check(t, mux, map[string]string{
+			"/public/early": "log",
+			"/public/late":  "log,auth",
+		})
+	})
+
+	t.Run("Use inside a group layers within that group", func(t *testing.T) {
+		mux := NewMux()
+		mux.Use(mark("log"))
+		api := mux.Group("/api", mark("api"))
+		api.GET("/open", ok)
+
+		api.Use(mark("auth"))
+		api.GET("/closed", ok)
+
+		mux.GET("/root", ok)
+
+		check(t, mux, map[string]string{
+			"/api/open":   "log,api",
+			"/api/closed": "log,api,auth",
+			// A group's Use never leaks to its parent.
+			"/root": "log",
+		})
+	})
+
+	t.Run("nested groups and route middleware", func(t *testing.T) {
+		mux := NewMux()
+		mux.Use(mark("log"))
+		api := mux.Group("/api")
+		api.Use(mark("auth"))
+		v1 := api.Group("/v1", mark("v1"))
+		v1.GET("/x", ok, mark("route"))
+
+		v1.Use(mark("audit"))
+		v1.GET("/y", ok, mark("route"))
+
+		check(t, mux, map[string]string{
+			// Outermost first: ancestors, the group's own, then the
+			// route-level middlewares.
+			"/api/v1/x": "log,auth,v1,route",
+			"/api/v1/y": "log,auth,v1,audit,route",
+		})
+	})
 }

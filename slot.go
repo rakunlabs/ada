@@ -159,12 +159,13 @@ func NewSlot(mw MiddlewareFunc) *Slot {
 // request in that group. This matches how non-slotted middlewares behave.
 //
 // Middleware constructors run outside Slot locks. A registration requested
-// during construction returns with a complete pass-through binding and is
-// rebound by its queued task before the active caller returns.
+// while another mutation is in flight is enrolled by a queued task; until that
+// task runs, the returned handler serves the currently published state — the
+// same middleware every existing registration is running — never a bare
+// pass-through, so a route added during a Replace is not briefly unprotected.
 func (s *Slot) Middleware() MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		target := &slotTarget{next: next}
-		target.binding.Store(&reloadBinding{chain: next})
 
 		s.submit(func() {
 			s.mu.Lock()
@@ -175,6 +176,12 @@ func (s *Slot) Middleware() MiddlewareFunc {
 
 			target.binding.Store(target.prepare(state))
 		})
+
+		// Queued: bind to the published state now. CompareAndSwap keeps a
+		// binding the queued task may already have stored concurrently.
+		if target.binding.Load() == nil {
+			target.binding.CompareAndSwap(nil, target.prepare(s.state.Load()))
+		}
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			binding := target.binding.Load()

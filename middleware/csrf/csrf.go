@@ -3,7 +3,8 @@
 // The origin check uses the Sec-Fetch-Site and Origin headers through
 // net/http.CrossOriginProtection and needs no client cooperation. The
 // optional token check adds the signed double-submit cookie pattern for
-// clients that need an explicit token, such as server-rendered forms.
+// clients that need an explicit token, such as server-rendered forms. Set
+// Token.SessionID to bind tokens to the user's session.
 //
 // Typical usage:
 //
@@ -24,8 +25,10 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"slices"
 	"strings"
@@ -37,7 +40,12 @@ const (
 	DefaultHeaderName = "X-CSRF-Token"
 	DefaultFormField  = "csrf_token"
 
+	DefaultMaxFormSize        = 1 << 20 // 1 MiB
+	DefaultMaxMultipartMemory = 1 << 20 // 1 MiB
+
 	tokenSize = 32
+
+	sessionBindingLabel = "csrf-session-v1\x00"
 )
 
 var (
@@ -70,18 +78,42 @@ type Config struct {
 // Token configures the signed double-submit cookie check.
 type Token struct {
 	Enabled bool `cfg:"enabled"`
-	// Secret signs the token with HMAC-SHA256. Without it the token is not
-	// signed, so a sibling subdomain able to set cookies could inject a token
-	// of its own. Set it in production.
+	// Secret signs the token with HMAC-SHA256 so clients cannot invent
+	// tokens. On its own it does not tie a token to a user: a token an
+	// attacker obtained from this site is valid for anyone, so a sibling
+	// subdomain able to set cookies could still plant it in a victim's
+	// browser. Set SessionID, use a "__Host-" CookieName, or both.
 	Secret string `cfg:"secret" log:"-"`
+	// SessionID returns an identifier of the request's session or user, such
+	// as a session ID. When set, the token signature covers it and a token
+	// issued for one session is rejected for another. An empty identifier
+	// yields tokens bound to "no session". Requires Secret.
+	//
+	// Tokens are issued on safe requests, often before login. After the
+	// identifier changes (login, logout, session rotation) the old token is
+	// rejected and a new one is issued on the next safe request, so clients
+	// must read the token again, e.g. render pages after the login redirect.
+	SessionID func(r *http.Request) string `cfg:"-"`
 	// CookieName defaults to DefaultCookieName. Consider "__Host-csrf_token"
 	// with the default path and no domain to stop subdomain injection.
 	CookieName string `cfg:"cookie_name"`
 	// HeaderName defaults to DefaultHeaderName.
 	HeaderName string `cfg:"header_name"`
 	// FormField is read from url-encoded and multipart form posts when the
-	// header is empty. Defaults to DefaultFormField.
+	// header is empty. Defaults to DefaultFormField. The middleware parses
+	// the form, so the next handler finds it in r.Form, r.PostForm and
+	// r.MultipartForm.
 	FormField string `cfg:"form_field"`
+	// MaxFormSize caps the url-encoded body read to find FormField. Larger
+	// bodies are rejected with ErrTokenMissing. Defaults to
+	// DefaultMaxFormSize.
+	MaxFormSize int64 `cfg:"max_form_size"`
+	// MaxMultipartMemory is the memory limit for parsing multipart bodies to
+	// find FormField; file parts above it go to temporary files, which are
+	// removed after the next handler returns. Defaults to
+	// DefaultMaxMultipartMemory. Send the token in the header to skip
+	// parsing large uploads before authentication.
+	MaxMultipartMemory int64 `cfg:"max_multipart_memory"`
 
 	// CookiePath defaults to "/".
 	CookiePath   string `cfg:"cookie_path"`
@@ -167,6 +199,14 @@ func Middleware(opts ...Option) func(next http.Handler) http.Handler {
 			value := &ctxValue{}
 			r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, value))
 
+			// net/http only cleans up the multipart form of the original
+			// request, not of this copy.
+			defer func(r *http.Request) {
+				if r.MultipartForm != nil {
+					_ = r.MultipartForm.RemoveAll()
+				}
+			}(r)
+
 			if !cfg.DisableOriginCheck {
 				if err := cop.Check(r); err != nil {
 					value.cause = ErrCrossOrigin
@@ -226,11 +266,6 @@ func isSafeMethod(method string) bool {
 	return false
 }
 
-func isForm(r *http.Request) bool {
-	ct := strings.ToLower(r.Header.Get("Content-Type"))
-	return strings.HasPrefix(ct, "application/x-www-form-urlencoded") || strings.HasPrefix(ct, "multipart/form-data")
-}
-
 // newTokenChecker returns nil when the token check is disabled. The checker
 // returns the request's valid token, issuing a new cookie on safe requests
 // that lack one.
@@ -269,11 +304,25 @@ func newTokenChecker(t Token) func(w http.ResponseWriter, r *http.Request) (stri
 	if strings.HasPrefix(cookieName, "__Secure-") && t.CookieInsecure {
 		panic("csrf: __Secure- cookies must be secure")
 	}
+	if t.SessionID != nil && t.Secret == "" {
+		panic("csrf: Token.SessionID requires Token.Secret")
+	}
+	if t.MaxFormSize < 0 || t.MaxMultipartMemory < 0 {
+		panic("csrf: Token.MaxFormSize and Token.MaxMultipartMemory must not be negative")
+	}
+	maxFormSize := cmp.Or(t.MaxFormSize, DefaultMaxFormSize)
+	maxMultipartMemory := cmp.Or(t.MaxMultipartMemory, DefaultMaxMultipartMemory)
 
-	signer := tokenSigner{secret: []byte(t.Secret)}
+	signer := tokenSigner{secret: []byte(t.Secret), bound: t.SessionID != nil}
+	sessionID := func(r *http.Request) string {
+		if t.SessionID == nil {
+			return ""
+		}
+		return t.SessionID(r)
+	}
 
-	issue := func(w http.ResponseWriter) (string, error) {
-		token, err := signer.generate()
+	issue := func(w http.ResponseWriter, sid string) (string, error) {
+		token, err := signer.generate(sid)
 		if err != nil {
 			return "", err
 		}
@@ -288,19 +337,22 @@ func newTokenChecker(t Token) func(w http.ResponseWriter, r *http.Request) (stri
 			HttpOnly: false, // JavaScript must read it to send it back in the header.
 			SameSite: sameSite,
 		})
+		preventSharedCaching(w.Header())
 
 		return token, nil
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) (string, error) {
+		sid := sessionID(r)
+
 		var cookieToken string
-		if c, err := r.Cookie(cookieName); err == nil && signer.valid(c.Value) {
+		if c, err := r.Cookie(cookieName); err == nil && signer.valid(c.Value, sid) {
 			cookieToken = c.Value
 		}
 
 		if isSafeMethod(r.Method) {
 			if cookieToken == "" {
-				return issue(w)
+				return issue(w, sid)
 			}
 			return cookieToken, nil
 		}
@@ -310,8 +362,8 @@ func newTokenChecker(t Token) func(w http.ResponseWriter, r *http.Request) (stri
 		}
 
 		sent := r.Header.Get(headerName)
-		if sent == "" && isForm(r) {
-			sent = r.PostFormValue(formField)
+		if sent == "" {
+			sent = formValue(w, r, formField, maxFormSize, maxMultipartMemory)
 		}
 		if sent == "" {
 			return "", ErrTokenMissing
@@ -325,11 +377,81 @@ func newTokenChecker(t Token) func(w http.ResponseWriter, r *http.Request) (stri
 	}
 }
 
-type tokenSigner struct {
-	secret []byte
+// formValue reads field from a url-encoded or multipart body, leaving the
+// parsed form on r for the next handler. Url-encoded bodies are capped at
+// maxFormSize; multipart file parts beyond maxMemory spill to temporary files
+// that the middleware removes once the next handler returns.
+func formValue(w http.ResponseWriter, r *http.Request, field string, maxFormSize, maxMemory int64) string {
+	if r.Body == nil {
+		return ""
+	}
+
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	switch mediaType {
+	case "application/x-www-form-urlencoded":
+		r.Body = http.MaxBytesReader(w, r.Body, maxFormSize)
+		if err := r.ParseForm(); err != nil {
+			return ""
+		}
+	case "multipart/form-data":
+		if err := r.ParseMultipartForm(maxMemory); err != nil {
+			return ""
+		}
+	default:
+		return ""
+	}
+
+	return r.PostForm.Get(field)
 }
 
-func (s tokenSigner) generate() (string, error) {
+// preventSharedCaching keeps shared caches from serving a response that sets
+// one client's token to another client. A stricter existing Cache-Control
+// (private or no-store) is kept.
+func preventSharedCaching(h http.Header) {
+	if !hasToken(h.Values("Vary"), "Cookie") && !hasToken(h.Values("Vary"), "*") {
+		h.Add("Vary", "Cookie")
+	}
+
+	directives := h.Values("Cache-Control")
+	if hasToken(directives, "private") || hasToken(directives, "no-store") {
+		return
+	}
+
+	kept := []string{"private"}
+	for _, v := range directives {
+		for d := range strings.SplitSeq(v, ",") {
+			d = strings.TrimSpace(d)
+			name, _, _ := strings.Cut(d, "=")
+			if d == "" || strings.EqualFold(name, "public") || strings.EqualFold(name, "s-maxage") {
+				continue
+			}
+			kept = append(kept, d)
+		}
+	}
+	h.Set("Cache-Control", strings.Join(kept, ", "))
+}
+
+// hasToken reports whether a comma-separated header contains token, ignoring
+// case and directive arguments.
+func hasToken(values []string, token string) bool {
+	for _, v := range values {
+		for d := range strings.SplitSeq(v, ",") {
+			name, _, _ := strings.Cut(strings.TrimSpace(d), "=")
+			if strings.EqualFold(name, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type tokenSigner struct {
+	secret []byte
+	// bound makes the signature cover the session identifier.
+	bound bool
+}
+
+func (s tokenSigner) generate(sid string) (string, error) {
 	b := make([]byte, tokenSize)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate csrf token: %w", err)
@@ -340,17 +462,29 @@ func (s tokenSigner) generate() (string, error) {
 		return token, nil
 	}
 
-	return token + "." + s.sign(token), nil
+	return token + "." + s.sign(token, sid), nil
 }
 
-func (s tokenSigner) sign(token string) string {
+func (s tokenSigner) sign(token, sid string) string {
 	mac := hmac.New(sha256.New, s.secret)
-	mac.Write([]byte(token))
+	if s.bound {
+		// Length-prefixed fields keep (token, sid) pairs unambiguous; the
+		// label and binary lengths keep bound input distinct from the
+		// unbound input, which is the bare base64 token.
+		msg := []byte(sessionBindingLabel)
+		msg = binary.BigEndian.AppendUint64(msg, uint64(len(token)))
+		msg = append(msg, token...)
+		msg = binary.BigEndian.AppendUint64(msg, uint64(len(sid)))
+		msg = append(msg, sid...)
+		mac.Write(msg)
+	} else {
+		mac.Write([]byte(token))
+	}
 
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (s tokenSigner) valid(value string) bool {
+func (s tokenSigner) valid(value, sid string) bool {
 	token, sig, signed := strings.Cut(value, ".")
 	if signed != (len(s.secret) > 0) {
 		return false
@@ -360,7 +494,7 @@ func (s tokenSigner) valid(value string) bool {
 		return false
 	}
 
-	return !signed || hmac.Equal([]byte(sig), []byte(s.sign(token)))
+	return !signed || hmac.Equal([]byte(sig), []byte(s.sign(token, sid)))
 }
 
 // ////////////////////////////////////////////////////////////////////

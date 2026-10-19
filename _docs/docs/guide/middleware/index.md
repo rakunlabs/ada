@@ -58,7 +58,19 @@ api.GET("/users", handler, middleware4)     // Route: 1, 2, 3, 4, handler
 ```
 
 ::: info
-Middleware added with `Use` only affects handlers and groups registered after the call; it does not apply to routes or groups defined earlier.
+Middleware added with `Use` affects routes registered after the call, on that
+Mux and on its groups, including groups created earlier. Routes registered
+before the call keep their chain. 404, 405 and automatic `OPTIONS` responses
+always use the full chain in effect for their URL prefix. See
+[Route Groups](../routing#middleware-order-and-use).
+:::
+
+::: warning
+Don't put rejecting middleware such as auth on a group that shares its prefix
+with public routes (for example `server.Group("", auth)`). That group's
+middleware runs on the 405 and CORS preflight responses of every route under
+the prefix. See
+[Error Responses and Shared Prefixes](../routing#error-responses-and-shared-prefixes).
 :::
 
 ## Runtime Reload

@@ -10,7 +10,14 @@ import (
 	"strings"
 )
 
-// clientIP returns the canonical immediate peer address of r.
+// DefaultIPv6Prefix is the prefix length IPv6 clients are aggregated to when
+// keyed by address. A single subscriber is routinely delegated a whole /64, so
+// keying on the full address would let one client rotate through 2^64
+// identities and both bypass the limit and grow the key space without bound.
+const DefaultIPv6Prefix = 64
+
+// clientKey returns the limiter key for the immediate peer of r: the
+// canonical IPv4 address, or the IPv6 network of length ipv6Prefix.
 //
 // Forwarding headers are never consulted. An attacker who can set
 // X-Forwarded-For would otherwise mint a fresh limiter key per request and
@@ -21,14 +28,41 @@ import (
 // A peer that is not an IP transport, a Unix socket for example, receives a
 // stable bounded identity so it can never grow the limiter's key space without
 // bound.
-func clientIP(r *http.Request) string {
+func clientKey(r *http.Request, ipv6Prefix int) string {
 	raw := strings.TrimSpace(r.RemoteAddr)
 
 	if addr, err := peerAddr(raw); err == nil {
-		return addr.String()
+		return addrKey(addr, ipv6Prefix)
 	}
 
 	return boundedPeer(raw)
+}
+
+// addrKey keys an unmapped address. IPv4 addresses, including 4-in-6 forms
+// already unmapped by the caller, are always kept whole; IPv6 addresses are
+// masked to ipv6Prefix and rendered in CIDR form.
+func addrKey(addr netip.Addr, ipv6Prefix int) string {
+	if addr.Is4() || ipv6Prefix >= 128 {
+		return addr.String()
+	}
+
+	prefix, err := addr.Prefix(ipv6Prefix)
+	if err != nil {
+		return addr.String()
+	}
+
+	return prefix.String()
+}
+
+// maskIPKey applies the IPv6 prefix to a key that is a bare IP address, as
+// returned by proxy-aware resolvers. Any other key is returned unchanged.
+func maskIPKey(key string, ipv6Prefix int) string {
+	addr, err := netip.ParseAddr(key)
+	if err != nil || addr.Zone() != "" {
+		return key
+	}
+
+	return addrKey(addr.Unmap(), ipv6Prefix)
 }
 
 // peerAddr parses RemoteAddr into a canonical address: 4-in-6 forms are

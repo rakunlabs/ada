@@ -97,9 +97,8 @@ func normalizeWildcardPath(path string) string {
 }
 
 // routeTable owns the radix trie and is shared, by pointer, between a Mux and
-// every Group derived from it — Group copies the Mux by value, so the table
-// must be reachable through one indirection for a group's registrations to
-// land in the same tree as its parent's.
+// every Group derived from it, so a group's registrations land in the same
+// tree as its parent's.
 //
 // It keeps two trees:
 //

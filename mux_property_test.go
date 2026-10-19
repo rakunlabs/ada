@@ -477,3 +477,12 @@ func TestMuxMatchesReference(t *testing.T) {
 		}
 	}
 }
+
+func findTypeNode(part string) typeNode {
+	t, _, err := parseRouteSegment(part)
+	if err != nil {
+		panic("ada: invalid route segment " + part + ": " + err.Error())
+	}
+
+	return t
+}

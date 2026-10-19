@@ -269,6 +269,67 @@ v2 := api.Group("/v2")
 v2.GET("/users", getUsersV2)
 ```
 
+### Middleware Order and `Use`
+
+`server.Group("/api", mw)` is shorthand for creating the group and calling
+`Use(mw)` on it. A route takes the middleware chain in effect at the moment it
+is registered, so `Use` applies to routes added after the call, on that Mux and
+on all of its groups. Routes added earlier keep their chain. This is how
+middleware can be layered between registrations:
+
+```go
+server.Use(logging)
+public := server.Group("/public")
+public.GET("/info", info)       // logging
+
+server.Use(auth)
+private := server.Group("/private")
+private.GET("/me", me)          // logging, auth
+public.GET("/late", late)       // logging, auth: registered after Use(auth)
+```
+
+### Error Responses and Shared Prefixes
+
+404, 405 and the automatic `OPTIONS` (CORS preflight) responses do not belong
+to any single route. Ada runs them through the middleware of the group that
+owns the **URL prefix**: the deepest group whose prefix matches the path. That
+is why CORS headers added with `server.Group("/api", cors)` also appear on 404s
+and preflights under `/api`.
+
+A prefix has one owner. When several groups share the same prefix, including
+`Group("")` or `Group("/")` on the root, **the most recently created group owns
+it** and its middleware runs on every 404, 405 and `OPTIONS` response below
+that prefix, including those for routes registered by other groups.
+
+::: warning Don't put rejecting middleware on a shared prefix
+Do not put middleware that rejects requests, such as auth, on a group that
+shares its prefix with public routes:
+
+```go
+server.GET("/public", publicHandler)
+
+private := server.Group("", auth) // same prefix as the root
+private.GET("/private", privateHandler)
+```
+
+| Request           | Result                                  |
+| ----------------- | --------------------------------------- |
+| `GET /public`     | 200, works                              |
+| `POST /public`    | **401** from `auth`, instead of 405     |
+| `OPTIONS /public` | **401** from `auth`; the browser preflight fails |
+| `GET /missing`    | **401** from `auth`, instead of 404     |
+
+Give the protected routes their own prefix, or attach the middleware to the
+routes themselves:
+
+```go
+admin := server.Group("/admin", auth) // only /admin/... is affected
+admin.GET("/users", adminUsers)
+
+server.GET("/private", privateHandler, auth) // route-level: affects only this route
+```
+:::
+
 ## HTTP Methods
 
 Ada supports all standard HTTP methods through dedicated methods:

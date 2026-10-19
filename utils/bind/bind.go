@@ -588,8 +588,9 @@ func bindFormData(values url.Values, rv reflect.Value, fields []fieldInfo, sep s
 			continue
 		}
 
-		// Handle slice fields
-		if field.Kind() == reflect.Slice {
+		// Handle slice fields; slice types such as net.IP that unmarshal
+		// themselves from text are single values.
+		if field.Kind() == reflect.Slice && !implementsTextUnmarshaler(field) {
 			// JSON-valued slices are handled above; separators only describe
 			// ordinary scalar slice elements. RawMessage pointer elements also
 			// preserve each repeated value as a whole.
@@ -689,6 +690,16 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 		return nil
 	}
 
+	// TextUnmarshaler wins over the Kind() switch so named strings/ints keep
+	// their validation and []byte-based types like net.IP parse as one value.
+	if implementsTextUnmarshaler(field) {
+		if err := field.Addr().Interface().(encoding.TextUnmarshaler).UnmarshalText([]byte(value)); err != nil {
+			return fmt.Errorf("failed to unmarshal text for field %s: %w", fieldType.Name, err)
+		}
+
+		return nil
+	}
+
 	switch field.Kind() {
 	case reflect.String:
 		field.SetString(value)
@@ -723,22 +734,17 @@ func setFieldValue(field reflect.Value, fieldType reflect.StructField, value str
 
 		return setFieldValue(field.Elem(), fieldType, value)
 	default:
-		// Handle types that implement encoding.TextUnmarshaler
-		if field.Type().Implements(typeUnmarshaler) || reflect.PointerTo(field.Type()).Implements(typeUnmarshaler) {
-			unmarshaler, _ := field.Addr().Interface().(encoding.TextUnmarshaler)
-			if unmarshaler != nil {
-				if err := unmarshaler.UnmarshalText([]byte(value)); err != nil {
-					return fmt.Errorf("failed to unmarshal text for field %s: %w", fieldType.Name, err)
-				}
-			}
-
-			return nil
-		}
-
 		return fmt.Errorf("unsupported field type: %s", field.Type())
 	}
 
 	return nil
+}
+
+// implementsTextUnmarshaler reports whether the addressable field can be set
+// through encoding.TextUnmarshaler. The pointer method set also covers value
+// receivers.
+func implementsTextUnmarshaler(field reflect.Value) bool {
+	return field.CanAddr() && reflect.PointerTo(field.Type()).Implements(typeUnmarshaler)
 }
 
 // setSliceField sets a slice field from multiple values.

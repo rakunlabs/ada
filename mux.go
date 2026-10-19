@@ -181,6 +181,11 @@ func (m *Mux) rebuildErrorChains() {
 // route. This lets the prefix itself inherit the scope and supports groups whose
 // prefixes already contain wildcard syntax. If multiple Groups share a prefix,
 // the most recent scope configuration applies uniformly below that prefix.
+//
+// That includes a Group sharing its parent's prefix: Group("", cors) claims the
+// root, so 404/405/auto-OPTIONS responses everywhere run its middlewares. This
+// is what lets CORS preflights succeed on its routes; it also means an auth
+// middleware passed to Group("") runs on every unmatched path.
 func (m *Mux) scopeErrors() {
 	prefix := m.prefix
 
@@ -360,6 +365,19 @@ func (m *Mux) HandleWildcard(path string, handler http.Handler, middlewares ...f
 
 // Use appends middlewares to this Mux's chain.
 //
+// A route's chain is composed when the route is registered, so Use applies to
+// routes registered on this Mux and its Groups after the call; routes already
+// registered keep the chain they were built with. This is deliberate and lets
+// setup code layer middleware between registrations:
+//
+//	server.Use(logging)
+//	public := server.Group("/public")   // logging
+//	server.Use(auth)
+//	private := server.Group("/private") // logging, auth
+//
+// The 404/405/auto-OPTIONS responses are not tied to a registration, so they
+// always run the full chain in effect below this Mux's prefix.
+//
 // Unlike route registration, Use is a setup-time operation: it rewrites the
 // middleware slice that route registration reads and the pre-built 404/405
 // chains that ServeHTTP reads, neither of which is synchronised. Call it before
@@ -393,9 +411,13 @@ func (m *Mux) Use(middlewares ...func(next http.Handler) http.Handler) {
 // own keeps winning for that specific behaviour, and only for it — overriding
 // NotFound does not detach the group from a later parent Use.
 //
-// Where two Groups share the same prefix, the most recently created (or most
-// recently reconfigured) one owns the error scope for everything below it, as
-// the prefix node can only point at one Mux.
+// ErrorHandler is inherited the same way: a group without its own uses the
+// nearest ancestor's, including one set after the group was created.
+//
+// Where two Groups share the same prefix — including a Group("") and its
+// parent — the most recently created (or most recently reconfigured) one owns
+// the error scope for everything below it, as the prefix node can only point
+// at one Mux.
 func (m *Mux) Group(pathGroup string, middlewares ...func(next http.Handler) http.Handler) *Mux {
 	prefix := path.Join("/", m.prefix, pathGroup)
 	if prefix == "/" {
@@ -405,11 +427,7 @@ func (m *Mux) Group(pathGroup string, middlewares ...func(next http.Handler) htt
 	group := &Mux{
 		routes: m.routes,
 		parent: m,
-		// ErrorHandler is not part of the error-chain cascade: it is read
-		// through the wrapper a Context handler was registered with, so it
-		// is captured here exactly as it was before.
-		errHandler: m.errHandler,
-		prefix:     prefix,
+		prefix: prefix,
 		// Copied out of the variadic slice so the caller cannot mutate the
 		// group's chain afterwards, and so this group owns storage no
 		// sibling shares.
@@ -467,8 +485,10 @@ func (m *Mux) methodNotAllowedHandler(w http.ResponseWriter, r *http.Request, al
 	m.errorMux(scope).methodNotAllowedChain.ServeHTTP(w, r)
 }
 
-// ErrorHandler sets the handler for 500 Internal Server Error responses.
-//   - If not set, it defaults to a generic error handler.
+// ErrorHandler sets the handler for errors returned by Context handlers.
+//   - If not set, the nearest ancestor's is used, else DefaultErrHandler.
+//   - Groups that have not set their own inherit it, whether they were
+//     created before or after this call.
 //   - Only usable for ada.HandlerFunc handlers.
 func (m *Mux) ErrorHandler(handler func(c *Context, err error)) {
 	m.errHandler = handler

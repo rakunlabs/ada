@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -38,7 +39,11 @@ type Config struct {
 	Username string `cfg:"username"`
 
 	// Password for Redis AUTH.
-	Password string `cfg:"password"`
+	Password string `cfg:"password" log:"-"`
+
+	// Cluster forces Redis Cluster mode for this address. When false, cluster
+	// mode is detected automatically.
+	Cluster bool `cfg:"cluster"`
 
 	// KeyPrefix is prepended to all session keys in Redis.
 	// Defaults to "session_".
@@ -46,7 +51,7 @@ type Config struct {
 
 	// SessionKey is the HMAC key for signing session cookies.
 	// If empty, a random key is generated.
-	SessionKey string `cfg:"session_key"`
+	SessionKey string `cfg:"session_key" log:"-"`
 
 	// TLS configuration for Redis connection.
 	TLS *TLSConfig `cfg:"tls"`
@@ -63,17 +68,16 @@ type TLSConfig struct {
 
 // New creates a new Redis-based session store.
 func New(ctx context.Context, cfg Config, opts sessionstore.Options) (*Store, error) {
+	if strings.TrimSpace(cfg.Address) == "" {
+		return nil, errors.New("redis address is required")
+	}
+
 	tlsConfig, err := newTLSConfig(cfg.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
 
-	client := redis.NewClient(&redis.Options{
-		Addr:      cfg.Address,
-		Username:  cfg.Username,
-		Password:  cfg.Password,
-		TLSConfig: tlsConfig,
-	})
+	client := newClient(ctx, cfg, tlsConfig)
 
 	if err := client.Ping(ctx).Err(); err != nil {
 		_ = client.Close()
@@ -112,6 +116,49 @@ func New(ctx context.Context, cfg Config, opts sessionstore.Options) (*Store, er
 	}, nil
 }
 
+// newClient returns a cluster client when Cluster is set or when the server
+// reports cluster_enabled:1, and a standalone client otherwise.
+func newClient(ctx context.Context, cfg Config, tlsConfig *tls.Config) redis.UniversalClient {
+	if cfg.Cluster {
+		return newClusterClient(cfg, tlsConfig)
+	}
+
+	client := redis.NewClient(&redis.Options{
+		Addr:      cfg.Address,
+		Username:  cfg.Username,
+		Password:  cfg.Password,
+		TLSConfig: tlsConfig,
+	})
+
+	info, err := client.Info(ctx, "cluster").Result()
+	if err != nil || !clusterEnabled(info) {
+		return client
+	}
+
+	_ = client.Close()
+
+	return newClusterClient(cfg, tlsConfig)
+}
+
+func newClusterClient(cfg Config, tlsConfig *tls.Config) redis.UniversalClient {
+	return redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs:     []string{cfg.Address},
+		Username:  cfg.Username,
+		Password:  cfg.Password,
+		TLSConfig: tlsConfig,
+	})
+}
+
+func clusterEnabled(info string) bool {
+	for line := range strings.Lines(info) {
+		if strings.TrimSpace(line) == "cluster_enabled:1" {
+			return true
+		}
+	}
+
+	return false
+}
+
 func newTLSConfig(cfg *TLSConfig) (*tls.Config, error) {
 	if cfg == nil || !cfg.Enabled {
 		return nil, nil
@@ -120,7 +167,8 @@ func newTLSConfig(cfg *TLSConfig) (*tls.Config, error) {
 		return nil, errors.New("both TLS cert and key files must be specified")
 	}
 
-	var tlsOpts []tlscfg.Opt
+	// Custom CAs are added on top of the system pool rather than replacing it.
+	tlsOpts := []tlscfg.Opt{tlscfg.WithSystemCertPool()}
 	if cfg.CAFile != "" {
 		tlsOpts = append(tlsOpts, tlscfg.MaybeWithDiskCA(cfg.CAFile, tlscfg.ForClient))
 	}

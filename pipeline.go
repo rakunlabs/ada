@@ -120,12 +120,13 @@ func NewPipeline() *Pipeline {
 // observe the same pipeline state.
 //
 // Middleware constructors run outside Pipeline locks. A registration requested
-// during construction returns with a complete pass-through binding and is
-// rebound by its queued task before the active caller returns.
+// while another mutation is in flight is enrolled by a queued task; until that
+// task runs, the returned handler serves the currently published snapshot —
+// the chain every existing registration is running — never a bare
+// pass-through, so a route added during an Apply is not briefly unprotected.
 func (p *Pipeline) Middleware() MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		target := &rebuildTarget{next: next}
-		target.binding.Store(&reloadBinding{chain: next})
 
 		p.submit(func() {
 			p.mu.Lock()
@@ -136,6 +137,12 @@ func (p *Pipeline) Middleware() MiddlewareFunc {
 
 			target.binding.Store(target.prepare(snap))
 		})
+
+		// Queued: bind to the published snapshot now. CompareAndSwap keeps a
+		// binding the queued task may already have stored concurrently.
+		if target.binding.Load() == nil {
+			target.binding.CompareAndSwap(nil, target.prepare(p.snapshot.Load()))
+		}
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			binding := target.binding.Load()

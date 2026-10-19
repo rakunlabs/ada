@@ -116,10 +116,11 @@ func (m *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var res matchResult
 
-	// Optimization #6: use r.Method directly. HTTP methods from net/http
-	// are always uppercase per RFC 7230. Route selection resolves it
-	// itself, so a node that matches the path but not the method does not
-	// end the search.
+	// r.Method is used as received. Methods are case-sensitive (RFC 9110
+	// §9.1) and net/http does not uppercase them, so "get" is a distinct
+	// method and answers 405 on a GET route. Route selection resolves the
+	// method itself, so a node that matches the path but not the method
+	// does not end the search.
 	m.matchMethod(root, r.Method, r.URL.Path, &res)
 
 	entry := res.entry
@@ -671,8 +672,8 @@ func bindPathValues(r *http.Request, res *matchResult, entry *methodEntry) {
 
 		// Insert guarantees exactly one paramInfo at this index: "*" for
 		// bare `*` routes and the user-supplied identifier for `{name...}`
-		// routes. The fallback covers the catch-all "" method, which has no
-		// params slice.
+		// routes. The fallback is defensive: it keeps the value reachable
+		// as "*" should an entry ever lack the matching paramInfo.
 		wrote := false
 		for _, p := range params {
 			if p.Index == res.wildcardIndex {

@@ -46,7 +46,7 @@
 //	    SoftThreshold: 3, HardThreshold: 30,
 //	    BackoffBase: time.Second, BackoffMax: 15 * time.Second,
 //	    KeyFunc: func(r *http.Request) []string {
-//	        return []string{"ip:" + clientIP(r)}
+//	        return []string{"ip:" + ratelimit.KeyByIP(r)}
 //	    },
 //	    ShouldCount: func(_ *http.Request, status int) bool {
 //	        return status == http.StatusUnauthorized
@@ -421,10 +421,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 						if cfg.OnReject != nil {
 							cfg.OnReject(r, key, ReasonHardThreshold, retryAfter)
 						}
-						w.Header().Set("Retry-After", formatRetryAfter(retryAfter))
-						w.Header().Set("Content-Type", "application/json")
-						w.WriteHeader(http.StatusTooManyRequests)
-						_, _ = w.Write([]byte(`{"error":"rate_limited","message":"too many attempts; try again later"}`))
+						writeRateLimited(w, retryAfter)
 						return
 					}
 					if count > maxCount {
@@ -502,10 +499,7 @@ func serveAtomic(w http.ResponseWriter, r *http.Request, next http.Handler, cfg 
 		if cfg.OnReject != nil {
 			cfg.OnReject(r, result.key, ReasonHardThreshold, result.retryAfter)
 		}
-		w.Header().Set("Retry-After", formatRetryAfter(result.retryAfter))
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":"rate_limited","message":"too many attempts; try again later"}`))
+		writeRateLimited(w, result.retryAfter)
 		return
 	}
 
@@ -1078,6 +1072,13 @@ func observeStoreError(r *http.Request, cfg Config, err error) {
 	if cfg.OnError != nil {
 		cfg.OnError(r, err)
 	}
+}
+
+func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
+	w.Header().Set("Retry-After", formatRetryAfter(retryAfter))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write([]byte(`{"error":"rate_limited","message":"too many attempts; try again later"}`))
 }
 
 func writeStoreUnavailable(w http.ResponseWriter) {

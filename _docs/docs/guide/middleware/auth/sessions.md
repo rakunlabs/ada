@@ -61,6 +61,10 @@ store, err := redisstore.New(ctx, redisstore.Config{
 authMW.WithSessionStore(store, backend.WithCipher(cipher))
 ```
 
+Redis Cluster is detected automatically through `INFO cluster`; set
+`Cluster: true` to force cluster mode when that command is unavailable. With
+TLS enabled, `CAFile` is trusted in addition to the system certificate pool.
+
 The store must implement `sessionstore.DirectStore` — reading and writing by
 raw session ID, without an `*http.Request`. Both bundled stores do. A store
 that does not is rejected at `Init` rather than silently losing every write.

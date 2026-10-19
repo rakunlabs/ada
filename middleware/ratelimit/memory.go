@@ -170,32 +170,30 @@ func (s *memoryStore) Transaction(ctx context.Context, keys []string, fn func(ma
 			desired[key] = cloneBucket(bucket)
 		}
 	}
-	now := tummy.Now()
-	pinned := 0
-	unrequested := 0
-	for key, element := range s.entries {
-		if _, ok := requested[key]; ok {
-			continue
+	unrequested := len(s.entries)
+	for _, key := range keys {
+		if _, ok := s.entries[key]; ok {
+			unrequested--
 		}
-		unrequested++
-		if !s.reclaimableLocked(element.Value.(*memoryEntry).bucket, now) {
-			pinned++
-		}
-	}
-	if len(desired)+pinned > s.capacity {
-		return s.capacityError(len(desired) + pinned - s.capacity)
 	}
 	neededEvictions := len(desired) + unrequested - s.capacity
-	if neededEvictions < 0 {
-		neededEvictions = 0
-	}
-	evictions := make([]string, 0, neededEvictions)
-	for element := s.lru.Back(); element != nil && len(evictions) < neededEvictions; element = element.Prev() {
-		entry := element.Value.(*memoryEntry)
-		if _, ok := requested[entry.key]; ok || !s.reclaimableLocked(entry.bucket, now) {
-			continue
+	var evictions []string
+	if neededEvictions > 0 {
+		// Walk from the least recently used end and stop as soon as enough
+		// reclaimable buckets are found, so a store below capacity never
+		// scans and one at capacity scans only as far as it must.
+		now := tummy.Now()
+		evictions = make([]string, 0, neededEvictions)
+		for element := s.lru.Back(); element != nil && len(evictions) < neededEvictions; element = element.Prev() {
+			entry := element.Value.(*memoryEntry)
+			if _, ok := requested[entry.key]; ok || !s.reclaimableLocked(entry.bucket, now) {
+				continue
+			}
+			evictions = append(evictions, entry.key)
 		}
-		evictions = append(evictions, entry.key)
+		if len(evictions) < neededEvictions {
+			return s.capacityError(neededEvictions - len(evictions))
+		}
 	}
 
 	// No operation below can fail, and the mutex prevents observers from
@@ -236,6 +234,8 @@ func (s *memoryStore) deleteLocked(key string) {
 	s.lru.Remove(element)
 }
 
+// oldestReclaimableLocked returns the least recently used reclaimable bucket.
+// It stops at the first match, so it only walks past buckets that are pinned.
 func (s *memoryStore) oldestReclaimableLocked(now time.Time) *list.Element {
 	for element := s.lru.Back(); element != nil; element = element.Prev() {
 		if s.reclaimableLocked(element.Value.(*memoryEntry).bucket, now) {

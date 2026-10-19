@@ -89,6 +89,8 @@ mforwardauth.WithAddress("http://auth-service:9000/verify")
 
 List of headers to copy from the auth service response onto the original request before forwarding to the backend. This is how the auth service can pass identity information (like username, roles) to downstream handlers.
 
+Client-sent values of these headers are always removed from the request, even when the auth response does not include them, so a client cannot spoof `X-Forwarded-User` by sending it itself.
+
 - **Type:** `[]string`
 - **Default:** `[]` (no headers copied)
 
@@ -98,7 +100,7 @@ mforwardauth.WithAuthResponseHeaders("X-Forwarded-User", "X-Auth-Token", "X-Auth
 
 ### AuthResponseHeadersRegex
 
-A regex pattern to match auth response headers to copy onto the original request. Useful when the auth service returns dynamic header names.
+A regex pattern to match auth response headers to copy onto the original request. Useful when the auth service returns dynamic header names. Every client-sent request header whose name matches the pattern is removed before the matching auth response headers are copied.
 
 - **Type:** `string`
 - **Default:** `""` (disabled)
@@ -374,7 +376,7 @@ Reading past the cap returns `*http.MaxBytesError` from `resp.Body`; extractors 
 
 ### OnError
 
-Callback invoked when the call to the auth service fails (network error, timeout, connection refused). Purely observational — the response to the client is still `502 Bad Gateway`. Use it to plug in a logger or metric.
+Callback invoked when the call to the auth service fails (network error, timeout, connection refused). Purely observational — the response to the client is still `502 Bad Gateway`, with a generic body that does not include the error details. Use it to plug in a logger or metric.
 
 - **Type:** `func(err error, r *http.Request)`
 - **Default:** `nil`

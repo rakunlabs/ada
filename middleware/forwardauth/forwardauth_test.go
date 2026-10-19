@@ -582,6 +582,77 @@ func TestDeniedAuthResponse_StripsHopByHopHeaders(t *testing.T) {
 
 // --- Behavioural sanity: redirect only fires on GET/HEAD --------------------
 
+func TestAuthResponseHeaders_StripsClientValueWhenAuthOmits(t *testing.T) {
+	srv, _ := newAuthServer(t, http.StatusOK, nil, "")
+
+	mw := forwardauth.Middleware(
+		forwardauth.WithAddress(srv.URL),
+		forwardauth.WithAuthResponseHeaders("X-Forwarded-User"),
+	)
+
+	backend, seen := recordingHandler()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-User", "admin")
+
+	mw(backend).ServeHTTP(httptest.NewRecorder(), req)
+
+	if v := seen.Get("X-Forwarded-User"); v != "" {
+		t.Errorf("spoofed X-Forwarded-User reached backend = %q", v)
+	}
+}
+
+func TestAuthResponseHeadersRegex_StripsClientValues(t *testing.T) {
+	respHeaders := http.Header{}
+	respHeaders.Add("X-Auth-User", "alice")
+
+	srv, _ := newAuthServer(t, http.StatusOK, respHeaders, "")
+
+	mw := forwardauth.Middleware(
+		forwardauth.WithAddress(srv.URL),
+		forwardauth.WithAuthResponseHeadersRegex("^X-Auth-.*"),
+	)
+
+	backend, seen := recordingHandler()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Auth-User", "mallory")
+	req.Header.Set("X-Auth-Role", "admin")
+	req.Header.Set("X-Other", "kept")
+
+	mw(backend).ServeHTTP(httptest.NewRecorder(), req)
+
+	if v := seen.Values("X-Auth-User"); len(v) != 1 || v[0] != "alice" {
+		t.Errorf("X-Auth-User = %q, want [alice]", v)
+	}
+
+	if v := seen.Get("X-Auth-Role"); v != "" {
+		t.Errorf("spoofed X-Auth-Role reached backend = %q", v)
+	}
+
+	if v := seen.Get("X-Other"); v != "kept" {
+		t.Errorf("X-Other = %q, want kept", v)
+	}
+}
+
+func TestBadGateway_DoesNotLeakErrorDetails(t *testing.T) {
+	mw := forwardauth.Middleware(
+		forwardauth.WithAddress("http://internal-auth.secret:9000/verify"),
+		forwardauth.WithTransport(&errTransport{err: errors.New("dial internal-auth.secret")}),
+	)
+
+	rec := httptest.NewRecorder()
+	mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+
+	if body := rec.Body.String(); strings.Contains(body, "internal-auth") || strings.Contains(body, "forwardauth") {
+		t.Errorf("body leaks error details: %q", body)
+	}
+}
+
+// --- Behavioural sanity: redirect only fires on GET/HEAD --------------------
+
 func TestRedirect_NotAppliedOnPOST(t *testing.T) {
 	srv, _ := newAuthServer(t, http.StatusUnauthorized, nil, "denied")
 

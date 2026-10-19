@@ -109,9 +109,9 @@ func New(cfg *Config) (*Folder, error) {
 		cfg = &Config{}
 	}
 	snapshot := *cfg
-	snapshot.SPAIndexRegex = cloneRegexPathStores(cfg.SPAIndexRegex)
-	snapshot.FilePathRegex = cloneRegexPathStores(cfg.FilePathRegex)
-	snapshot.CacheRegex = cloneRegexCacheStores(cfg.CacheRegex)
+	snapshot.SPAIndexRegex = cloneRegexStores(cfg.SPAIndexRegex)
+	snapshot.FilePathRegex = cloneRegexStores(cfg.FilePathRegex)
+	snapshot.CacheRegex = cloneRegexStores(cfg.CacheRegex)
 	cfg = &snapshot
 
 	if cfg.IndexName == "" {
@@ -124,40 +124,14 @@ func New(cfg *Config) (*Folder, error) {
 		cfg.SPAIndex = cfg.IndexName
 	}
 
-	for i := range cfg.SPAIndexRegex {
-		if cfg.SPAIndexRegex[i] == nil {
-			return nil, fmt.Errorf("spa index regex at index %d is nil", i)
-		}
-		rgx, err := regexp.Compile(cfg.SPAIndexRegex[i].Regex)
-		if err != nil {
-			return nil, fmt.Errorf("failed to compile spa index regex %q: %w", cfg.SPAIndexRegex[i].Regex, err)
-		}
-
-		cfg.SPAIndexRegex[i].rgx = rgx
+	if err := compileRegexStores("spa index", cfg.SPAIndexRegex); err != nil {
+		return nil, err
 	}
-
-	for i := range cfg.FilePathRegex {
-		if cfg.FilePathRegex[i] == nil {
-			return nil, fmt.Errorf("file path regex at index %d is nil", i)
-		}
-		rgx, err := regexp.Compile(cfg.FilePathRegex[i].Regex)
-		if err != nil {
-			return nil, fmt.Errorf("failed to compile file path regex %q: %w", cfg.FilePathRegex[i].Regex, err)
-		}
-
-		cfg.FilePathRegex[i].rgx = rgx
+	if err := compileRegexStores("file path", cfg.FilePathRegex); err != nil {
+		return nil, err
 	}
-
-	for i := range cfg.CacheRegex {
-		if cfg.CacheRegex[i] == nil {
-			return nil, fmt.Errorf("cache regex at index %d is nil", i)
-		}
-		rgx, err := regexp.Compile(cfg.CacheRegex[i].Regex)
-		if err != nil {
-			return nil, fmt.Errorf("failed to compile cache regex %q: %w", cfg.CacheRegex[i].Regex, err)
-		}
-
-		cfg.CacheRegex[i].rgx = rgx
+	if err := compileRegexStores("cache", cfg.CacheRegex); err != nil {
+		return nil, err
 	}
 
 	switch cfg.ETag {
@@ -185,12 +159,24 @@ func New(cfg *Config) (*Folder, error) {
 	}, nil
 }
 
-func cloneRegexPathStores(stores []*RegexPathStore) []*RegexPathStore {
-	cloned := make([]*RegexPathStore, len(stores))
+type regexStore[T any] interface {
+	*T
+	pattern() string
+	setRegexp(rgx *regexp.Regexp)
+}
+
+func (s *RegexPathStore) pattern() string               { return s.Regex }
+func (s *RegexPathStore) setRegexp(rgx *regexp.Regexp)  { s.rgx = rgx }
+func (s *RegexCacheStore) pattern() string              { return s.Regex }
+func (s *RegexCacheStore) setRegexp(rgx *regexp.Regexp) { s.rgx = rgx }
+
+// cloneRegexStores copies each store and drops its compiled regexp.
+func cloneRegexStores[T any, P regexStore[T]](stores []P) []P {
+	cloned := make([]P, len(stores))
 	for i, store := range stores {
 		if store != nil {
 			copy := *store
-			copy.rgx = nil
+			P(&copy).setRegexp(nil)
 			cloned[i] = &copy
 		}
 	}
@@ -198,17 +184,20 @@ func cloneRegexPathStores(stores []*RegexPathStore) []*RegexPathStore {
 	return cloned
 }
 
-func cloneRegexCacheStores(stores []*RegexCacheStore) []*RegexCacheStore {
-	cloned := make([]*RegexCacheStore, len(stores))
+func compileRegexStores[T any, P regexStore[T]](kind string, stores []P) error {
 	for i, store := range stores {
-		if store != nil {
-			copy := *store
-			copy.rgx = nil
-			cloned[i] = &copy
+		if store == nil {
+			return fmt.Errorf("%s regex at index %d is nil", kind, i)
 		}
+		rgx, err := regexp.Compile(store.pattern())
+		if err != nil {
+			return fmt.Errorf("failed to compile %s regex %q: %w", kind, store.pattern(), err)
+		}
+
+		store.setRegexp(rgx)
 	}
 
-	return cloned
+	return nil
 }
 
 func (f *Folder) SetCustomContent(customContent func(r *http.Request, name string, content io.ReadSeeker) io.ReadSeeker) {
@@ -260,8 +249,8 @@ func (f *Folder) serveFile(w http.ResponseWriter, r *http.Request, uPath, cPath 
 	// redirect .../index.html to .../
 	// can't use Redirect() because that would make the path absolute,
 	// which would be a problem running under StripPrefix
-	if f.cfg.StripIndexName && strings.HasSuffix(uPath, f.cfg.IndexName) {
-		return localRedirect(w, r, strings.TrimSuffix(uPath, f.cfg.IndexName))
+	if f.cfg.StripIndexName && strings.HasSuffix(uPath, "/"+f.cfg.IndexName) {
+		return localRedirect(w, r, "./"+strings.Repeat("../", strings.Count(f.cfg.IndexName, "/")))
 	}
 
 	file, err := f.fs.Open(cPath)

@@ -129,7 +129,8 @@ This threshold is now fully reachable. It was previously unreachable: the old
 
 ## Supported Struct Tags
 
-Own struct types can implement the `encoding.TextUnmarshaler` interface for custom parsing logic.
+Own types can implement the `encoding.TextUnmarshaler` interface for custom
+parsing logic; see [Custom Types](#custom-types).
 
 | Tag                    | Description                     | Example                    |
 | ---------------------- | ------------------------------- | -------------------------- |
@@ -170,6 +171,70 @@ type Request struct {
 - **Nested Structs**: Full support for nested struct binding
 - **JSON RawMessage**: `json.RawMessage`, `[]json.RawMessage` for raw JSON preservation
 - **Maps**: `map[string]any` and other map types (auto JSON unmarshal from form/query)
+- **Custom types**: anything implementing `encoding.TextUnmarshaler`, e.g.
+  `net.IP`, `[]net.IP`, `slog.Level`; see [Custom Types](#custom-types)
+
+## Custom Types
+
+For query, form, header and path values, a field whose type implements
+`encoding.TextUnmarshaler` is always parsed with its own `UnmarshalText`. This
+holds even when the underlying type is `string`, `int` or `[]byte`. The type
+alone decides what it accepts, and an `UnmarshalText` error fails the bind.
+There is no fallback to the plain `string`/`int` parsing.
+
+```go
+type Page int
+
+func (p *Page) UnmarshalText(b []byte) error {
+    n, err := strconv.Atoi(string(b))
+    if err != nil || n < 1 || n > 100 {
+        return fmt.Errorf("page must be 1..100, got %q", b)
+    }
+    *p = Page(n)
+    return nil
+}
+
+type Status string
+
+func (s *Status) UnmarshalText(b []byte) error {
+    switch v := Status(b); v {
+    case "active", "passive":
+        *s = v
+        return nil
+    }
+    return fmt.Errorf("invalid status %q", b)
+}
+
+type ListRequest struct {
+    Page   Page       `query:"page"`
+    Status Status     `query:"status"`
+    Level  slog.Level `query:"level"`
+    Client net.IP     `header:"X-Client-IP"`
+}
+```
+
+| Request                    | Result                                       |
+| -------------------------- | -------------------------------------------- |
+| `?page=5`                  | `Page = 5`                                   |
+| `?page=5000`, `?page=-1`   | error: the range check in `UnmarshalText` runs |
+| `?status=hacker`           | error: not an allowed value                  |
+| `?level=WARN`, `?level=WARN+2` | `slog.Level` parses its own names        |
+| `?level=4`                 | error: `slog.Level` does not accept numbers  |
+| `X-Client-IP: 10.0.0.1`    | `net.IP` parsed as one address               |
+
+Slices work element by element: in `[]T`, each value goes through `T`'s
+`UnmarshalText`. The exception is a slice type that implements it itself, such
+as `net.IP`; it takes the whole value at once.
+
+::: warning Changed in v0.5.4
+Before v0.5.4, `UnmarshalText` was consulted only for types whose underlying
+kind was not a plain `string`, number or slice. Named `string`/`int` types were
+set directly, so their validation never ran: `?page=5000` was accepted, and
+`slog.Level` took numbers (`?level=4`) but not names. `net.IP` failed to bind.
+
+If clients send values your type's `UnmarshalText` rejects, accept that form in
+`UnmarshalText`, or bind into the plain underlying type.
+:::
 
 ## Query Value Separator
 

@@ -449,15 +449,6 @@ func (n *node) insertNodeTypeParam(paramName string) *node {
 	return n.TypeParam.Children
 }
 
-func findTypeNode(part string) typeNode {
-	t, _, err := parseRouteSegment(part)
-	if err != nil {
-		panic("ada: invalid route segment " + part + ": " + err.Error())
-	}
-
-	return t
-}
-
 // parseRouteSegment is the single grammar for registration-time validation,
 // trie insertion and test/reference matchers. Braces are route syntax only
 // when they wrap the entire segment; accepting a stray brace as a parameter
@@ -504,22 +495,14 @@ func parseRouteSegment(part string) (typeNode, string, error) {
 	return typeNodeParam, name, nil
 }
 
-// isGreedyParam reports whether `seg` is a `{name...}` token. The
-// inner name must be non-empty so we don't accidentally accept the
-// degenerate `{...}` form, which would be ambiguous with a regular
-// `{}` param missing its name. Greedy params are also the named
-// counterpart of the trailing `*` wildcard: they match a non-empty
-// remaining path, including embedded slashes, and they can only
-// appear as the last segment of a route (enforced in Insert).
+// isGreedyParam reports whether `seg` is a valid `{name...}` token: the named
+// counterpart of the trailing `*` wildcard, matching a non-empty remaining path
+// including embedded slashes. It defers to parseRouteSegment so it can never
+// accept a form the trie would reject.
 func isGreedyParam(seg string) bool {
-	if len(seg) < 6 { // "{x...}" is the shortest valid form
-		return false
-	}
-	if seg[0] != '{' || !strings.HasSuffix(seg, "...}") {
-		return false
-	}
-	// Name between '{' and '...}' must be non-empty.
-	return len(seg) > 5
+	t, _, err := parseRouteSegment(seg)
+
+	return err == nil && t == typeNodeWildcardParam
 }
 
 // buildAllowHeader returns a sorted, comma-separated list of HTTP methods

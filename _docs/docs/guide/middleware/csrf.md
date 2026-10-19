@@ -54,9 +54,12 @@ Bypass patterns only match directly: a path that `ServeMux` would redirect (clea
 |---|---|---|---|
 | `Enabled` | `bool` | `false` | Turn the token check on |
 | `Secret` | `string` | empty | HMAC-SHA256 key that signs the token. Set it in production |
+| `SessionID` | `func(*http.Request) string` | `nil` | Returns the session or user identifier the token is bound to. Requires `Secret` |
 | `CookieName` | `string` | `csrf_token` | Cookie carrying the token |
 | `HeaderName` | `string` | `X-CSRF-Token` | Header the client echoes the token in |
 | `FormField` | `string` | `csrf_token` | Form field checked for url-encoded and multipart posts when the header is empty |
+| `MaxFormSize` | `int64` | `1 << 20` | Body limit when reading `FormField` from url-encoded posts. Larger bodies are rejected |
+| `MaxMultipartMemory` | `int64` | `1 << 20` | Memory limit when parsing multipart posts. Larger file parts go to temporary files |
 | `CookiePath` | `string` | `/` | Cookie path |
 | `CookieDomain` | `string` | empty | Cookie domain |
 | `CookieMaxAge` | `time.Duration` | `0` (session) | Cookie lifetime |
@@ -65,12 +68,37 @@ Bypass patterns only match directly: a path that `ServeMux` would redirect (clea
 
 The cookie is not `HttpOnly`, because JavaScript has to read it and send it back in the header.
 
-::: tip Signing and cookie prefixes
-Without `Secret`, a sibling subdomain that can set cookies for your domain could plant a token of its own. Set `Secret`, or name the cookie `__Host-csrf_token` (secure, no domain, path `/`), or both.
+When a response issues a new token cookie, the middleware also adds `Vary: Cookie` and `Cache-Control: private` (removing `public` and `s-maxage`), so shared caches do not hand one user's token to another. An existing `private` or `no-store` is left as it is.
+
+::: tip Signing, session binding and cookie prefixes
+`Secret` stops clients from inventing tokens, but on its own a signed token is not tied to a user: a token an attacker got from your site is valid in any browser. A sibling subdomain that can set cookies for your domain could plant it in a victim's browser together with the matching value it already knows.
+
+Set `SessionID` to bind the signature to the session, and name the cookie `__Host-csrf_token` (secure, no domain, path `/`) so subdomains cannot overwrite it:
+
+```go
+mcsrf.Token{
+    Enabled:    true,
+    Secret:     os.Getenv("CSRF_SECRET"),
+    CookieName: "__Host-csrf_token",
+    SessionID: func(r *http.Request) string {
+        c, err := r.Cookie("session")
+        if err != nil {
+            return ""
+        }
+        return c.Value
+    },
+}
+```
+
+With `SessionID`, a token issued before login is bound to the empty identifier and stops being valid once the user logs in (or the session rotates or ends). The next safe request issues a fresh token, so make the client read the token again after login, for example by redirecting to a page after the login `POST`.
+:::
+
+::: info Form posts
+When the header is empty, the middleware reads `FormField` from the body before the next handler runs, and the parsed form stays available in `r.Form`, `r.PostForm` and `r.MultipartForm`. Url-encoded bodies above `MaxFormSize` are rejected. Multipart forms, including HTML file uploads, are parsed with `MaxMultipartMemory`; file parts above it go to temporary files, which are removed after the next handler returns. To avoid parsing large uploads before authentication, send the token in the header instead.
 :::
 
 ::: warning Invalid configuration panics
-Malformed trusted origins, invalid or conflicting bypass patterns, an unknown `CookieSameSite`, `none` combined with `CookieInsecure`, a negative `CookieMaxAge`, and `__Host-` or `__Secure-` names whose attributes break the prefix rules all panic at construction.
+Malformed trusted origins, invalid or conflicting bypass patterns, an unknown `CookieSameSite`, `none` combined with `CookieInsecure`, a negative `CookieMaxAge`, `MaxFormSize` or `MaxMultipartMemory`, `SessionID` without `Secret`, and `__Host-` or `__Secure-` names whose attributes break the prefix rules all panic at construction.
 :::
 
 ## How the Token Works

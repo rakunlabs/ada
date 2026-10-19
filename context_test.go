@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -689,3 +690,97 @@ func TestBindForwardsOptions(t *testing.T) {
 		}
 	})
 }
+
+// TestGroupInheritsLaterErrorHandler pins that ErrorHandler is resolved at
+// error time. Group used to copy the parent's handler when it was created, so
+// an ErrorHandler set on the parent afterwards never reached the group.
+func TestGroupInheritsLaterErrorHandler(t *testing.T) {
+	mux := NewMux()
+	api := mux.Group("/api")
+	v1 := api.Group("/v1")
+	v1.GET("/fail", func(c *Context) error { return errors.New("boom") })
+
+	mux.ErrorHandler(func(c *Context, err error) {
+		c.SetStatus(http.StatusTeapot)
+		_ = c.SendString("root")
+	})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/fail", nil))
+	if rec.Code != http.StatusTeapot || rec.Body.String() != "root" {
+		t.Fatalf("status = %d body = %q, want inherited root handler", rec.Code, rec.Body.String())
+	}
+
+	api.ErrorHandler(func(c *Context, err error) {
+		c.SetStatus(http.StatusConflict)
+		_ = c.SendString("api")
+	})
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/fail", nil))
+	if rec.Code != http.StatusConflict || rec.Body.String() != "api" {
+		t.Fatalf("status = %d body = %q, want nearest ancestor handler", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSendZipRejectsDuplicateCleanedNames(t *testing.T) {
+	c := NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	err := c.SendZip("archive.zip", map[string]io.Reader{
+		"a/../b.txt": strings.NewReader("x"),
+		"b.txt":      strings.NewReader("y"),
+	})
+	if err == nil {
+		t.Fatal("SendZip accepted two entries resolving to the same name")
+	}
+	if c.Committed() {
+		t.Fatal("Context committed after rejecting duplicate names")
+	}
+}
+
+// TestSendZipStreams checks the archive reaches the client before every
+// reader has been drained, i.e. it is not assembled in memory first.
+func TestSendZipStreams(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c := NewContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	var bodyLenAtSecond int
+	files := map[string]io.Reader{
+		"a.txt": io.LimitReader(rand.NewChaCha8([32]byte{}), 256<<10),
+		"b.txt": readerFunc(func(p []byte) (int, error) {
+			if bodyLenAtSecond == 0 {
+				bodyLenAtSecond = rec.Body.Len()
+			}
+
+			return 0, io.EOF
+		}),
+	}
+	if err := c.SendZip("archive.zip", files); err != nil {
+		t.Fatalf("SendZip: %v", err)
+	}
+	if bodyLenAtSecond == 0 {
+		t.Fatal("nothing was written to the response before the second entry was read")
+	}
+
+	body := rec.Body.Bytes()
+	if _, err := zip.NewReader(bytes.NewReader(body), int64(len(body))); err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	if got := rec.Header().Get(HeaderContentDisposition); !strings.Contains(got, "archive.zip") {
+		t.Fatalf("Content-Disposition = %q", got)
+	}
+}
+
+func TestSendZipEmptyArchive(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c := NewContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if err := c.SendZip("", nil); err != nil {
+		t.Fatalf("SendZip: %v", err)
+	}
+	if !c.Committed() || !strings.Contains(rec.Header().Get(HeaderContentDisposition), "files.zip") {
+		t.Fatalf("empty archive not sent: committed=%v headers=%v", c.Committed(), rec.Header())
+	}
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }

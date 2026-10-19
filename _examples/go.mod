@@ -7,20 +7,20 @@ require (
 	connectrpc.com/grpchealth v1.5.0
 	connectrpc.com/grpcreflect v1.3.0
 	connectrpc.com/otelconnect v0.9.0
-	github.com/rakunlabs/ada v0.5.3
-	github.com/rakunlabs/ada/handler/folder v0.5.3
-	github.com/rakunlabs/ada/handler/swagger v0.5.3
-	github.com/rakunlabs/ada/middleware/auth v0.5.3
-	github.com/rakunlabs/ada/middleware/cors v0.5.3
-	github.com/rakunlabs/ada/middleware/encoding v0.5.3
-	github.com/rakunlabs/ada/middleware/log v0.5.3
-	github.com/rakunlabs/ada/middleware/recover v0.5.3
-	github.com/rakunlabs/ada/middleware/requestid v0.5.3
-	github.com/rakunlabs/ada/middleware/server v0.5.3
-	github.com/rakunlabs/ada/middleware/telemetry v0.5.3
-	github.com/rakunlabs/into v0.5.3
+	github.com/rakunlabs/ada v0.5.4
+	github.com/rakunlabs/ada/handler/folder v0.5.4
+	github.com/rakunlabs/ada/handler/swagger v0.5.4
+	github.com/rakunlabs/ada/middleware/auth v0.5.4
+	github.com/rakunlabs/ada/middleware/cors v0.5.4
+	github.com/rakunlabs/ada/middleware/encoding v0.5.4
+	github.com/rakunlabs/ada/middleware/log v0.5.4
+	github.com/rakunlabs/ada/middleware/recover v0.5.4
+	github.com/rakunlabs/ada/middleware/requestid v0.5.4
+	github.com/rakunlabs/ada/middleware/server v0.5.4
+	github.com/rakunlabs/ada/middleware/telemetry v0.5.4
+	github.com/rakunlabs/into v0.6.0
 	github.com/rakunlabs/logi v0.4.6
-	github.com/rakunlabs/tell v0.1.5
+	github.com/rakunlabs/tell v0.1.6
 	github.com/swaggo/swag v1.16.6
 	golang.org/x/crypto v0.55.0
 	google.golang.org/protobuf v1.36.12

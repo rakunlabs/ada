@@ -1554,3 +1554,86 @@ func TestInvalidConfigPanics(t *testing.T) {
 		})
 	}
 }
+
+// At capacity, a reclaimable bucket behind live ones in LRU order must still
+// be found, and only as many buckets as needed are evicted.
+func TestMemoryStoreTransactionEvictsReclaimableBehindLiveBuckets(t *testing.T) {
+	useTummy(t)
+	store, atomicStore := newAtomicStore(t, 3)
+	cfg := defaultConfig(store)
+	cfg.Window = time.Minute
+	_ = ratelimit.Middleware(cfg)
+
+	for _, key := range []string{"stale-a", "stale-b"} {
+		if err := store.Set(t.Context(), key, &ratelimit.Bucket{Attempts: []time.Time{tummy.Now()}}); err != nil {
+			t.Fatalf("seed %q: %v", key, err)
+		}
+	}
+	tummy.AddDuration(cfg.Window + time.Nanosecond)
+	if err := store.Set(t.Context(), "live", &ratelimit.Bucket{Attempts: []time.Time{tummy.Now()}}); err != nil {
+		t.Fatalf("seed live: %v", err)
+	}
+	// Make the live bucket the least recently used.
+	for _, key := range []string{"stale-b", "stale-a"} {
+		if _, _, err := store.Get(t.Context(), key); err != nil {
+			t.Fatalf("touch %q: %v", key, err)
+		}
+	}
+
+	if err := atomicStore.Transaction(t.Context(), []string{"new"}, func(buckets map[string]*ratelimit.Bucket) error {
+		buckets["new"] = &ratelimit.Bucket{Attempts: []time.Time{tummy.Now()}}
+		return nil
+	}); err != nil {
+		t.Fatalf("insert at capacity: %v", err)
+	}
+
+	for key, want := range map[string]bool{"live": true, "stale-b": false, "stale-a": true, "new": true} {
+		if _, ok, err := store.Get(t.Context(), key); err != nil || ok != want {
+			t.Fatalf("bucket %q present = %v (err %v), want %v", key, ok, err, want)
+		}
+	}
+}
+
+// Updating or deleting requested keys never needs eviction, even when every
+// other bucket is live.
+func TestMemoryStoreTransactionOnExistingKeysAtCapacity(t *testing.T) {
+	useTummy(t)
+	store, atomicStore := newAtomicStore(t, 2)
+	_ = ratelimit.Middleware(defaultConfig(store))
+	now := tummy.Now()
+	for _, key := range []string{"a", "b"} {
+		if err := store.Set(t.Context(), key, &ratelimit.Bucket{Attempts: []time.Time{now}}); err != nil {
+			t.Fatalf("seed %q: %v", key, err)
+		}
+	}
+
+	if err := atomicStore.Transaction(t.Context(), []string{"a"}, func(buckets map[string]*ratelimit.Bucket) error {
+		buckets["a"].Attempts = append(buckets["a"].Attempts, now)
+		return nil
+	}); err != nil {
+		t.Fatalf("update existing key at capacity: %v", err)
+	}
+
+	err := atomicStore.Transaction(t.Context(), []string{"a", "c"}, func(buckets map[string]*ratelimit.Bucket) error {
+		buckets["a"] = nil
+		buckets["c"] = &ratelimit.Bucket{Attempts: []time.Time{now}}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("replace key at capacity: %v", err)
+	}
+	for key, want := range map[string]bool{"a": false, "b": true, "c": true} {
+		if _, ok, err := store.Get(t.Context(), key); err != nil || ok != want {
+			t.Fatalf("bucket %q present = %v (err %v), want %v", key, ok, err, want)
+		}
+	}
+
+	err = atomicStore.Transaction(t.Context(), []string{"d", "e"}, func(buckets map[string]*ratelimit.Bucket) error {
+		buckets["d"] = &ratelimit.Bucket{Attempts: []time.Time{now}}
+		buckets["e"] = &ratelimit.Bucket{Attempts: []time.Time{now}}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "2 more bucket(s) needed") {
+		t.Fatalf("capacity error = %v, want shortfall of 2", err)
+	}
+}

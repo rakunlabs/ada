@@ -249,3 +249,46 @@ func TestRegexRuleOrdering(t *testing.T) {
 		}
 	})
 }
+
+func TestStripIndexNameMatchesWholeBaseName(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "docs", "sub"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"docs/myindex.html", "docs/index.html", "docs/sub/page.html"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	tests := []struct {
+		indexName string
+		path      string
+		code      int
+		location  string
+	}{
+		{indexName: "", path: "/docs/myindex.html", code: http.StatusOK},
+		{indexName: "", path: "/docs/index.html", code: http.StatusMovedPermanently, location: "./"},
+		{indexName: "", path: "/docs/index.html?x=1", code: http.StatusMovedPermanently, location: "./?x=1"},
+		{indexName: "", path: "/index.html", code: http.StatusMovedPermanently, location: "./"},
+		{indexName: "sub/page.html", path: "/docs/sub/page.html", code: http.StatusMovedPermanently, location: "./../"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			handler, err := New(&Config{Path: dir, StripIndexName: true, IndexName: tt.indexName})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+			if rec.Code != tt.code {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.code)
+			}
+			if got := rec.Header().Get("Location"); got != tt.location {
+				t.Fatalf("Location = %q, want %q", got, tt.location)
+			}
+		})
+	}
+}

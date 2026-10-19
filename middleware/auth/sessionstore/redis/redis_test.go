@@ -149,6 +149,56 @@ func TestNewRejectsIncompleteKeyPairBeforeConnecting(t *testing.T) {
 	}
 }
 
+func TestNewRequiresAddress(t *testing.T) {
+	_, err := New(context.Background(), Config{Address: "  "}, sessionstore.Options{})
+	if err == nil || !strings.Contains(err.Error(), "redis address is required") {
+		t.Fatalf("New() error = %v, want address required error", err)
+	}
+}
+
+func TestNewConnectsToStandaloneServer(t *testing.T) {
+	server := miniredis.RunT(t)
+
+	store, err := New(context.Background(), Config{Address: server.Addr()}, sessionstore.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if _, ok := store.client.(*goredis.Client); !ok {
+		t.Fatalf("client = %T, want *redis.Client", store.client)
+	}
+}
+
+func TestClusterCanBeForcedWithOneAddress(t *testing.T) {
+	client := newClient(context.Background(), Config{Address: "redis:6379", Cluster: true}, nil)
+	t.Cleanup(func() { _ = client.Close() })
+
+	if _, ok := client.(*goredis.ClusterClient); !ok {
+		t.Fatalf("client = %T, want *redis.ClusterClient", client)
+	}
+}
+
+func TestClusterEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		info string
+		want bool
+	}{
+		{name: "cluster", info: "# Cluster\r\ncluster_enabled:1\r\n", want: true},
+		{name: "standalone", info: "# Cluster\r\ncluster_enabled:0\r\n"},
+		{name: "empty"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clusterEnabled(tt.info); got != tt.want {
+				t.Fatalf("clusterEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetClonesOptionsPerSession(t *testing.T) {
 	store, _ := newTestStore(t)
 	r := httptest.NewRequest(http.MethodGet, "/", nil)

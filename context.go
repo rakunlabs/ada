@@ -2,7 +2,6 @@ package ada
 
 import (
 	"archive/zip"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,11 +42,16 @@ func (m *Mux) WrapUnpooled(handler HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// handleContextError runs the nearest ErrorHandler: this Mux's own, else the
+// closest ancestor's. Resolving it per error rather than copying it at Group
+// creation lets a group pick up an ErrorHandler its parent sets later.
 func (m *Mux) handleContextError(c *Context, err error) {
-	if m.errHandler != nil {
-		m.errHandler(c, err)
+	for scope := m; scope != nil; scope = scope.parent {
+		if scope.errHandler != nil {
+			scope.errHandler(c, err)
 
-		return
+			return
+		}
 	}
 
 	defaultErrHandler(c, err)
@@ -228,7 +232,8 @@ func (c *Context) Bind(obj any, opts ...bind.Option) error {
 	return bind.Bind(c.Request, obj, opts...)
 }
 
-// SetHeader sets a response header.
+// SetHeader sets response headers from alternating key/value arguments.
+// A trailing key without a value is ignored.
 //
 //	SetHeader("Content-Type", "application/json", "X-Custom-Header", "value")
 func (c *Context) SetHeader(kv ...string) *Context {
@@ -379,6 +384,12 @@ func (c *Context) SendFile(name string, reader io.Reader) error {
 //     made the byte stream depend on Go's randomised map order, which breaks
 //     checksums, caching and byte-for-byte comparisons between two responses
 //     built from identical data.
+//   - The archive is streamed to the client rather than built in memory.
+//     Entry names are validated, and duplicates after cleaning rejected,
+//     before anything is written. The response is committed lazily on the
+//     first byte that reaches the client, so a reader that fails early
+//     still leaves the Context uncommitted for the error handler; a failure
+//     after that point truncates the archive and is returned to the caller.
 func (c *Context) SendZip(name string, files map[string]io.Reader) error {
 	if c.Committed() {
 		return ErrAlreadyCommitted
@@ -388,48 +399,65 @@ func (c *Context) SendZip(name string, files map[string]io.Reader) error {
 		name = "files.zip"
 	}
 
-	// Multiple files: create zip
-	buf := &bytes.Buffer{}
-	zipWriter := zip.NewWriter(buf)
-
-	for _, filename := range slices.Sorted(maps.Keys(files)) {
-		reader := files[filename]
-
+	filenames := slices.Sorted(maps.Keys(files))
+	entryNames := make([]string, len(filenames))
+	seen := make(map[string]string, len(filenames))
+	for i, filename := range filenames {
 		entryName, err := cleanZipEntryName(filename)
 		if err != nil {
-			_ = zipWriter.Close()
-
 			return err
 		}
+		if prev, ok := seen[entryName]; ok {
+			return fmt.Errorf("zip entries %q and %q both resolve to %q", prev, filename, entryName)
+		}
+		seen[entryName] = filename
+		entryNames[i] = entryName
+	}
 
-		fileWriter, err := zipWriter.Create(entryName)
+	out := &zipResponseWriter{c: c, name: name}
+	zipWriter := zip.NewWriter(out)
+
+	for i, filename := range filenames {
+		fileWriter, err := zipWriter.Create(entryNames[i])
 		if err != nil {
-			_ = zipWriter.Close()
-
 			return fmt.Errorf("failed to create zip entry for %s: %w", filename, err)
 		}
-		_, err = io.Copy(fileWriter, reader)
-		if err != nil {
-			_ = zipWriter.Close()
-
+		if _, err := io.Copy(fileWriter, files[filename]); err != nil {
 			return fmt.Errorf("failed to copy data for %s: %w", filename, err)
 		}
 	}
 
+	// Close always writes at least the end-of-central-directory record, so
+	// the headers have gone out by the time it returns.
 	if err := zipWriter.Close(); err != nil {
 		return fmt.Errorf("failed to close zip writer: %w", err)
 	}
-	if !c.commit() {
-		return ErrAlreadyCommitted
+
+	return nil
+}
+
+// zipResponseWriter commits the response and writes the SendZip headers on the
+// first write, so errors raised before any archive bytes are flushed leave the
+// Context uncommitted.
+type zipResponseWriter struct {
+	c       *Context
+	name    string
+	started bool
+}
+
+func (w *zipResponseWriter) Write(p []byte) (int, error) {
+	if !w.started {
+		w.started = true
+		if !w.c.commit() {
+			return 0, ErrAlreadyCommitted
+		}
+
+		w.c.contentType(MIMEOctetStream)
+		w.c.Response.Header().Set(HeaderContentDisposition, `attachment; filename="`+escaper.Replace(w.name)+`"`)
+		w.c.Response.WriteHeader(w.c.code)
 	}
 
-	c.contentType(MIMEOctetStream)
-	c.Response.Header().Set(HeaderContentDisposition, `attachment; filename="`+escaper.Replace(name)+`"`)
-	c.Response.WriteHeader(c.code)
-
-	_, err := io.Copy(c.Response, buf)
-
-	return err
+	return w.c.Response.Write(p)
 }
 
 // cleanZipEntryName validates an archive member name independently from HTTP

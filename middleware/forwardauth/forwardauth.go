@@ -65,13 +65,15 @@ type ForwardAuth struct {
 
 	// AuthResponseHeaders is the list of headers to copy from the auth service
 	// response onto the original request before forwarding to the backend.
-	// For example: ["X-Forwarded-User", "X-Auth-Token"].
+	// For example: ["X-Forwarded-User", "X-Auth-Token"]. Client-sent values of
+	// these headers are always removed, even when the auth response omits them.
 	//
 	// Optional. Default value [].
 	AuthResponseHeaders []string `cfg:"auth_response_headers"`
 
 	// AuthResponseHeadersRegex is a regex pattern to match auth response headers
-	// to copy onto the original request.
+	// to copy onto the original request. Client-sent request headers matching
+	// the pattern are always removed first.
 	//
 	// Optional. Default value "".
 	AuthResponseHeadersRegex string `cfg:"auth_response_headers_regex"`
@@ -314,7 +316,8 @@ func (f *ForwardAuth) Middleware(next http.Handler) http.Handler {
 				f.onError(err, r)
 			}
 
-			http.Error(w, fmt.Sprintf("forwardauth: %v", err), http.StatusBadGateway)
+			// The error may name the auth service; only onError sees it.
+			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		}
 	})
 }
@@ -497,6 +500,28 @@ func (f *ForwardAuth) copyAuthResponseHeaders(origReq *http.Request, authResp *h
 
 	for _, h := range f.DeleteRequestHeaders {
 		origReq.Header.Del(h)
+	}
+
+	// Client-sent values of auth-owned headers are always dropped, even when
+	// the auth response omits them, so a client cannot spoof identity headers.
+	// Standard hop-by-hop headers of the incoming request are left alone.
+	isStandardHop := func(name string) bool {
+		_, ok := hopByHopHeaders[http.CanonicalHeaderKey(name)]
+		return ok
+	}
+
+	for _, h := range f.AuthResponseHeaders {
+		if !isStandardHop(h) {
+			origReq.Header.Del(h)
+		}
+	}
+
+	if f.responseHeadersRegex != nil {
+		for name := range origReq.Header {
+			if f.responseHeadersRegex.MatchString(name) && !isStandardHop(name) {
+				delete(origReq.Header, name)
+			}
+		}
 	}
 
 	for _, h := range f.AuthResponseHeaders {

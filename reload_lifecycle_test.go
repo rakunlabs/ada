@@ -1308,3 +1308,80 @@ func TestRegistrationCompactionUsesGeometricThresholds(t *testing.T) {
 		runtime.KeepAlive(handlers)
 	})
 }
+
+// TestQueuedRegistrationServesPublishedState pins that a route registered
+// while another mutation is constructing serves the currently published
+// middleware, not a bare pass-through. Starting as a pass-through left routes
+// added during a Replace briefly without, say, their auth middleware.
+func TestQueuedRegistrationServesPublishedState(t *testing.T) {
+	t.Run("Slot", func(t *testing.T) {
+		slot := NewSlot(tagMiddleware("A"))
+		existing := slot.Middleware()(&reloadNextHandler{body: "old"})
+		var once sync.Once
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		done := make(chan any, 1)
+		go func() {
+			defer func() { done <- recover() }()
+			slot.Replace(func(next http.Handler) http.Handler {
+				once.Do(func() {
+					close(entered)
+					<-release
+				})
+
+				return tagMiddleware("B")(next)
+			})
+		}()
+		<-entered
+
+		handler := slot.Middleware()(&reloadNextHandler{body: "new"})
+		if got := hit(func(http.Handler) http.Handler { return handler }); got != "Anew" {
+			t.Fatalf("queued registration body = %q, want %q", got, "Anew")
+		}
+
+		close(release)
+		if recovered := <-done; recovered != nil {
+			t.Fatalf("queue owner panicked: %v", recovered)
+		}
+		if got := hit(func(http.Handler) http.Handler { return handler }); got != "Bnew" {
+			t.Fatalf("rebound registration body = %q, want %q", got, "Bnew")
+		}
+		runtime.KeepAlive(existing)
+	})
+
+	t.Run("Pipeline", func(t *testing.T) {
+		pipeline := NewPipeline()
+		pipeline.Set("auth", tagMiddleware("A"))
+		existing := pipeline.Middleware()(&reloadNextHandler{body: "old"})
+		var once sync.Once
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		done := make(chan any, 1)
+		go func() {
+			defer func() { done <- recover() }()
+			pipeline.Set("auth", func(next http.Handler) http.Handler {
+				once.Do(func() {
+					close(entered)
+					<-release
+				})
+
+				return tagMiddleware("B")(next)
+			})
+		}()
+		<-entered
+
+		handler := pipeline.Middleware()(&reloadNextHandler{body: "new"})
+		if got := hit(func(http.Handler) http.Handler { return handler }); got != "Anew" {
+			t.Fatalf("queued registration body = %q, want %q", got, "Anew")
+		}
+
+		close(release)
+		if recovered := <-done; recovered != nil {
+			t.Fatalf("queue owner panicked: %v", recovered)
+		}
+		if got := hit(func(http.Handler) http.Handler { return handler }); got != "Bnew" {
+			t.Fatalf("rebound registration body = %q, want %q", got, "Bnew")
+		}
+		runtime.KeepAlive(existing)
+	})
+}
