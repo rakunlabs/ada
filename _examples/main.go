@@ -13,6 +13,7 @@ import (
 	"github.com/rakunlabs/logi"
 	"github.com/rakunlabs/tell"
 
+	"github.com/rakunlabs/ada/_examples/authkit"
 	"github.com/rakunlabs/ada/_examples/bind"
 	"github.com/rakunlabs/ada/_examples/folder"
 	"github.com/rakunlabs/ada/_examples/grpc"
@@ -38,6 +39,7 @@ var Examples = map[string]func(ctx context.Context) error{
 	"swagger":  swagger.Run,
 	"pipeline": pipeline.Run,
 	"login":    login.Run,
+	"authkit":  authkit.Run,
 }
 
 func run(ctx context.Context) error {

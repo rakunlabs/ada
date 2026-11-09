@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Users</title>
+<link rel="stylesheet" href="admin.css">
+<script src="admin.js" defer></script>
+</head>
+<body>
+<header>
+  <h1>Users</h1>
+  <span class="who" id="who"></span>
+</header>
+<main>
+  <div class="banner error" id="error" hidden></div>
+  <section class="card">
+    <div class="toolbar">
+      <input type="search" id="filter" placeholder="Filter by name, email or role" aria-label="Filter users">
+      <button type="button" class="primary" id="new" data-needs="users:write">New user</button>
+    </div>
+    <table>
+      <thead><tr><th>User</th><th>Roles</th><th>Status</th><th>Created</th><th></th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </section>
+</main>
+
+<dialog id="editor">
+  <form method="dialog" id="form">
+    <h2 id="form-title">New user</h2>
+    <div class="banner error" id="form-error" hidden></div>
+    <label>Username<input name="username" required minlength="2" maxlength="64" autocomplete="off"></label>
+    <label>Name<input name="name" autocomplete="off"></label>
+    <label>Email<input name="email" type="email" autocomplete="off"></label>
+    <label><span id="password-label">Password</span><input name="password" type="password" autocomplete="new-password"></label>
+    <fieldset>
+      <legend>Roles</legend>
+      <div id="roles"></div>
+    </fieldset>
+    <label class="check"><input type="checkbox" name="disabled"> Disabled — the user cannot sign in</label>
+    <div class="actions">
+      <button type="button" class="danger" id="delete" hidden>Delete</button>
+      <span class="spacer"></span>
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" class="primary" id="save">Save</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

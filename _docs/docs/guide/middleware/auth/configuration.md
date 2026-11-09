@@ -99,6 +99,7 @@ With default `Base: "/"`:
 | POST | `/logout` | Revoke session and clear cookie |
 | GET | `/login/status` | Status iframe (for popup flow) |
 | GET | `/.well-known/oauth-protected-resource[/…]` | RFC 9728 metadata, only when `ProtectedResource` is set. Mounted at the origin, not under `Base`, and never behind `Require()` |
+| GET | `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | Only with `WithOAuthServer`. See [Authorization Server](./authorization-server#what-you-get) for the full list (`/oauth/authorize`, `/oauth/token`, `/oauth/register`, `/oauth/revoke`) |
 
 ### Request body limits
 

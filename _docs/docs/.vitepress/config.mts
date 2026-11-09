@@ -125,12 +125,20 @@ export default withMermaid(defineConfig({
             collapsed: true,
             items: [
               {
+                text: "Auth Kit",
+                link: "/guide/middleware/auth/kit.md",
+              },
+              {
                 text: "Strategies",
                 link: "/guide/middleware/auth/strategies.md",
               },
               {
                 text: "Resource Server",
                 link: "/guide/middleware/auth/resource-server.md",
+              },
+              {
+                text: "Authorization Server",
+                link: "/guide/middleware/auth/authorization-server.md",
               },
               {
                 text: "Configuration",

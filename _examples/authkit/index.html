@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reports · Auth Kit example</title>
+<style>
+:root{color-scheme:light dark;--bg:#EDF2F4;--card:#fff;--line:#c9d1d6;--text:#2B2D42;--muted:#8D99AE;--primary:#EF233C;--chip:#e2e8ec}
+@media (prefers-color-scheme:dark){:root{--bg:#252422;--card:#403D39;--line:#554f49;--text:#FFFCF2;--muted:#8a8378;--chip:#554f49}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}
+header{display:flex;align-items:center;gap:12px;max-width:820px;margin:0 auto;padding:24px 20px}
+header h1{font-size:20px;margin:0;flex:1}
+main{max-width:820px;margin:0 auto;padding:0 20px 40px;display:grid;gap:16px}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+h2{font-size:15px;margin:0 0 12px}
+.muted{color:var(--muted)}
+.chip{display:inline-block;padding:1px 8px;margin-right:4px;border-radius:999px;background:var(--chip);font-size:12px}
+ul{list-style:none;margin:0;padding:0}
+li{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--line)}
+li:first-child{border-top:0}
+li span{flex:1}
+form{display:flex;gap:8px;margin-top:12px}
+input{flex:1;padding:7px 10px;border:1px solid var(--muted);border-radius:8px;background:transparent;color:inherit;font:inherit}
+button,a.button{padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;font:inherit;cursor:pointer;text-decoration:none}
+.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+code{font-size:12px;word-break:break-all}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <h1>Reports</h1>
+  <span id="who" class="muted"></span>
+  <a class="button" id="admin" href="/api/admin/users/ui/" hidden>Manage users</a>
+  <button id="logout" hidden>Sign out</button>
+  <a class="button primary" id="login" href="/login/?redirect_path=/" hidden>Sign in</a>
+</header>
+<main>
+  <section id="signed-out" hidden>
+    <h2>Auth Kit example</h2>
+    <p>Sign in to see the reports. On a fresh database the first person to sign up becomes the administrator (unless <code>ADMIN_PASSWORD</code> was set, then sign in as <code>admin</code>).</p>
+    <p class="muted">Roles: <span class="chip">admin</span> everything · <span class="chip">analyst</span> reports:* · <span class="chip">viewer</span> reports:read. New users get <em>viewer</em>; an admin can change that on the users page.</p>
+  </section>
+
+  <section id="reports" hidden>
+    <h2>Reports</h2>
+    <ul id="report-list"></ul>
+    <form id="report-form" data-needs="reports:write">
+      <input name="title" placeholder="New report title" required>
+      <button class="primary">Add</button>
+    </form>
+  </section>
+
+  <section id="tokens" hidden>
+    <h2>Personal access tokens</h2>
+    <p class="muted">Use one with <code>curl -H "Authorization: Bearer …" <span class="origin"></span>/mcp</code>. OAuth clients you approve (Claude, MCP Inspector) show up here too.</p>
+    <ul id="token-list"></ul>
+    <form id="token-form">
+      <input name="name" placeholder="Token name, e.g. laptop" required>
+      <button class="primary">Create</button>
+    </form>
+    <p id="new-token" hidden>Copy it now, it is not shown again:<br><code></code></p>
+  </section>
+
+  <section id="mcp" hidden>
+    <h2>MCP</h2>
+    <p>Connect an MCP client to <code><span class="origin"></span>/mcp</code>, e.g. <code>claude mcp add --transport http reports <span class="origin"></span>/mcp</code>. It registers itself, sends you to this login page and asks for your approval.</p>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let me = null;
+
+  const can = (perm) => (me?.permissions || []).some((p) => p === "*" || p === perm || (p.endsWith("*") && perm.startsWith(p.slice(0, -1))));
+
+  async function call(method, url, body) {
+    const res = await fetch(url, {
+      method, credentials: "same-origin",
+      headers: { Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (res.status === 401) { location.href = "/login/?redirect_path=/"; throw new Error("signed out"); }
+    if (res.status === 204) return null;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || res.statusText);
+    return data;
+  }
+
+  function li(text, extra, onDelete) {
+    const item = document.createElement("li");
+    const span = document.createElement("span");
+    span.textContent = text;
+    item.append(span);
+    if (extra) { const m = document.createElement("small"); m.className = "muted"; m.textContent = extra; item.append(m); }
+    if (onDelete) { const b = document.createElement("button"); b.textContent = "Delete"; b.onclick = onDelete; item.append(b); }
+    return item;
+  }
+
+  async function loadReports() {
+    const list = $("report-list");
+    list.replaceChildren();
+    for (const r of await call("GET", "/api/v1/reports")) {
+      list.append(li(r.title, r.author, can("reports:delete") ? async () => { await call("DELETE", "/api/v1/reports/" + r.id); loadReports(); } : null));
+    }
+  }
+
+  async function loadTokens() {
+    const list = $("token-list");
+    list.replaceChildren();
+    const tokens = await call("GET", "/api/v1/tokens");
+    if (!tokens.length) list.append(li("No tokens yet."));
+    for (const t of tokens) {
+      const kind = t.client_id ? "OAuth client" : "personal";
+      list.append(li(t.name || "(unnamed)", kind, async () => { await call("DELETE", "/api/v1/tokens/" + t.id); loadTokens(); }));
+    }
+  }
+
+  async function start() {
+    document.querySelectorAll(".origin").forEach((n) => (n.textContent = location.origin));
+
+    const res = await fetch("/api/account", { credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!res.ok) {
+      $("login").hidden = false;
+      $("signed-out").hidden = false;
+      return;
+    }
+
+    me = await res.json();
+    $("who").textContent = (me.name || me.username) + " · " + (me.roles || []).join(", ");
+    $("logout").hidden = false;
+    $("admin").hidden = !can("users:read");
+    ["reports", "tokens", "mcp"].forEach((id) => ($(id).hidden = false));
+    document.querySelectorAll("[data-needs]").forEach((n) => (n.hidden = !can(n.dataset.needs)));
+
+    $("logout").onclick = async () => { await fetch("/logout", { method: "POST", credentials: "same-origin" }); location.reload(); };
+
+    $("report-form").onsubmit = async (e) => {
+      e.preventDefault();
+      await call("POST", "/api/v1/reports", { title: e.target.title.value });
+      e.target.reset();
+      loadReports();
+    };
+
+    $("token-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const t = await call("POST", "/api/v1/tokens", { name: e.target.name.value });
+      e.target.reset();
+      $("new-token").hidden = false;
+      $("new-token").querySelector("code").textContent = t.token;
+      loadTokens();
+    };
+
+    await Promise.all([loadReports(), loadTokens()]);
+  }
+
+  start();
+})();
+</script>
+</body>
+</html>

@@ -82,9 +82,10 @@ type Strategy struct {
 	passwordField string
 
 	// register is set by WithRegistrar. Presence enables signup.
-	register       Registrar
-	registerFields []strategy.Field
-	autoLogin      bool
+	register        Registrar
+	registerFields  []strategy.Field
+	autoLogin       bool
+	registerEnabled func() bool
 
 	limiter guard.Limiter
 }
@@ -152,6 +153,19 @@ func WithRegisterFields(fields ...strategy.Field) Option {
 	return func(s *Strategy) { s.registerFields = append([]strategy.Field(nil), fields...) }
 }
 
+// WithRegisterEnabled decides per request whether signup is offered, e.g.
+// only while no user exists. When it returns false the login page shows no
+// signup form and the register endpoint answers 404. The function must be
+// safe for concurrent use.
+func WithRegisterEnabled(fn func() bool) Option {
+	return func(s *Strategy) { s.registerEnabled = fn }
+}
+
+// signupOn reports whether signup is available right now.
+func (s *Strategy) signupOn() bool {
+	return s.register != nil && (s.registerEnabled == nil || s.registerEnabled())
+}
+
 // WithAutoLogin, when true, issues a session immediately after a successful
 // signup and redirects the user into the app. Default false: the UI flips to
 // the login form with an "account created" notice.
@@ -196,7 +210,7 @@ func (s *Strategy) Descriptor() strategy.Descriptor {
 		Hidden:   s.hidden,
 	}
 
-	if s.register != nil {
+	if s.signupOn() {
 		d.Register = &strategy.RegisterInfo{
 			// URL is resolved by the auth middleware from cfg.Base.
 			Fields: append([]strategy.Field(nil), s.effectiveRegisterFields()...),
@@ -341,7 +355,7 @@ func (s *Strategy) Register(w http.ResponseWriter, r *http.Request) (*identity.I
 		return nil, strategy.OutcomeFailed, nil
 	}
 
-	if s.register == nil {
+	if !s.signupOn() {
 		writeError(w, http.StatusNotFound, "signup_disabled", "signup is not enabled for this strategy")
 
 		return nil, strategy.OutcomeFailed, nil

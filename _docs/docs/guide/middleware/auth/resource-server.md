@@ -26,7 +26,7 @@ sequenceDiagram
     A-->>C: 200
 ```
 
-ada plays the **resource server** role. The authorization server stays external — Keycloak, turna, Auth0 — and owns client registration, consent and token issuance.
+On this page ada is the **resource server**: tokens come from an external authorization server (Keycloak, turna, Auth0), which owns client registration, consent and token issuance. To issue the tokens from your own application instead, see [Authorization Server](./authorization-server).
 
 ## Wiring
 
@@ -123,6 +123,8 @@ mcp.Use(
 | `Resource` | `string` | derived | Resource identifier, e.g. `https://api.example.com/mcp`. **Pin it in production** |
 | `ResourcePath` | `string` | `""` | Path of a derived identifier, e.g. `/mcp`. Ignored when `Resource` is set |
 | `AuthorizationServers` | `[]string` | — | Issuer identifiers whose tokens are accepted. Required unless `JWKSURI` is set |
+| `AuthorizationServersFunc` | `func(*http.Request) []string` | — | Per-request issuer list. Set automatically by `WithOAuthServer` when `AuthorizationServers` is empty |
+| `Subresources` | `bool` | `false` | Treat every path below the resource as its own resource (`/mcp/shop` → `https://host/mcp/shop`), for tokens limited to one sub-endpoint |
 | `JWKSURI` | `string` | `""` | The resource's own key set, for deployments with no authorization server in the loop |
 | `ScopesSupported` | `[]string` | `nil` | Scopes a client may usefully request |
 | `ResourceName` | `string` | `""` | Human-readable name shown during consent |
@@ -181,12 +183,15 @@ bearer.New(cfg, bearer.Options{
 })
 ```
 
-## What ada does not do
+## Issuing tokens yourself
 
-ada is a resource server, not an authorization server. It does **not** implement:
+You don't need an external authorization server. [`oauthserver`](./authorization-server) implements RFC 8414 metadata, dynamic client registration (RFC 7591), `/authorize` with consent, `/token` with PKCE and refresh rotation, and revocation (RFC 7009). With `authMW.WithOAuthServer(srv)`, the `ProtectedResource` above advertises it automatically:
 
-- `/.well-known/oauth-authorization-server` (RFC 8414) as a publisher
-- Dynamic Client Registration (RFC 7591) — the `POST /register` endpoint an MCP client uses to enroll itself
-- `/authorize`, `/token`, consent UI, or token introspection as a server
+```go
+authMW := auth.New(auth.Config{
+    ProtectedResource: &resource.Config{Resource: mcpResource}, // no AuthorizationServers
+})
+authMW.WithOAuthServer(oauth)
+```
 
-Those belong to the authorization server you point `AuthorizationServers` at. [turna](https://github.com/rakunlabs/turna) implements all of them if you need one in the same stack.
+Both setups can run side by side. Register a `bearer` strategy for an external IdP together with `WithOAuthServer`. The server's own tokens are recognized by their prefix and checked first.

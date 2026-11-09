@@ -334,3 +334,55 @@ func TestPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestSubresources(t *testing.T) {
+	s := mustNew(t, Config{
+		Resource:                 "https://api.example.com/mcp",
+		AuthorizationServersFunc: func(*http.Request) []string { return []string{"https://api.example.com"} },
+		Subresources:             true,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/shop", nil)
+	if got := s.ResourceID(req); got != "https://api.example.com/mcp/shop" {
+		t.Fatalf("ResourceID = %q", got)
+	}
+	if got := s.MetadataURL(req); got != "https://api.example.com/.well-known/oauth-protected-resource/mcp/shop" {
+		t.Fatalf("MetadataURL = %q", got)
+	}
+
+	for path, want := range map[string]string{
+		WellKnownPath + "/mcp":      "https://api.example.com/mcp",
+		WellKnownPath + "/mcp/shop": "https://api.example.com/mcp/shop",
+	} {
+		rec := httptest.NewRecorder()
+		s.Handler()(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		var doc Metadata
+		if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if doc.Resource != want || len(doc.AuthorizationServers) != 1 {
+			t.Fatalf("%s: %+v", path, doc)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	s.Handler()(rec, httptest.NewRequest(http.MethodGet, WellKnownPath+"/other", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unrelated suffix: %d", rec.Code)
+	}
+}
+
+func TestSubresourcesOffKeepsSingleResource(t *testing.T) {
+	s := mustNew(t, Config{Resource: "https://api.example.com/mcp", AuthorizationServers: []string{"https://idp.example.com"}})
+
+	if got := s.ResourceID(httptest.NewRequest(http.MethodPost, "/mcp/shop", nil)); got != "https://api.example.com/mcp" {
+		t.Fatalf("ResourceID = %q", got)
+	}
+
+	rec := httptest.NewRecorder()
+	s.Handler()(rec, httptest.NewRequest(http.MethodGet, WellKnownPath+"/mcp/shop", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("subresource without Subresources: %d", rec.Code)
+	}
+}

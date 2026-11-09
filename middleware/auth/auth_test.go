@@ -961,3 +961,22 @@ func TestLoginResponseDropsUnsafeRedirectPath(t *testing.T) {
 		t.Fatalf("response echoes an off-site redirect: %s", rec.Body)
 	}
 }
+
+// The /login → /login/ redirect must keep redirect_path, or a user sent to
+// sign in lands on the home page instead of where they were going.
+func TestLoginRedirectKeepsQuery(t *testing.T) {
+	a := auth.New(auth.Config{})
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newFakeMux()
+	a.Mount(mux)
+
+	rec := httptest.NewRecorder()
+	mux.mu.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/login?redirect_path=%2Foauth%2Fauthorize%3Fa%3Db", nil))
+
+	if got := rec.Header().Get("Location"); got != "/login/?redirect_path=%2Foauth%2Fauthorize%3Fa%3Db" {
+		t.Fatalf("Location = %q", got)
+	}
+}

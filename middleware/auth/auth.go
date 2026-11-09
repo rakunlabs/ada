@@ -21,6 +21,7 @@ import (
 	"github.com/rakunlabs/ada/middleware/auth/identity"
 	"github.com/rakunlabs/ada/middleware/auth/issuer"
 	"github.com/rakunlabs/ada/middleware/auth/issuer/backend"
+	"github.com/rakunlabs/ada/middleware/auth/oauthserver"
 	"github.com/rakunlabs/ada/middleware/auth/resource"
 	"github.com/rakunlabs/ada/middleware/auth/session"
 	"github.com/rakunlabs/ada/middleware/auth/sessionstore"
@@ -175,6 +176,8 @@ type Auth struct {
 	ui        *uiHandler
 	status    *statusHandler
 	protected *resource.Server
+	oauth     *oauthserver.Server
+	oauthAuth *oauthserver.TokenStrategy
 
 	// backend is the storage the default issuer was built on, kept so the
 	// short-lived pending-login issuer can share it.
@@ -327,6 +330,39 @@ func (a *Auth) WithProtectedResource(rs *resource.Server) *Auth {
 	return a
 }
 
+// WithOAuthServer makes this deployment its own OAuth 2.1 authorization
+// server, so MCP clients and CLIs can register, sign the user in and get a
+// token without any external identity provider.
+//
+// It wires the pieces together:
+//
+//   - the authorize endpoint is guarded by Require, so users sign in with
+//     the strategies already registered (local, OIDC, passkey, …)
+//   - the server's access tokens are accepted by Require on every
+//     protected route, ahead of other request strategies
+//   - Config.ProtectedResource without AuthorizationServers points at this
+//     server
+//   - Mount registers the OAuth endpoints and discovery documents
+func (a *Auth) WithOAuthServer(srv *oauthserver.Server) *Auth {
+	if srv == nil {
+		if a.deferred == nil {
+			a.deferred = fmt.Errorf("auth: nil oauth server")
+		}
+
+		return a
+	}
+
+	a.oauth = srv
+	a.oauthAuth = srv.Strategy()
+	a.Strategy(a.oauthAuth)
+
+	return a
+}
+
+// OAuthServer returns the authorization server set with WithOAuthServer, or
+// nil.
+func (a *Auth) OAuthServer() *oauthserver.Server { return a.oauth }
+
 // WithBackend overrides the default issuer backend. Ignored if WithIssuer is
 // used. Must be called before Init.
 func (a *Auth) WithBackend(b issuer.Backend) *Auth {
@@ -383,7 +419,12 @@ func (a *Auth) Init(_ context.Context) error {
 	}
 
 	if a.protected == nil && a.cfg.ProtectedResource != nil {
-		rs, err := resource.New(*a.cfg.ProtectedResource)
+		cfg := *a.cfg.ProtectedResource
+		if a.oauth != nil && len(cfg.AuthorizationServers) == 0 && cfg.AuthorizationServersFunc == nil {
+			cfg.AuthorizationServersFunc = a.oauth.AuthorizationServers
+		}
+
+		rs, err := resource.New(cfg)
 		if err != nil {
 			return fmt.Errorf("auth: protected resource: %w", err)
 		}
@@ -466,6 +507,12 @@ func (a *Auth) Init(_ context.Context) error {
 	}
 	a.status = st
 
+	if a.oauth != nil {
+		// Signing in for the consent page is an ordinary interactive login:
+		// the browser is redirected to the login UI and comes back.
+		a.oauth.SetAuthenticate(a.session.Require())
+	}
+
 	return nil
 }
 
@@ -511,7 +558,7 @@ func (a *Auth) Require() func(http.Handler) http.Handler {
 		sessionNext := sessionMW(next)
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id, err := a.registry.AuthenticateRequest(r.Context(), r)
+			id, err := a.authenticateRequest(r)
 
 			switch {
 			case errors.Is(err, strategy.ErrNoCredentials):
@@ -526,6 +573,21 @@ func (a *Auth) Require() func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+// authenticateRequest resolves request credentials. Tokens of the built-in
+// authorization server go first: they carry a prefix nothing else claims,
+// while an API-key or JWT strategy registered earlier would otherwise reject
+// them as its own invalid credential.
+func (a *Auth) authenticateRequest(r *http.Request) (*identity.Identity, error) {
+	if a.oauthAuth != nil {
+		id, err := a.oauthAuth.AuthenticateRequest(r.Context(), r)
+		if !errors.Is(err, strategy.ErrNoCredentials) {
+			return id, err
+		}
+	}
+
+	return a.registry.AuthenticateRequest(r.Context(), r)
 }
 
 // writeUnauthorized rejects a request that presented bad credentials.
@@ -577,6 +639,10 @@ func (a *Auth) Mount(mux Mux) {
 		}
 	}
 
+	if a.oauth != nil {
+		a.oauth.Mount(mux)
+	}
+
 	mux.HandleWithMethod(http.MethodGet, p.Info, a.handleInfo)
 	mux.HandleWithMethod(http.MethodGet, p.Me, a.handleMe)
 	mux.HandleWithMethod(http.MethodGet, p.Login, a.handleLogin)
@@ -594,8 +660,16 @@ func (a *Auth) Mount(mux Mux) {
 	}
 
 	mux.HandleWithMethod("", strings.TrimSuffix(p.Root, "/")+"/login", func(w http.ResponseWriter, r *http.Request) {
-		// redirect to the same path with trailing slash, so the folder handler can serve the index.html for /login.
-		http.Redirect(w, r, p.UI+"/", http.StatusFound)
+		// Redirect to the same path with a trailing slash so the folder
+		// handler serves index.html. The query must survive: it carries
+		// redirect_path, and dropping it strands the user on the home page
+		// instead of the OAuth consent page or wherever they were going.
+		target := p.UI + "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+
+		http.Redirect(w, r, target, http.StatusFound)
 	})
 	mux.HandleWithMethod("", strings.TrimSuffix(p.Root, "/")+"/login/*", a.handleUI)
 }

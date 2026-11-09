@@ -1,5 +1,9 @@
 # Identity & Access
 
+::: tip Local users and permissions
+The [Auth Kit](./kit) reference app shows how to add stored accounts, roles defined in config, and permissions (`reports:read`, `reports:*`) on top of the guards described here.
+:::
+
 Once a strategy has authenticated a request, these pieces decide what the caller is, what it may do, and how hard it is to guess a password.
 
 ## Identity

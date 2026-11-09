@@ -1,6 +1,10 @@
 # Auth
 
-Auth middleware provides a pluggable authentication system with session management, a built-in login UI, and support for multiple authentication strategies (local credentials, OAuth2/OIDC, custom).
+Auth middleware provides a pluggable authentication system with session management, a built-in login UI, and support for multiple authentication strategies (local credentials, OAuth2/OIDC, custom). It can also act as an OAuth 2.1 authorization server so MCP clients and CLIs can sign in to your application on their own.
+
+::: tip Adding auth to a new application?
+Follow the [Auth Kit](./kit). It is a reference application (`_examples/authkit`) with the login page, local users with roles and permissions, user management, OAuth for MCP clients, personal tokens and a SQL store. You copy the users, store and wiring code into your app and adapt it. To ask an agent for it, say "add ada Auth Kit" (the `rakunlabs-go` skill has the procedure).
+:::
 
 ## Import
 
@@ -90,8 +94,10 @@ app.GET("/dashboard", func(w http.ResponseWriter, r *http.Request) {
 
 | Page | What it covers |
 |---|---|
+| [Auth Kit](./kit) | The complete stack as a reference app to copy: login page, users, roles and permissions, user admin, OAuth/MCP, tokens, SSO |
 | [Strategies](./strategies) | Local, OAuth2/OIDC, API key, bearer, LDAP, magic link, basic, header, mTLS, passkey |
-| [Resource Server](./resource-server) | Accepting OAuth access tokens from MCP and CLI clients |
+| [Resource Server](./resource-server) | Accepting OAuth access tokens issued by an external IdP |
+| [Authorization Server](./authorization-server) | Being the OAuth 2.1 server yourself: DCR, consent, PKCE, refresh, well-known, MCP |
 | [Configuration](./configuration) | `auth.Config`, OAuth2 config, ID token verification, mounted routes |
 | [Identity & Access](./access) | Identity, authorization rules, MFA, lockout, password hashing |
 | [Sessions](./sessions) | Issuer, token lifetimes, persistent session stores |

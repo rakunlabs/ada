@@ -82,9 +82,29 @@ type Config struct {
 	// /.well-known/oauth-authorization-server itself.
 	AuthorizationServers []string `cfg:"authorization_servers"`
 
+	// AuthorizationServersFunc computes the issuer list per request. It is
+	// for an authorization server running in the same process whose issuer
+	// follows the request origin; auth.WithOAuthServer sets it when
+	// AuthorizationServers is empty. A static list wins when both are set.
+	AuthorizationServersFunc func(r *http.Request) []string `cfg:"-" json:"-"`
+
+	// Subresources makes every path below the resource path a resource of
+	// its own: with ResourcePath "/mcp", a request to /mcp/shop is
+	// challenged with the metadata of https://host/mcp/shop, and that
+	// document is served. Use it when a token may be limited to one
+	// sub-endpoint (RFC 8707 resource indicators). The resource path must
+	// be the path the mux sees.
+	Subresources bool `cfg:"subresources"`
+
 	// JWKSURI advertises the resource's own key set. An alternative to
 	// AuthorizationServers, not a supplement to it in most deployments.
 	JWKSURI string `cfg:"jwks_uri"`
+
+	// StrippedPrefix is the path a reverse proxy removes before requests
+	// reach this process, e.g. "/myapp" when https://h/myapp/mcp arrives as
+	// /mcp. It lets Covers and Subresources match a pinned Resource whose
+	// path includes the prefix against the paths the mux actually sees.
+	StrippedPrefix string `cfg:"stripped_prefix"`
 
 	// ScopesSupported advertises requestable scopes.
 	ScopesSupported []string `cfg:"scopes_supported"`
@@ -160,7 +180,7 @@ func New(cfg Config) (*Server, error) {
 	// A document with neither an authorization server nor a key set tells a
 	// client "you need a token" and then refuses to say where to get one.
 	// That is a 401 loop, not discovery.
-	if len(cfg.AuthorizationServers) == 0 && cfg.JWKSURI == "" {
+	if len(cfg.AuthorizationServers) == 0 && cfg.AuthorizationServersFunc == nil && cfg.JWKSURI == "" {
 		return nil, fmt.Errorf("resource: authorization_servers or jwks_uri is required")
 	}
 
@@ -210,10 +230,35 @@ func (s *Server) Paths() []string {
 	return []string{WellKnownPath, WellKnownPath + "/*"}
 }
 
-// ResourceID returns the resource identifier for the request.
+// ResourceID returns the resource identifier for the request. With
+// Subresources it is the identifier of the sub-endpoint the request is for.
 func (s *Server) ResourceID(r *http.Request) string {
+	return s.resourceFor(r, s.subpath(r.URL.Path))
+}
+
+// Covers reports whether r is a request for the protected resource: its
+// path is the resource path or below it. Use it to keep a token issued for
+// the resource from being accepted on unrelated routes.
+//
+// The resource path is compared with the path the mux sees. Behind a proxy
+// that strips a prefix, pin Resource to the public URL and keep its path
+// equal to the mux path plus that prefix; ResourcePathPrefix tells the
+// server what was stripped.
+func (s *Server) Covers(r *http.Request) bool {
+	base := strings.TrimPrefix(s.path, s.cfg.StrippedPrefix)
+	if base == "" {
+		return true
+	}
+
+	p := r.URL.Path
+
+	return p == base || strings.HasPrefix(p, base+"/")
+}
+
+// resourceFor returns the identifier of the resource at s.path+sub.
+func (s *Server) resourceFor(r *http.Request, sub string) string {
 	if s.resource != "" {
-		return s.resource
+		return s.resource + sub
 	}
 
 	origin, err := s.origin(r)
@@ -221,7 +266,28 @@ func (s *Server) ResourceID(r *http.Request) string {
 		return ""
 	}
 
-	return origin + s.path
+	return origin + s.path + sub
+}
+
+// subpath returns the part of path below the resource path when
+// Subresources is on, or "".
+func (s *Server) subpath(path string) string {
+	if !s.cfg.Subresources {
+		return ""
+	}
+
+	return subBelow(path, strings.TrimPrefix(s.path, s.cfg.StrippedPrefix))
+}
+
+// subBelow returns the part of path below base, or "".
+func subBelow(path, base string) string {
+	sub, ok := strings.CutPrefix(path, base+"/")
+	sub = strings.Trim(sub, "/")
+	if !ok || sub == "" || strings.Contains(sub, "..") {
+		return ""
+	}
+
+	return "/" + sub
 }
 
 // MetadataURL returns the absolute URL of the metadata document, applying the
@@ -234,14 +300,23 @@ func (s *Server) MetadataURL(r *http.Request) string {
 		return ""
 	}
 
-	return origin + WellKnownPath + s.path
+	return origin + WellKnownPath + s.path + s.subpath(r.URL.Path)
 }
 
 // Metadata returns the document for the request.
 func (s *Server) Metadata(r *http.Request) Metadata {
+	return s.metadata(r, s.subpath(r.URL.Path))
+}
+
+func (s *Server) metadata(r *http.Request, sub string) Metadata {
+	servers := s.authServ
+	if len(servers) == 0 && s.cfg.AuthorizationServersFunc != nil {
+		servers = s.cfg.AuthorizationServersFunc(r)
+	}
+
 	return Metadata{
-		Resource:                              s.ResourceID(r),
-		AuthorizationServers:                  s.authServ,
+		Resource:                              s.resourceFor(r, sub),
+		AuthorizationServers:                  servers,
 		JWKSURI:                               s.cfg.JWKSURI,
 		ScopesSupported:                       s.scopes,
 		BearerMethodsSupported:                []string{"header"},
@@ -259,13 +334,22 @@ func (s *Server) Metadata(r *http.Request) Metadata {
 func (s *Server) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		suffix := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, WellKnownPath), "/")
-		if suffix != s.path {
-			http.NotFound(w, r)
 
-			return
+		sub := ""
+		if suffix != s.path {
+			// The well-known suffix carries the public path, prefix
+			// included, so it is matched against s.path as is.
+			if s.cfg.Subresources {
+				sub = subBelow(suffix, s.path)
+			}
+			if sub == "" {
+				http.NotFound(w, r)
+
+				return
+			}
 		}
 
-		doc := s.Metadata(r)
+		doc := s.metadata(r, sub)
 		if doc.Resource == "" {
 			// The origin could not be derived — a Host header the proxy
 			// policy rejects. Serving a document with an empty resource
